@@ -1,0 +1,33 @@
+# Development tools and tasks. Run `bin/mise install` to set up, and
+# `bin/mise run check` before pushing. bin/mise downloads a pinned mise
+# on first use, so contributors don't need to install it.
+
+[settings]
+# Read the Rust version from rust-toolchain.toml, so it is pinned in one place.
+idiomatic_version_file_enable_tools = ["rust"]
+
+[tools]
+"aqua:EmbarkStudios/cargo-deny" = "0.21.0"
+
+[tasks.build]
+description = "Build every crate"
+run = "cargo build --workspace --all-targets"
+
+[tasks.test]
+description = "Run every crate's tests"
+run = "cargo test --workspace"
+
+[tasks.lint]
+description = "Check formatting and run Clippy with warnings as errors"
+run = [
+    "cargo fmt --all --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+]
+
+[tasks.deny]
+description = "Check dependency licences, sources and bans (ADR 0011)"
+run = "cargo deny check"
+
+[tasks.check]
+description = "Everything CI runs: lint, test and dependency checks"
+depends = ["lint", "test", "deny"]
