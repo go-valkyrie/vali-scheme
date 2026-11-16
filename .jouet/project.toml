@@ -1,0 +1,8 @@
+[checks]
+full = "jouet test"                          # runs the mise `test` task: cargo test --workspace
+lint = "bin/mise run lint"                   # cargo fmt --check, then clippy -D warnings
+
+[checks.focused]
+unit = "jouet test --affected"               # changed crates and the crates that depend on them
+one = "jouet test --cmd -- cargo test -p NAME"
+docs = "jouet test --cmd -- bin/mise run docs"  # rustdoc with -D warnings

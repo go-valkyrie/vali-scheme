@@ -8,6 +8,7 @@ idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
 "aqua:EmbarkStudios/cargo-deny" = "0.21.0"
+jouet = { version = "latest", workflow = "release.yml@refs/heads/main" }
 
 [tasks.build]
 description = "Build every crate"
