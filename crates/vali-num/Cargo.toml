@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dashu-int = "0.6.2"
+dashu-ratio = "0.6.1"
+libm = "0.2.16"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+libm = "0.2.16"

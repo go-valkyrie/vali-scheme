@@ -24,10 +24,15 @@ run = [
     "cargo clippy --workspace --all-targets -- -D warnings",
 ]
 
+[tasks.docs]
+description = "Build the documentation, with broken links as errors"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --no-deps --workspace"
+
 [tasks.deny]
 description = "Check dependency licences, sources and bans (ADR 0011)"
 run = "cargo deny check"
 
 [tasks.check]
-description = "Everything CI runs: lint, test and dependency checks"
-depends = ["lint", "test", "deny"]
+description = "Everything CI runs: lint, test, documentation and dependency checks"
+depends = ["lint", "test", "docs", "deny"]
