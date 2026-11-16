@@ -26,3 +26,4 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0008](0008-threading-model.md) | Threading model | Proposed |
 | [0009](0009-loaders-and-capabilities.md) | Loaders and capabilities | Accepted |
 | [0010](0010-declarative-contracts.md) | Declarative contracts | Accepted |
+| [0011](0011-licence-and-contribution-policy.md) | Licence and contribution policy | Accepted |
