@@ -443,6 +443,7 @@ dependencies = [
  "unicode-general-category",
  "unicode-normalization",
  "vali-num",
+ "vali-syntax",
 ]
 
 [[package]]

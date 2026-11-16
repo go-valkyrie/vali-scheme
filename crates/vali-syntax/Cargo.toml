@@ -16,5 +16,12 @@ unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.26"
 vali-num.workspace = true
 
+[features]
+# The reference syntax type of ADR 0015, for tests only.
+reference = []
+
+[dev-dependencies]
+vali-syntax = { path = ".", features = ["reference"] }
+
 [lints]
 workspace = true
