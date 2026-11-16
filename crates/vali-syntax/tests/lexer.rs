@@ -153,6 +153,21 @@ fn booleans_characters_and_strings() {
 }
 
 #[test]
+fn labels_end_at_their_equals_sign() {
+    assert_eq!(
+        tokens("#0=x #12=y #3#"),
+        [
+            (LabelDef, "#0="),
+            (Identifier, "x"),
+            (LabelDef, "#12="),
+            (Identifier, "y"),
+            (LabelRef, "#3#"),
+        ]
+    );
+    error("#12", LexErrorKind::UnknownHashSyntax);
+}
+
+#[test]
 fn labels_and_dots() {
     assert_eq!(
         tokens("#0=(a . #0#)"),

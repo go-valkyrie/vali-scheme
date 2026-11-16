@@ -174,6 +174,7 @@ fn classify(raw: Raw, text: &str) -> Result<SyntaxKind, LexErrorKind> {
         Raw::PipedIdentifier => SyntaxKind::Identifier,
         Raw::Character => SyntaxKind::Character,
         Raw::HashAtom => classify_hash_atom(text)?,
+        Raw::HashDigits => return Err(LexErrorKind::UnknownHashSyntax),
         Raw::Atom => classify_atom(text)?,
     })
 }

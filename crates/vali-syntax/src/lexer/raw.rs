@@ -67,9 +67,13 @@ pub(super) enum Raw {
     #[regex(r#"#\\(.|\n)[^\s()\[\]";|]*"#, allow_greedy = true)]
     Character,
 
-    /// An atom starting with `#`: a boolean or a number with a prefix.
-    #[regex(r#"#[^\s()\[\]";|'`,\\!#][^\s()\[\]";|]*"#, allow_greedy = true)]
+    /// An atom starting with `#`: a boolean or a number with a prefix. It
+    /// never starts with a digit, so `#0=x` is a label and then `x`.
+    #[regex(r#"#[^\s()\[\]";|'`,\\!#0-9][^\s()\[\]";|]*"#, allow_greedy = true)]
     HashAtom,
+    /// `#` and digits that are neither a label definition nor a reference.
+    #[regex(r"#[0-9]+")]
+    HashDigits,
     /// Any other atom: a number, an identifier or `.`.
     #[regex(r#"[^\s()\[\]";|'`,#][^\s()\[\]";|]*"#, allow_greedy = true)]
     Atom,
