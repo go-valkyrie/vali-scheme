@@ -21,3 +21,4 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0003](0003-memory-management.md) | Memory management | Proposed |
 | [0004](0004-frames-and-continuations.md) | Frames and continuations | Accepted |
 | [0005](0005-bytecode-format.md) | Bytecode format | Accepted |
+| [0006](0006-relocatable-code-and-abi-versioning.md) | Relocatable code and ABI versioning | Accepted |
