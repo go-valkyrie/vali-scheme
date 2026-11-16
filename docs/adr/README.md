@@ -17,3 +17,4 @@ Each record states one decision about Vali's design: the context that forced it,
 | ADR | Decision | Status |
 |---|---|---|
 | [0001](0001-phasing-and-artifact-sections.md) | Phasing and artifact sections | Accepted |
+| [0002](0002-value-representation.md) | Value representation | Accepted |
