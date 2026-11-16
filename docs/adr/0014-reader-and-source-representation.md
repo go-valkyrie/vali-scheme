@@ -4,7 +4,7 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
 - **Amended:** 2026-11-16, lexer details: fold-case moves to the datum sink; strict atoms; Unicode identifiers by R6RS's categories with NFC; directives; shebang lines
-- **Related:** 0001 (determinism, stable scope identities), 0005 (source spans per instruction), 0007 (syntax in scope), 0009 (source identities)
+- **Related:** 0001 (determinism, stable scope identities), 0005 (source spans per instruction), 0007 (syntax in scope), 0009 (source identities), 0015 (scopes and syntax objects)
 
 ## Context
 

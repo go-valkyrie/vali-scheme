@@ -4,7 +4,8 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
-- **Related:** 0003 (memory-management strategies), 0006 (code generator), 0009 (capabilities), 0010 (static dispatch), 0012 (distribution format)
+- **Amended:** 2026-11-16, which libraries `eval` keeps, what it brings in, and how its cost is contained (items 11 to 14)
+- **Related:** 0003 (memory-management strategies), 0006 (code generator), 0009 (capabilities), 0010 (static dispatch), 0012 (distribution format), 0015 (run-time syntax objects)
 
 ## Context
 
@@ -24,17 +25,31 @@ A standalone build has needs that the embedded case doesn't:
 4. **Macros run in the tool's own runtime.** Strategies never change what a program means (ADR 0003), and distribution artifacts don't depend on the strategy, so the expanded program is the same whichever runtime ran the macros.
 5. **The shared code generator (ADR 0006) writes platform object files** for the target, with the target strategy's barriers, count operations and allocation fast paths inlined.
 6. **The toolchain ships the runtime as a static archive for each strategy and target,** such as `libvali_rt-rc.a` or `libvali_rt-cms.a`. `vali build` links the program's object files with the archive for its target. Each archive is the runtime instantiated for one strategy (ADR 0003), so every hook is inlined. The archives for the host target ship with the toolchain; others are fetched when first needed.
-7. **The executable carries only what the program can use.** The expander, compiler and VM are linked in only if the program can compile code at run time: through `eval`, `environment`, `load`, or loading libraries dynamically. Otherwise the binary holds native code and the runtime alone.
+7. **The executable carries only what the program can use.** The expander, compiler and VM are linked in only if the program can compile code at run time: through `eval`, `environment`, `load`, or loading libraries dynamically. Otherwise the binary holds native code and the runtime alone. Items 11 to 14 say what such a binary carries.
 8. **Native code must cover the whole program.** If any reachable code cannot be compiled to native code for the target, the build fails with an error naming it. The exception is a binary that carries the VM; there, the code may run as bytecode, with a warning at build time.
 9. **Whole-program optimisation is allowed.** Every library in the binary is fixed at build time, so the build may inline across library boundaries without the consent rule of ADR 0012 (which protects libraries distributed separately). It may also seal generic functions and dispatch statically wherever contracts allow (ADR 0010).
 10. **Start-up runs each library's body as native code,** in dependency order. There is no artifact cache and nothing to validate.
+
+### `eval` in a standalone executable
+
+11. **The build keeps the libraries `eval` can reach, and only those.** Evaluated code is expanded and compiled at run time, so the binary must hold every library that code can import. The build decides which ones:
+    - **From the program, when it can.** If every environment passed to `eval` or `load` is built from constant library names, as in `(eval form (environment '(scheme base) '(my lib)))`, those libraries and their dependencies are kept.
+    - **From the build configuration otherwise.** Environments the build cannot work out, such as `(interaction-environment)` or an environment computed at run time, must be declared in the build configuration, with the libraries they may contain.
+    - **Otherwise the build fails** with an error naming the call it could not resolve and saying how to declare its environment.
+12. **What `eval` brings in.** A binary that can evaluate code also carries:
+    - the expander, the compiler as far as the distribution format, conversion to run-format bytecode and the tier-0 VM. The VM also runs macro transformers during expansion;
+    - the interface and visit sections of every library kept by item 11, since expanding code that uses them needs their exports and their compiled macros;
+    - the scopes and binding data that run-time syntax objects need (ADR 0015 #10).
+13. **Evaluated code runs on tier 0.** The program's own code is already native, and evaluated code is usually small and short-lived, so Cranelift is not linked unless the build asks for JIT compilation of evaluated code. A build option also lets evaluated code skip the optimisation passes, going straight from expanded code to the distribution format, which makes both the binary and each `eval` cheaper.
+14. **The size is visible.** Build output says why the front end was included and lists the calls that caused it. CI builds the same program with and without `eval` and tracks both sizes, so the cost is measured rather than guessed.
 
 ## Consequences
 
 - A Scheme program can ship as one binary, built from a toolchain that needs no Rust or C compiler, only a linker.
 - The toolchain grows with each strategy and target it supports. That is why only the host target's archives ship by default.
 - Every strategy kept long-term must have its archives built and tested for every supported target.
-- Programs that use `eval` produce much larger binaries, because they carry the whole front end. Build output should say why the front end was included.
+- Programs that use `eval` produce much larger binaries, because they carry the front end and the expansion-time sections of every library `eval` can reach. Programs that don't use it pay nothing. Go and Rust have no `eval` at all, and GraalVM's native-image charges similarly for reflection.
+- A program whose `eval` environments the build cannot work out needs them declared before it builds. That is deliberate: guessing would either bloat every such binary or fail at run time.
 - A bug that appears only under one strategy shows up only in executables built for it. The test suite must run the same programs as executables under each strategy, not only inside the `vali` tool.
 
 ## Alternatives considered
