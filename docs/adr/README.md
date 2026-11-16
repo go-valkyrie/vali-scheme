@@ -28,3 +28,4 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0010](0010-declarative-contracts.md) | Declarative contracts | Accepted |
 | [0011](0011-licence-and-contribution-policy.md) | Licence and contribution policy | Accepted |
 | [0012](0012-distributing-compiled-libraries.md) | Distributing compiled libraries | Accepted |
+| [0013](0013-standalone-executables.md) | Standalone executables | Accepted |
