@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
+- **Amended:** 2026-11-16, lexer details: fold-case moves to the datum sink; strict atoms; Unicode identifiers by R6RS's categories with NFC; directives; shebang lines
 - **Related:** 0001 (determinism, stable scope identities), 0005 (source spans per instruction), 0007 (syntax in scope), 0009 (source identities)
 
 ## Context
@@ -26,13 +27,16 @@ Scheme's syntax has a few features that a plain table of token patterns cannot h
 1. **One lexer, built with Logos.**
    - Tokens include trivia: whitespace and comments.
    - Nested block comments are lexed by a callback that counts nesting.
-   - `#!fold-case` and `#!no-fold-case` switch the lexer into and out of a case-folding mode.
-   - Numeric tokens are recognised by the shape of R7RS's numeric syntax. Their values are parsed by `vali-num`, which owns that grammar in full, including correctly rounded decimals.
+   - The lexer has no modes. `#!fold-case` and `#!no-fold-case` are `Directive` tokens; folding changes only what identifiers and character names mean, never where tokens start or end, so the datum sink applies it. The lossless tree is the same either way.
+   - The recognised directives are `#!fold-case`, `#!no-fold-case` and `#!r6rs`, which is accepted and has no effect. Any other directive is an error.
+   - A first line starting `#!/` or `#! ` is a shebang line, read as a comment, so scripts can be run directly.
+   - An atom, a run of characters between delimiters, is a number if `vali-num` parses it, which owns R7RS's numeric grammar in full, including correctly rounded decimals. Otherwise it is an identifier if it follows R7RS's identifier grammar, and otherwise an error. Atoms such as `1+` or `12px` are errors, as R7RS requires, though many Schemes read them as symbols; `|1+|` writes that symbol. Accepting them later would break nothing, while rejecting them later would.
+   - Identifiers may contain non-ASCII characters by R6RS's rule. They may start with characters in the Unicode general categories `Lu`, `Ll`, `Lt`, `Lm`, `Lo`, `Mn`, `Nl`, `No`, `Pd`, `Pc`, `Po`, `Sc`, `Sm`, `Sk`, `So` and `Co`, and continue with those plus `Nd`, `Mc` and `Me`. That keeps `λ`, `→` and `≤`, and excludes whitespace, control characters, invisible format characters (including the bidirectional controls used in "Trojan Source" attacks) and unassigned code points. Look-alike characters are left to tooling's warnings.
 2. **One parser, which emits events and builds no tree.** Datum comments and datum labels are handled here, as structure.
 3. **Parsing never stops at the first error.** On malformed input, such as unbalanced parentheses or an invalid token, the parser emits an error event and recovers, so a tool always gets a complete tree. Each error becomes a diagnostic with a span.
 4. **Two sinks consume the events:**
    - The **Rowan sink** builds a lossless syntax tree that keeps every byte of the source. Tools use it.
-   - The **datum sink** builds datums through a builder trait. One builder makes a plain tree, for tests and tools that want datums. The runtime supplies another that builds heap values and syntax objects directly. Running code never builds Rowan nodes. The datum sink reports every error, and produces nothing for a top-level form that contains one.
+   - The **datum sink** builds datums through a builder trait. One builder makes a plain tree, for tests and tools that want datums. The runtime supplies another that builds heap values and syntax objects directly. Running code never builds Rowan nodes. The datum sink reports every error, and produces nothing for a top-level form that contains one. It applies `#!fold-case`, and normalises identifiers to Unicode NFC, so the same name typed with precomposed or combining characters is the same symbol.
 5. **Keywords follow SRFI 88.** An identifier ending in a colon, such as `foo:`, reads as a keyword. A lone `:` is a symbol, and so is `|foo:|`, so a symbol ending in a colon can still be written. `#:foo` is not keyword syntax in Vali.
 6. **A span is a source identity plus a byte range.** The source identity is the library identity from ADR 0009 #2. Line and column are worked out on demand from a line index kept per source, so datums don't each store them. Positions are converted to whatever a consumer expects: a language server may need UTF-16 code units, depending on what the client negotiates.
 7. **Spans survive expansion.** Every syntax object carries its span. A syntax object a macro creates also records the macro use that produced it. Following that chain, errors, stack traces, debuggers and language servers can show both where code was written and which macro produced it. The chain is serialised in artifacts along with scope identities (ADR 0001).

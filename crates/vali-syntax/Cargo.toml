@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+logos = "0.16.1"
+text-size = "1.1.1"
+unicode-general-category = "1.1.0"
 vali-num.workspace = true
 
 [lints]
