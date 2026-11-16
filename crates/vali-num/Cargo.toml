@@ -1,0 +1,13 @@
+[package]
+name = "vali-num"
+description = "The Scheme numeric tower for Vali: exact integers, rationals, reals and complex numbers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

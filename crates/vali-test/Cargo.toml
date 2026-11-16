@@ -1,0 +1,14 @@
+[package]
+name = "vali-test"
+description = "Vali's test harness: Scheme test files, the regression list, compliance suites and determinism checks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
