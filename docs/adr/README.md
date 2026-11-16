@@ -29,3 +29,6 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0011](0011-licence-and-contribution-policy.md) | Licence and contribution policy | Accepted |
 | [0012](0012-distributing-compiled-libraries.md) | Distributing compiled libraries | Accepted |
 | [0013](0013-standalone-executables.md) | Standalone executables | Accepted |
+| [0014](0014-reader-and-source-representation.md) | Reader and source representation | Accepted |
+
+Milestone M0 ends when 0002, 0003, 0004 and 0005 are accepted: they gate the runtime code. 0008 shapes every runtime type too, so it should be settled alongside them.
