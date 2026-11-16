@@ -18,3 +18,4 @@ Each record states one decision about Vali's design: the context that forced it,
 |---|---|---|
 | [0001](0001-phasing-and-artifact-sections.md) | Phasing and artifact sections | Accepted |
 | [0002](0002-value-representation.md) | Value representation | Accepted |
+| [0003](0003-memory-management.md) | Memory management | Proposed |
