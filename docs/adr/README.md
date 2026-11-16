@@ -24,3 +24,4 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0006](0006-relocatable-code-and-abi-versioning.md) | Relocatable code and ABI versioning | Accepted |
 | [0007](0007-language-scope.md) | Language scope | Accepted |
 | [0008](0008-threading-model.md) | Threading model | Proposed |
+| [0009](0009-loaders-and-capabilities.md) | Loaders and capabilities | Accepted |
