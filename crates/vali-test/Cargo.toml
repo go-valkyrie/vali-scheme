@@ -9,6 +9,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+libtest-mimic = "0.8.2"
+vali-syntax.workspace = true
+
+[[test]]
+name = "regressions"
+harness = false
 
 [lints]
 workspace = true
