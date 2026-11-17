@@ -17,6 +17,7 @@ mod ast;
 mod codegen;
 mod expand;
 mod pattern;
+mod phase;
 
 use std::fmt;
 

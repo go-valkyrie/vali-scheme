@@ -24,13 +24,18 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use vali_syntax::{
-    AlreadyBound, BindingTable, DatumKind, Exposed, Origin, Phase, Phases, Resolution, Scope,
-    ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax, TooManyScopes, free_identifier_eq,
+    AlreadyBound, BindingTable, Datum, DatumKind, Exposed, Origin, Phase, Phases, Resolution,
+    Scope, ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax, TooManyScopes,
+    free_identifier_eq,
 };
+
+use vali_bytecode::{ModuleBuilder, validate};
+use vali_runtime::{Cx, Handle, NoCollection};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
 use crate::pattern::{self, Builder, Match, Pattern, Spelling, Template, Vars};
+use crate::phase::{self, QUOTE_SYNTAX, Shared};
 
 /// The derived forms, as macros.
 const PRELUDE: &str = include_str!("prelude.scm");
@@ -51,7 +56,7 @@ pub(crate) const STACK_GROWTH: usize = 2 * 1024 * 1024;
 
 /// The core forms (ADR 0015 #15) that exist so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Core {
+pub(crate) enum Core {
     Quote,
     If,
     Begin,
@@ -64,6 +69,7 @@ enum Core {
     LetSyntax,
     LetrecSyntax,
     SyntaxRules,
+    QuoteSyntax,
 }
 
 const CORE: &[(&str, Core)] = &[
@@ -80,11 +86,12 @@ const CORE: &[(&str, Core)] = &[
     ("let-syntax", Core::LetSyntax),
     ("letrec-syntax", Core::LetrecSyntax),
     ("syntax-rules", Core::SyntaxRules),
+    ("quote-syntax", Core::QuoteSyntax),
 ];
 
 /// What an identifier can be bound to.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Binding {
+pub(crate) enum Binding {
     Core(Core),
     Local(VarId),
     /// A module variable the program defines.
@@ -96,7 +103,14 @@ enum Binding {
 /// A `syntax-rules` macro.
 struct Macro {
     name: String,
-    clauses: Vec<Clause>,
+    transformer: Transformer,
+}
+
+enum Transformer {
+    /// `syntax-rules`, run in Rust.
+    Rules(Vec<Clause>),
+    /// A procedure in the phase-1 isolate.
+    Procedure(Handle),
 }
 
 struct Clause {
@@ -148,6 +162,13 @@ pub(crate) struct Expander {
     macros: Vec<Macro>,
     /// Macro uses in expressions being expanded, one inside another.
     depth: usize,
+    /// The isolate transformers written in Scheme run in, once one exists.
+    phase1: Option<Cx<NoCollection>>,
+    /// The syntax objects `quote-syntax` forms quote, by number.
+    quoted: Vec<Syntax>,
+    /// For each transformer being expanded, one inside another, where its
+    /// `lambda` sits in `stack`. Code above the innermost runs at phase 1.
+    floors: Vec<usize>,
 }
 
 impl Expander {
@@ -180,6 +201,9 @@ impl Expander {
             fresh: 0,
             macros: Vec::new(),
             depth: 0,
+            phase1: None,
+            quoted: Vec::new(),
+            floors: Vec::new(),
         })
     }
 
@@ -309,10 +333,12 @@ impl Expander {
     /// Compiles a transformer, `(syntax-rules ...)`, for the macro `name`.
     fn transformer(&mut self, spec: &Syntax, name: &str) -> Result<usize> {
         let Some((Core::SyntaxRules, items)) = self.core_form(spec)? else {
-            return Err(error(
-                format!("{name}: expected a syntax-rules transformer"),
-                spec.span(),
-            ));
+            let procedure = self.procedure(spec, name)?;
+            self.macros.push(Macro {
+                name: name.to_owned(),
+                transformer: Transformer::Procedure(procedure),
+            });
+            return Ok(self.macros.len() - 1);
         };
         // `(syntax-rules (literal ...) clause ...)`, or with a custom
         // ellipsis, `(syntax-rules ellipsis (literal ...) clause ...)`.
@@ -389,9 +415,140 @@ impl Expander {
         }
         self.macros.push(Macro {
             name: name.to_owned(),
-            clauses: compiled,
+            transformer: Transformer::Rules(compiled),
         });
         Ok(self.macros.len() - 1)
+    }
+
+    /// Expands, compiles and runs a transformer written in Scheme, at
+    /// phase 1, returning the procedure it evaluates to.
+    fn procedure(&mut self, spec: &Syntax, name: &str) -> Result<Handle> {
+        let body = self.open_lambda(Some(name));
+        self.floors.push(self.stack.len() - 1);
+        let expr = self.named(spec, name);
+        self.floors.pop();
+        self.close_lambda(body, Vec::new(), None, expr?);
+        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
+        let generator = crate::codegen::Generator {
+            vars: &self.vars,
+            lambdas: &self.lambdas,
+            loops: &loops,
+            rebound: &self.rebound,
+            module: ModuleBuilder::new(name),
+        };
+        let module = generator.program(body)?;
+        validate(&module).map_err(|e| CompileError {
+            message: format!("{name}: the compiler produced invalid bytecode: {e}"),
+            span: Some(spec.span()),
+        })?;
+        let cx = self.phase1()?;
+        let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), spec.span());
+        let id = cx.load(module).map_err(failed)?;
+        let procedure = cx.run(id).map_err(failed)?;
+        if cx.get(&procedure).map_err(failed)?.tag() != vali_abi::Tag::Closure {
+            return Err(error(
+                format!("{name}: the transformer is not a procedure"),
+                spec.span(),
+            ));
+        }
+        Ok(procedure)
+    }
+
+    /// The phase-1 isolate, made on first use.
+    fn phase1(&mut self) -> Result<&mut Cx<NoCollection>> {
+        if self.phase1.is_none() {
+            let cx = phase::instance().map_err(|e| CompileError {
+                message: format!("the expander's isolate: {e}"),
+                span: None,
+            })?;
+            self.phase1 = Some(cx);
+        }
+        Ok(self.phase1.as_mut().expect("just made"))
+    }
+
+    /// Calls a transformer written in Scheme on `input`, lending it the
+    /// expander's scopes for the syntax procedures.
+    fn run_transformer(
+        &mut self,
+        m: usize,
+        procedure: &Handle,
+        input: Syntax,
+        form: &Syntax,
+    ) -> Result<Syntax> {
+        let name = self.macros[m].name.clone();
+        let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), form.span());
+        let shared = Shared {
+            context: std::mem::replace(&mut self.context, ScopeContext::new()),
+            table: std::mem::take(&mut self.table),
+            quoted: std::mem::take(&mut self.quoted),
+        };
+        let cx = self
+            .phase1
+            .as_mut()
+            .expect("a procedure transformer has an isolate");
+        // Allocate first, so a failure leaves the state where it was.
+        let input = match cx.syntax(input) {
+            Ok(input) => input,
+            Err(e) => {
+                self.context = shared.context;
+                self.table = shared.table;
+                self.quoted = shared.quoted;
+                return Err(failed(e));
+            }
+        };
+        cx.set_host_data(Some(Box::new(shared)));
+        let result = cx.call(procedure, &[input]);
+        let shared = cx
+            .set_host_data(None)
+            .and_then(|data| (data as Box<dyn std::any::Any>).downcast::<Shared>().ok())
+            .expect("the expander's state comes back");
+        self.context = shared.context;
+        self.table = shared.table;
+        self.quoted = shared.quoted;
+        let output = result.map_err(failed)?;
+        let cx = self.phase1.as_mut().expect("as above");
+        let value = cx.get(&output).map_err(failed)?;
+        // SAFETY: the handle keeps the value valid.
+        unsafe { cx.value_syntax(value, ScopeSetId::EMPTY, form.span()) }.ok_or_else(|| {
+            error(
+                format!("{name}: the transformer returned something that is not syntax"),
+                form.span(),
+            )
+        })
+    }
+
+    /// An error if `v`, a local variable, belongs to code outside the
+    /// transformer being expanded: it doesn't exist when the transformer
+    /// runs.
+    fn in_context(&self, v: VarId, id: &Syntax) -> Result<()> {
+        if let Some(&floor) = self.floors.last()
+            && !self.stack[floor..].contains(&self.vars[v].binder)
+        {
+            return Err(error(
+                format!(
+                    "{}: used out of context: a macro's transformer cannot use a \
+                     variable of the code around it",
+                    self.vars[v].name
+                ),
+                id.span(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// An error if a program's variable is used by a transformer, which
+    /// runs before the program does.
+    fn global_in_context(&self, global: &str, id: &Syntax) -> Result<()> {
+        if self.floors.is_empty() {
+            return Ok(());
+        }
+        Err(error(
+            format!(
+                "{global}: defined by the program, so it does not exist yet when \
+                 a macro's transformer runs"
+            ),
+            id.span(),
+        ))
     }
 
     /// One macro step: flips a fresh macro scope on the use, adds
@@ -425,12 +582,20 @@ impl Expander {
             use_site: form.span(),
             parent: form.origin().cloned(),
         });
+        if let Transformer::Procedure(procedure) = &self.macros[m].transformer {
+            let procedure = procedure.clone();
+            let output = self.run_transformer(m, &procedure, input, form)?;
+            return output.flip(&mut self.context, scope).map_err(too_many);
+        }
         let table = &self.table;
         let same = |cx: &ScopeContext, a: &Syntax, b: &Syntax| {
             free_identifier_eq(cx, table, Phase(0), a, b)
         };
         let mac = &self.macros[m];
-        for clause in &mac.clauses {
+        let Transformer::Rules(clauses) = &mac.transformer else {
+            unreachable!("procedures were handled above")
+        };
+        for clause in clauses {
             let mut binds: Vec<Option<Match>> = vec![None; clause.depths.len()];
             if pattern::matches(
                 &mut self.context,
@@ -810,8 +975,14 @@ impl Expander {
     fn expr_here(&mut self, stx: &Syntax) -> Result<Expr> {
         if let Some(name) = stx.as_identifier() {
             return match self.resolve(stx)? {
-                Some(Binding::Local(v)) => Ok(self.local(v)),
-                Some(Binding::Global(global)) => Ok(Expr::Global(global)),
+                Some(Binding::Local(v)) => {
+                    self.in_context(v, stx)?;
+                    Ok(self.local(v))
+                }
+                Some(Binding::Global(global)) => {
+                    self.global_in_context(&global, stx)?;
+                    Ok(Expr::Global(global))
+                }
                 None => Ok(Expr::Global(name.to_owned())),
                 Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
@@ -908,6 +1079,7 @@ impl Expander {
                 let name = name.to_owned();
                 match self.resolve(target)? {
                     Some(Binding::Local(v)) => {
+                        self.in_context(v, target)?;
                         let value = self.expr(value)?;
                         self.vars[v].assigned = true;
                         let Expr::Local(v) = self.local(v) else {
@@ -916,6 +1088,7 @@ impl Expander {
                         Ok(Expr::SetLocal(v, Box::new(value)))
                     }
                     Some(Binding::Global(global)) => {
+                        self.global_in_context(&global, target)?;
                         let value = self.expr(value)?;
                         Ok(Expr::SetGlobal(global, Box::new(value)))
                     }
@@ -939,6 +1112,29 @@ impl Expander {
                 format!("{keyword} is only allowed as a macro's transformer"),
                 span,
             )),
+            Core::QuoteSyntax => {
+                let [form] = args else {
+                    return Err(error(format!("{keyword}: expected one form"), span));
+                };
+                if self.floors.is_empty() {
+                    return Err(error(
+                        format!("{keyword}: syntax objects at run time are not supported yet"),
+                        span,
+                    ));
+                }
+                self.quoted.push(form.clone());
+                let index = Datum {
+                    kind: DatumKind::Number(vali_num::Number::Integer(
+                        (self.quoted.len() - 1).into(),
+                    )),
+                    span,
+                };
+                Ok(Expr::Call(
+                    Box::new(Expr::Global(QUOTE_SYNTAX.to_owned())),
+                    vec![Expr::Const(index)],
+                    span,
+                ))
+            }
         }
     }
 

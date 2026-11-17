@@ -459,7 +459,7 @@ fn macro_errors() {
         compile_error("(define-syntax m (syntax-rules () ((_ ... x) x)))")
             .contains("must follow a pattern")
     );
-    assert!(compile_error("(define-syntax m 5)").contains("expected a syntax-rules transformer"));
+    assert!(compile_error("(define-syntax m 5)").contains("m: the transformer is not a procedure"));
     assert!(compile_error("(+ 1 when)").contains("syntactic keyword"));
 }
 
@@ -470,4 +470,84 @@ fn deeply_nested_code_compiles() {
     let clauses: String = (0..1000).map(|i| format!("((= x {i}) {i}) ")).collect();
     let source = format!("(define x 999) (cond {clauses})");
     check(&[(&source, "999")]);
+}
+
+#[test]
+fn transformers_written_in_scheme() {
+    check(&[
+        // The simplest: a procedure from syntax to syntax.
+        (
+            "(define-syntax five (lambda (stx) (quote-syntax 5))) (five)",
+            "5",
+        ),
+        // What quote-syntax quotes means what it meant where it was
+        // written, whatever the use binds.
+        (
+            "(define-syntax ten (lambda (stx) (list (quote-syntax +) 4 6)))
+             (let ((+ -)) (ten))",
+            "10",
+        ),
+        // syntax->datum sees the use.
+        (
+            "(define-syntax show (lambda (stx) (list (quote-syntax quote) (syntax->datum stx))))
+             (show 1 (2))",
+            "(show 1 (2))",
+        ),
+        // datum->syntax with the use as context captures on purpose.
+        (
+            "(define-syntax def-it (lambda (stx) (datum->syntax stx '(define it 42))))
+             (def-it)
+             it",
+            "42",
+        ),
+        // Transformers can use macros, helpers and closures at phase 1.
+        (
+            "(define-syntax count-args
+               (lambda (stx)
+                 (let loop ((d (cdr (syntax->datum stx))) (n 0))
+                   (cond ((null? d) (datum->syntax stx n))
+                         (else (loop (cdr d) (+ n 1)))))))
+             (count-args a b c)",
+            "3",
+        ),
+        // Identifier predicates.
+        (
+            "(define-syntax ids
+               (lambda (stx)
+                 (if (and (identifier? (quote-syntax x))
+                          (not (identifier? (quote-syntax (x))))
+                          (bound-identifier=? (quote-syntax x) (quote-syntax x))
+                          (free-identifier=? (quote-syntax car) (quote-syntax car))
+                          (not (free-identifier=? (quote-syntax car) (quote-syntax cdr))))
+                     (quote-syntax 'ok)
+                     (quote-syntax 'bad))))
+             (ids)",
+            "ok",
+        ),
+        // A macro defined inside a body.
+        (
+            "(define (f) (define-syntax two (lambda (stx) (quote-syntax 2))) (* 3 (two))) (f)",
+            "6",
+        ),
+    ]);
+}
+
+#[test]
+fn transformer_errors() {
+    let compile_error = |source: &str| compile(source, "test").unwrap_err().message;
+    assert!(
+        compile_error("(let ((x 1)) (define-syntax m (lambda (stx) x)) (m))")
+            .contains("used out of context")
+    );
+    assert!(
+        compile_error("(define y 1) (define-syntax m (lambda (stx) y)) (m)")
+            .contains("does not exist yet")
+    );
+    assert!(
+        compile_error("(define-syntax bad (lambda (stx) (car 5))) (bad)")
+            .contains("bad: car: expected a pair, got 5")
+    );
+    assert!(compile_error("(define-syntax bad (lambda (stx) car)) (bad)").contains("not syntax"));
+    assert!(compile_error("(define-syntax bad 5) (bad)").contains("bad:"));
+    assert!(compile_error("(quote-syntax x)").contains("not supported yet"));
 }

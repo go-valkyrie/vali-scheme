@@ -505,6 +505,7 @@ name = "vali-compiler"
 version = "0.0.0"
 dependencies = [
  "stacker",
+ "vali-abi",
  "vali-bytecode",
  "vali-num",
  "vali-runtime",
