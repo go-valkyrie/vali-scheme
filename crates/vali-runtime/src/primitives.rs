@@ -96,6 +96,14 @@ fn division<S: Strategy>(
     remainder: bool,
 ) -> Result<Value, Error> {
     let (a, b) = (args[0], args[1]);
+    // Two fixnums: no conversion. Only the quotient of the most negative
+    // fixnum by -1 leaves the fixnum range, and that takes the slow path.
+    if let (Some(x), Some(y)) = (a.as_fixnum(), b.as_fixnum())
+        && y != 0
+        && let Some(result) = Value::fixnum(if remainder { x % y } else { x / y })
+    {
+        return Ok(result);
+    }
     let (Some(x), Some(y)) = (
         cx.number(a).and_then(|n| n.exact()),
         cx.number(b).and_then(|n| n.exact()),

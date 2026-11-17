@@ -24,6 +24,10 @@ use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
 
 type Result<T> = std::result::Result<T, CompileError>;
 
+/// The most elements a call to `vector` builds inline; longer ones call
+/// the procedure.
+const MAX_INLINE_VECTOR: usize = 8;
+
 /// Where an expression's value goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Target {
@@ -623,6 +627,7 @@ impl Generator<'_> {
                 2
             ) | ("vector-set!", 3)
                 | ("+" | "*", _)
+                | ("vector", 1..=MAX_INLINE_VECTOR)
         ) || (name == "-" && argc >= 1)
     }
 
@@ -729,6 +734,48 @@ impl Generator<'_> {
             .ok_or_else(|| error(format!("{}: loop not found", self.vars[v].name), None))
     }
 
+    /// `(vector e ...)`: a vector filled with the first element, then a
+    /// store for each element held in another slot.
+    fn vector(&mut self, f: &mut Frame, args: &[Expr], target: Target) -> Result<()> {
+        let mut elements = Vec::new();
+        for arg in args {
+            elements.push(self.value(f, arg)?);
+        }
+        // The vector is built over several instructions, so it may only go
+        // straight into the target if no element is read from there.
+        let dst = match target {
+            Target::Slot(s) if !elements.contains(&s) => s,
+            _ => self.alloc(f)?,
+        };
+        let index = self.alloc(f)?;
+        #[expect(clippy::cast_possible_truncation, reason = "at most MAX_INLINE_VECTOR")]
+        f.b.emit(I::LoadInt {
+            dst: index,
+            value: elements.len() as i16,
+        })
+        .emit(I::MakeVector {
+            dst,
+            len: index,
+            fill: elements[0],
+        });
+        for (i, &value) in elements.iter().enumerate().skip(1) {
+            if value != elements[0] {
+                #[expect(clippy::cast_possible_truncation, reason = "at most MAX_INLINE_VECTOR")]
+                f.b.emit(I::LoadInt {
+                    dst: index,
+                    value: i as i16,
+                })
+                .emit(I::VectorSet {
+                    vector: dst,
+                    index,
+                    value,
+                });
+            }
+        }
+        self.deliver(f, dst, target);
+        Ok(())
+    }
+
     /// Compiles a call to a standard procedure as instructions, if it has
     /// them for this many arguments. Returns whether it did.
     fn inline(&mut self, f: &mut Frame, name: &str, args: &[Expr], target: Target) -> Result<bool> {
@@ -786,6 +833,7 @@ impl Generator<'_> {
                 });
                 self.load(f, Constant::Unspecified, target)?;
             }
+            ("vector", 1..=MAX_INLINE_VECTOR) => self.vector(f, args, target)?,
             ("+" | "*", 0) => {
                 let unit = if name == "+" { 0 } else { 1 };
                 self.load(f, Constant::Integer(unit), target)?;

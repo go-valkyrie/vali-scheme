@@ -37,6 +37,12 @@ fn constants_and_arithmetic() {
             "123456789012345678901234567890",
         ),
         ("(* 1.5 2)", "3.0"),
+        (
+            "(list (quotient 17 -5) (remainder 17 -5) (modulo 17 -5))",
+            "(-3 2 -3)",
+        ),
+        // The one fixnum quotient that is not a fixnum.
+        ("(quotient -1152921504606846976 -1)", "1152921504606846976"),
         ("'(a b . c)", "(a b . c)"),
         ("\"str\"", "\"str\""),
         ("#(1 \"two\" #\\3)", "#(1 \"two\" #\\3)"),
@@ -45,6 +51,12 @@ fn constants_and_arithmetic() {
         ("(>= 1 2)", "#f"),
         ("(car (cdr '(1 2 3)))", "2"),
         ("(vector-ref (vector 1 2 3) 1)", "2"),
+        ("(let ((x (quote a))) (vector x 1 x (+ 1 1)))", "#(a 1 a 2)"),
+        (
+            "(let ((v (vector 1))) (set! v (vector v v)) v)",
+            "#(#(1) #(1))",
+        ),
+        ("(vector 1 2 3 4 5 6 7 8 9)", "#(1 2 3 4 5 6 7 8 9)"),
     ]);
 }
 
