@@ -6,16 +6,16 @@
 //! is a module variable linked to the global of that name when the module
 //! is loaded.
 //!
-//! This is the direct compiler, in the manner of Guile 3's baseline
-//! compiler: it goes from the resolved tree straight to bytecode. The
-//! optimising compiler, through CPS, comes later as a second path into the
-//! same format. Until the expander exists, the compiler accepts core forms
-//! plus a few derived forms it rewrites itself (see `parse`).
+//! The expander (ADR 0015) resolves every identifier by sets of scopes and
+//! produces the compiler's tree. The compiler is the direct one, in the
+//! manner of Guile 3's baseline compiler: it goes from that tree straight
+//! to bytecode. The optimising compiler, through CPS, comes later as a
+//! second path into the same format.
 
 mod analyze;
 mod ast;
 mod codegen;
-mod parse;
+mod expand;
 
 use std::fmt;
 
@@ -65,14 +65,14 @@ pub fn compile(source: &str, name: &str) -> Result<Module, CompileError> {
 
 /// Compiles already-read datums as a module named `name`.
 pub fn compile_datums(datums: &[Datum], name: &str) -> Result<Module, CompileError> {
-    let mut parser = parse::Parser::new();
-    let program = parser.program(datums)?;
-    let loops = analyze::loops(&parser.vars, &parser.lambdas, program);
+    let mut expander = expand::Expander::new()?;
+    let program = expander.program(datums)?;
+    let loops = analyze::loops(&expander.vars, &expander.lambdas, program);
     let generator = codegen::Generator {
-        vars: &parser.vars,
-        lambdas: &parser.lambdas,
+        vars: &expander.vars,
+        lambdas: &expander.lambdas,
         loops: &loops,
-        rebound: &parser.rebound,
+        rebound: &expander.rebound,
         module: ModuleBuilder::new(name),
     };
     let module = generator.program(program)?;
