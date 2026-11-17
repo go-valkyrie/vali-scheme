@@ -63,6 +63,8 @@ pub enum Constant {
     String(Box<str>),
     /// A symbol.
     Symbol(Box<str>),
+    /// An SRFI 88 keyword, named without its colon.
+    Keyword(Box<str>),
     /// A pair of constants.
     Pair(Box<Constant>, Box<Constant>),
     /// An immutable vector of constants.

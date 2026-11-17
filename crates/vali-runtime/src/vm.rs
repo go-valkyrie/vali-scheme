@@ -524,6 +524,7 @@ impl<S: Strategy> Cx<S> {
             Constant::Unspecified => Value::UNSPECIFIED,
             Constant::String(s) => self.string_raw(s, true)?,
             Constant::Symbol(s) => self.intern(s)?,
+            Constant::Keyword(s) => self.keyword_raw(s)?,
             Constant::Pair(car, cdr) => {
                 let car = self.constant(car)?;
                 let cdr = self.constant(cdr)?;

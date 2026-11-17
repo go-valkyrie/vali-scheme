@@ -447,6 +447,54 @@ fn string_to_symbol<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value
     Ok(cx.intern(&name)?)
 }
 
+// SRFI 88 keywords: interned like symbols, each a name without its colon.
+
+impl<S: Strategy> Cx<S> {
+    /// The keyword named `name`, its colon left out.
+    pub(crate) fn keyword_raw(&mut self, name: &str) -> Result<Value, OutOfMemory> {
+        if let Some(&v) = self.keywords.get(name) {
+            return Ok(v);
+        }
+        let string = self.string_raw(name, true)?;
+        let v = self.new_object(TypeCode::Keyword, 1, 0)?;
+        // SAFETY: just allocated with its one field.
+        unsafe { self.init_field(v, Self::LAYOUT.field(TypeCode::Keyword, 0), string) };
+        self.hold(v);
+        self.keywords.insert(name.into(), v);
+        Ok(v)
+    }
+
+    /// A keyword's name, without its colon, if `v` is a keyword.
+    pub(crate) fn keyword_name(&self, v: Value) -> Option<&str> {
+        if !self.is_other(v, TypeCode::Keyword) {
+            return None;
+        }
+        // SAFETY: a live keyword, whose one field is its name, a string.
+        Some(unsafe {
+            self.string_str(Value::from_raw(get(
+                v,
+                Self::LAYOUT.field(TypeCode::Keyword, 0),
+            )))
+        })
+    }
+}
+
+fn is_keyword<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(cx.keyword_name(args[0]).is_some()))
+}
+
+fn keyword_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let Some(name) = cx.keyword_name(args[0]).map(str::to_owned) else {
+        return Err(wrong_type(cx, "keyword->string", "a keyword", args[0]));
+    };
+    Ok(cx.string_raw(&name, true)?)
+}
+
+fn string_to_keyword<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let name = string_arg(cx, "string->keyword", args[0])?.to_owned();
+    Ok(cx.keyword_raw(&name)?)
+}
+
 // Characters.
 
 fn is_char<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -776,6 +824,9 @@ pub(crate) fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("symbol?", exactly(1), is_symbol),
         ("symbol->string", exactly(1), symbol_to_string),
         ("string->symbol", exactly(1), string_to_symbol),
+        ("keyword?", exactly(1), is_keyword),
+        ("keyword->string", exactly(1), keyword_to_string),
+        ("string->keyword", exactly(1), string_to_keyword),
         ("char?", exactly(1), is_char),
         ("char->integer", exactly(1), char_to_integer),
         ("integer->char", exactly(1), integer_to_char),

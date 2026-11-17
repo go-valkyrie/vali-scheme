@@ -226,6 +226,11 @@ impl<S: Strategy> Printer<'_, S> {
                     let type_code = header.and_then(vali_abi::Header::type_code);
                     match type_code {
                         Some(TypeCode::Box) => self.out.push_str("#<box>"),
+                        Some(TypeCode::Keyword) => {
+                            let name = self.cx.keyword_name(v).expect("a keyword").to_owned();
+                            self.symbol(&name);
+                            self.out.push(':');
+                        }
                         Some(TypeCode::Continuation) => self.out.push_str("#<continuation>"),
                         Some(TypeCode::RustObject) => {
                             let i = Cx::<S>::rust_object_index(v).expect("a Rust object");

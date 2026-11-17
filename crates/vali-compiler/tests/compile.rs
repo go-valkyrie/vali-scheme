@@ -1286,6 +1286,93 @@ fn reading_and_writing() {
 }
 
 #[test]
+fn keywords() {
+    let prelude = "(import (scheme base) (scheme read) (srfi 88))";
+    let cases = [
+        ("foo:", "foo:"),
+        (
+            "(list (keyword? foo:) (keyword? 'foo) (keyword? \"foo:\"))",
+            "(#t #f #f)",
+        ),
+        // Interned, so eq?, and self-evaluating inside quoted data too.
+        ("(eq? foo: (string->keyword \"foo\"))", "#t"),
+        ("(eq? foo: (car '(foo: bar:)))", "#t"),
+        ("(keyword->string bar:)", "\"bar\""),
+        ("(read (open-input-string \"baz:\"))", "baz:"),
+        ("(eq? baz: (read (open-input-string \"baz:\")))", "#t"),
+        ("(equal? '(a: #(b:)) (list a: (vector b:)))", "#t"),
+        // A keyword in syntax-rules' output stays a keyword.
+        (
+            "(define-syntax k (syntax-rules () ((_) 'key:))) (keyword? (k))",
+            "#t",
+        ),
+    ];
+    for (source, expected) in cases {
+        let source = format!("{prelude}{source}");
+        match run(&source) {
+            Ok(result) => assert_eq!(result, expected, "{source}"),
+            Err(e) => panic!("{source}\n{e}"),
+        }
+    }
+}
+
+#[test]
+fn sorting() {
+    let prelude = "(import (scheme base) (srfi 132))";
+    let cases = [
+        ("(list-sort < '(3 1 2))", "(1 2 3)"),
+        ("(list-sort < '())", "()"),
+        // Stable: equal keys keep their order.
+        (
+            "(list-stable-sort (lambda (a b) (< (car a) (car b)))
+                               '((2 . a) (1 . b) (2 . c) (1 . d)))",
+            "((1 . b) (1 . d) (2 . a) (2 . c))",
+        ),
+        (
+            "(list-sort < (let loop ((i 0) (acc '())) (if (= i 1000) acc (loop (+ i 1) (cons (modulo (* i 7919) 1000) acc)))))",
+            "",
+        ),
+        (
+            "(list (list-sorted? < '(1 2 2 3)) (list-sorted? < '(2 1)))",
+            "(#t #f)",
+        ),
+        ("(vector-sort < #(5 3 9 1))", "#(1 3 5 9)"),
+        ("(vector-sort < #(5 3 9 1) 1 3)", "#(3 9)"),
+        (
+            "(let ((v (vector 5 3 9 1 0))) (vector-sort! v < 1 4) v)",
+            "#(5 1 3 9 0)",
+        ),
+        ("(list-merge < '(1 4 6) '(2 3 7))", "(1 2 3 4 6 7)"),
+        ("(vector-merge < #(1 4) #(2 3))", "#(1 2 3 4)"),
+        (
+            "(list-delete-neighbor-dups = '(1 1 2 3 3 3 1))",
+            "(1 2 3 1)",
+        ),
+        (
+            "(let ((v (vector 1 1 2 2 3))) (list (vector-delete-neighbor-dups! = v) v))",
+            "(3 #(1 2 3 2 3))",
+        ),
+        ("(vector-find-median < #(5 1 3) 0)", "3"),
+        ("(vector-find-median < #(4 1 3 2) 0)", "5/2"),
+        ("(vector-select! < (vector 5 1 3 9) 2)", "5"),
+    ];
+    for (source, expected) in cases {
+        let source = format!("{prelude}{source}");
+        match run(&source) {
+            Ok(result) if expected.is_empty() => {
+                let expected = (0..1000)
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert_eq!(result, format!("({expected})"), "{source}");
+            }
+            Ok(result) => assert_eq!(result, expected, "{source}"),
+            Err(e) => panic!("{source}\n{e}"),
+        }
+    }
+}
+
+#[test]
 fn dynamic_wind_and_call_cc() {
     check(&[
         (

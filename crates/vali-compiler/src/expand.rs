@@ -1292,7 +1292,7 @@ impl Expander {
         }
         if let Some(atom) = stx.as_atom() {
             return match atom {
-                DatumKind::Keyword(_) => Err(error("keywords are not supported yet", stx.span())),
+                // SRFI 88: a keyword evaluates to itself.
                 DatumKind::Labelled(..) | DatumKind::LabelRef(_) => Err(error(
                     "datum labels are only allowed inside quoted data",
                     stx.span(),

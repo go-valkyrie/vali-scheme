@@ -102,10 +102,9 @@ impl<S: Strategy> DatumBuilder for HeapBuilder<'_, S> {
         self.attempt(result)
     }
 
-    fn keyword(&mut self, _name: &str, _span: Span) -> Value {
-        self.fail(Error::scheme(
-            "read: keywords are not supported in the heap yet",
-        ))
+    fn keyword(&mut self, name: &str, _span: Span) -> Value {
+        let result = self.cx.keyword_raw(name);
+        self.attempt(result)
     }
 
     fn list(&mut self, items: Vec<Value>, tail: Option<Value>, _span: Span) -> Value {

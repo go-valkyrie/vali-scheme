@@ -62,6 +62,8 @@ impl<S: Strategy> Cx<S> {
                 // Its index, and a pointer to its record.
                 TypeCode::Continuation => 2,
                 TypeCode::Flonum | TypeCode::Box | TypeCode::Syntax => 1,
+                // Its name.
+                TypeCode::Keyword => 1,
                 TypeCode::Symbol => 2,
                 TypeCode::String => 4,
                 TypeCode::Closure => 1 + Self::header_data(v, t),
@@ -100,7 +102,7 @@ impl<S: Strategy> Cx<S> {
             // The first word is the code pointer, not a value.
             TypeCode::Closure | TypeCode::Vector => (1..fields).for_each(|i| f(field(i))),
             // The name; the hash is a number.
-            TypeCode::Symbol => f(field(0)),
+            TypeCode::Symbol | TypeCode::Keyword => f(field(0)),
             // The bytes and the index hints.
             TypeCode::String => {
                 f(field(2));

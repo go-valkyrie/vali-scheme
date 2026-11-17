@@ -116,6 +116,9 @@ impl<S: Strategy> Cx<S> {
                 }
                 datum(DatumKind::List { items, tail })
             }
+            Tag::Other if self.keyword_name(v).is_some() => datum(DatumKind::Keyword(
+                self.keyword_name(v).expect("a keyword").to_owned(),
+            )),
             Tag::Other if self.is_other(v, TypeCode::Bytevector) => {
                 // SAFETY: `v` is a live bytevector.
                 datum(DatumKind::Bytevector(

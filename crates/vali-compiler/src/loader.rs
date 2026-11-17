@@ -222,6 +222,8 @@ const STANDARD: &[(&[&str], &str)] = &[
         include_str!("../lib/scheme/write.sld"),
     ),
     (&["srfi", "64"], include_str!("../lib/srfi/64.sld")),
+    (&["srfi", "88"], include_str!("../lib/srfi/88.sld")),
+    (&["srfi", "132"], include_str!("../lib/srfi/132.sld")),
 ];
 
 /// The source of the standard library `name`, if it is one: Scheme

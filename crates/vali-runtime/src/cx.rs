@@ -38,6 +38,8 @@ pub struct Cx<S: Strategy> {
     pub(crate) libraries: HashMap<Box<str>, crate::code::ModuleId>,
     /// Interned symbols.
     pub(crate) symbols: HashMap<Box<str>, Value>,
+    /// The interned SRFI 88 keywords, by name without the colon.
+    pub(crate) keywords: HashMap<Box<str>, Value>,
     /// Descriptors of Rust procedures, which closures point to. Each is
     /// boxed so its address survives the vector growing.
     #[allow(clippy::vec_box)]
@@ -146,6 +148,7 @@ impl<S: Strategy> Cx<S> {
             globals: HashMap::new(),
             libraries: HashMap::new(),
             symbols: HashMap::new(),
+            keywords: HashMap::new(),
             natives: Vec::new(),
             stack: Vec::new(),
             below: Value::FALSE,

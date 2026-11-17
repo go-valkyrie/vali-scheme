@@ -124,7 +124,7 @@ fn constant(d: &Datum) -> Result<Constant> {
             Constant::Vector(items.iter().map(constant).collect::<Result<_>>()?)
         }
         DatumKind::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
-        DatumKind::Keyword(_) => return Err(error("keywords are not supported yet", Some(d.span))),
+        DatumKind::Keyword(k) => Constant::Keyword(k.as_str().into()),
         DatumKind::Labelled(..) | DatumKind::LabelRef(_) => {
             return Err(error(
                 "datum labels in constants are not supported yet",
