@@ -27,6 +27,7 @@ use crate::strategy::Strategy;
 use crate::trampoline::{self, Link};
 use crate::value::Value;
 use std::ffi::c_void;
+use vali_num::Integer;
 
 /// The bytecode position stored in the entry frame's header: returning to
 /// it leaves the VM.
@@ -129,12 +130,31 @@ enum Next {
     Return(Value),
 }
 
-/// Numbers the generic arithmetic understands, until `vali-num` is
-/// connected.
-#[derive(Clone, Copy)]
+/// Numbers the generic arithmetic understands. Rationals and complex
+/// numbers come next.
 enum Num {
     Fixnum(i64),
+    Integer(Integer),
     Flonum(f64),
+}
+
+impl Num {
+    /// The exact integer, if this is one.
+    fn exact(&self) -> Option<Integer> {
+        match self {
+            Num::Fixnum(n) => Some(Integer::from(*n)),
+            Num::Integer(n) => Some(n.clone()),
+            Num::Flonum(_) => None,
+        }
+    }
+
+    fn to_f64(&self) -> f64 {
+        match self {
+            Num::Fixnum(n) => *n as f64,
+            Num::Integer(n) => n.to_f64(),
+            Num::Flonum(x) => *x,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -282,9 +302,7 @@ impl<S: Strategy> Cx<S> {
 
     fn constant(&mut self, constant: &Constant) -> Result<Value, Error> {
         Ok(match constant {
-            Constant::Integer(n) => Value::fixnum(*n).ok_or_else(|| {
-                Error::scheme("integer constants beyond the fixnum range are not supported yet")
-            })?,
+            Constant::Integer(n) => self.integer_raw(&Integer::from(*n))?,
             Constant::Flonum(x) => self.flonum_raw(*x)?,
             Constant::Boolean(b) => Value::boolean(*b),
             Constant::Character(c) => Value::character(*c),
@@ -350,11 +368,58 @@ impl<S: Strategy> Cx<S> {
         if let Some(n) = v.as_fixnum() {
             return Some(Num::Fixnum(n));
         }
-        // SAFETY: a valid value tagged as a flonum is a live flonum.
-        (v.tag() == Tag::Flonum).then(|| Num::Flonum(unsafe { self.flonum_value(v) }))
+        if v.tag() == Tag::Flonum {
+            // SAFETY: a valid value tagged as a flonum is a live flonum.
+            return Some(Num::Flonum(unsafe { self.flonum_value(v) }));
+        }
+        if self.is_other(v, TypeCode::Bignum) {
+            // SAFETY: `v` is a live bignum.
+            return Some(Num::Integer(unsafe { self.bignum_value(v) }));
+        }
+        None
     }
 
-    /// Generic arithmetic: the slow path behind the fixnum fast paths.
+    /// A bignum's value.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live bignum.
+    unsafe fn bignum_value(&self, v: Value) -> Integer {
+        // SAFETY: passed on to the caller; a bignum is its header, its limb
+        // count, then its limbs.
+        unsafe {
+            let negative = self
+                .header(v, TypeCode::Bignum)
+                .is_some_and(|h| h.data() & 1 != 0);
+            let count = get(v, Self::LAYOUT.length(TypeCode::Bignum)) as usize;
+            let limbs: Vec<u64> = (0..count)
+                .map(|i| get(v, Self::LAYOUT.field(TypeCode::Bignum, 1 + i)))
+                .collect();
+            Integer::from_limbs(negative, &limbs)
+        }
+    }
+
+    /// `n` as a value: a fixnum if it fits, a bignum otherwise.
+    pub(crate) fn integer_raw(&mut self, n: &Integer) -> Result<Value, OutOfMemory> {
+        if let Some(v) = n.to_i64().and_then(Value::fixnum) {
+            return Ok(v);
+        }
+        let (negative, limbs) = n.limbs();
+        let v = self.new_object(TypeCode::Bignum, 1 + limbs.len(), u32::from(negative))?;
+        // SAFETY: the bignum was just allocated with room for its count and
+        // limbs.
+        unsafe {
+            put(v, Self::LAYOUT.length(TypeCode::Bignum), limbs.len() as u64);
+            for (i, &limb) in limbs.iter().enumerate() {
+                put(v, Self::LAYOUT.field(TypeCode::Bignum, 1 + i), limb);
+            }
+        }
+        Ok(v)
+    }
+
+    /// Generic arithmetic: the slow path behind the fixnum fast paths. Exact
+    /// integers of any size stay exact; a flonum operand makes the result a
+    /// flonum.
     fn arith(&mut self, op: Arith, a: Value, b: Value) -> Result<Value, Error> {
         let name = match op {
             Arith::Add => "+",
@@ -366,25 +431,27 @@ impl<S: Strategy> Cx<S> {
             (None, _) => return Err(type_error(name, "a number", a)),
             (_, None) => return Err(type_error(name, "a number", b)),
         };
-        match (x, y) {
-            (Num::Fixnum(x), Num::Fixnum(y)) => {
-                let result = match op {
-                    Arith::Add => x.checked_add(y),
-                    Arith::Sub => x.checked_sub(y),
-                    Arith::Mul => x.checked_mul(y),
-                };
-                result.and_then(Value::fixnum).ok_or_else(|| {
-                    Error::scheme(format!(
-                        "{name}: the result is beyond the fixnum range, and bignums are not supported yet"
-                    ))
-                })
+        if let (Num::Fixnum(x), Num::Fixnum(y)) = (&x, &y) {
+            let result = match op {
+                Arith::Add => x.checked_add(*y),
+                Arith::Sub => x.checked_sub(*y),
+                Arith::Mul => x.checked_mul(*y),
+            };
+            if let Some(v) = result.and_then(Value::fixnum) {
+                return Ok(v);
             }
-            (x, y) => {
-                let float = |n| match n {
-                    Num::Fixnum(n) => n as f64,
-                    Num::Flonum(x) => x,
+        }
+        match (x.exact(), y.exact()) {
+            (Some(x), Some(y)) => {
+                let result = match op {
+                    Arith::Add => &x + &y,
+                    Arith::Sub => &x - &y,
+                    Arith::Mul => &x * &y,
                 };
-                let (x, y) = (float(x), float(y));
+                Ok(self.integer_raw(&result)?)
+            }
+            _ => {
+                let (x, y) = (x.to_f64(), y.to_f64());
                 let result = match op {
                     Arith::Add => x + y,
                     Arith::Sub => x - y,
@@ -407,24 +474,15 @@ impl<S: Strategy> Cx<S> {
             (None, _) => return Err(type_error(name, "a number", a)),
             (_, None) => return Err(type_error(name, "a number", b)),
         };
-        Ok(match (x, y) {
-            (Num::Fixnum(x), Num::Fixnum(y)) => match op {
-                Compare::Lt => x < y,
-                Compare::Le => x <= y,
-                Compare::Eq => x == y,
-            },
-            (x, y) => {
-                let float = |n| match n {
-                    Num::Fixnum(n) => n as f64,
-                    Num::Flonum(x) => x,
-                };
-                let (x, y) = (float(x), float(y));
-                match op {
-                    Compare::Lt => x < y,
-                    Compare::Le => x <= y,
-                    Compare::Eq => x == y,
-                }
-            }
+        let ordering = match (x.exact(), y.exact()) {
+            (Some(x), Some(y)) => Some(x.cmp(&y)),
+            _ => x.to_f64().partial_cmp(&y.to_f64()),
+        };
+        Ok(match (op, ordering) {
+            (_, None) => false,
+            (Compare::Lt, Some(o)) => o.is_lt(),
+            (Compare::Le, Some(o)) => o.is_le(),
+            (Compare::Eq, Some(o)) => o.is_eq(),
         })
     }
 
@@ -1206,5 +1264,22 @@ impl<S: Strategy> Cx<S> {
 impl From<SchemeError> for Error {
     fn from(e: SchemeError) -> Error {
         Error::Scheme(Box::new(e))
+    }
+}
+
+impl Handle {
+    /// The exact integer, if this is a fixnum or a bignum.
+    pub fn to_integer<S: Strategy>(&self, cx: &mut Cx<S>) -> Result<Integer, Error> {
+        let v = cx.get(self)?;
+        if let Some(n) = v.as_fixnum() {
+            return Ok(Integer::from(n));
+        }
+        if cx.is_other(v, TypeCode::Bignum) {
+            // SAFETY: `v` is a live bignum.
+            return Ok(unsafe { cx.bignum_value(v) });
+        }
+        Err(Error::WrongType {
+            expected: "an exact integer",
+        })
     }
 }

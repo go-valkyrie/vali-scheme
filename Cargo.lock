@@ -453,6 +453,7 @@ dependencies = [
  "libc",
  "vali-abi",
  "vali-bytecode",
+ "vali-num",
 ]
 
 [[package]]

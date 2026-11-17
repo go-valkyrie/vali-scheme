@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 vali-abi.workspace = true
 vali-bytecode.workspace = true
+vali-num.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

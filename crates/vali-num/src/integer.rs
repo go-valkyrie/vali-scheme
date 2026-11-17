@@ -68,3 +68,48 @@ macro_rules! from_primitive {
 from_primitive!(
     i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
 );
+
+/// Access to an integer's representation, for runtimes that store integers
+/// in their own heap.
+#[cfg(target_pointer_width = "64")]
+impl Integer {
+    /// The integer whose magnitude is `limbs`, least significant first, and
+    /// which is negative if `negative` is set.
+    pub fn from_limbs(negative: bool, limbs: &[u64]) -> Integer {
+        let sign = if negative {
+            dashu_int::Sign::Negative
+        } else {
+            dashu_int::Sign::Positive
+        };
+        Integer(IBig::from_parts(sign, dashu_int::UBig::from_words(limbs)))
+    }
+
+    /// Whether the integer is negative, and its magnitude's limbs, least
+    /// significant first, with no high zero limbs.
+    pub fn limbs(&self) -> (bool, &[u64]) {
+        let (sign, words) = self.0.as_sign_words();
+        (sign == dashu_int::Sign::Negative, words)
+    }
+}
+
+macro_rules! arithmetic {
+    ($($trait:ident $method:ident),*) => {$(
+        impl std::ops::$trait for &Integer {
+            type Output = Integer;
+
+            fn $method(self, other: &Integer) -> Integer {
+                Integer(std::ops::$trait::$method(&self.0, &other.0))
+            }
+        }
+
+        impl std::ops::$trait for Integer {
+            type Output = Integer;
+
+            fn $method(self, other: Integer) -> Integer {
+                Integer(std::ops::$trait::$method(self.0, other.0))
+            }
+        }
+    )*};
+}
+
+arithmetic!(Add add, Sub sub, Mul mul);

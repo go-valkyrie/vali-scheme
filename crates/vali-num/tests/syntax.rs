@@ -303,3 +303,19 @@ fn flonums_round_trip() {
         );
     }
 }
+
+#[test]
+fn integer_limbs_and_arithmetic() {
+    use vali_num::Integer;
+    let big = Integer::from_limbs(false, &[0, 1]); // 2^64
+    assert_eq!(big.limbs(), (false, &[0u64, 1][..]));
+    assert_eq!(big.to_i128(), Some(1 << 64));
+    let negative = Integer::from_limbs(true, &[5]);
+    assert_eq!(negative.to_i64(), Some(-5));
+    assert_eq!((&big - &big).limbs(), (false, &[][..]));
+    assert_eq!(
+        (&big * &big).to_string_radix(vali_num::Radix::Decimal),
+        "340282366920938463463374607431768211456"
+    );
+    assert_eq!((Integer::from(7) + Integer::from(-10)).to_i64(), Some(-3));
+}

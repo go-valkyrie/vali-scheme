@@ -589,30 +589,134 @@ fn invalid_bytecode_is_refused() {
     );
 }
 
+/// `(+ fixnum-max 1)` overflows into a bignum, and `(- bignum 1)` comes
+/// back to a fixnum.
 #[test]
-fn fixnum_overflow_is_reported() {
+fn fixnum_overflow_makes_bignums() {
     let mut cx = cx();
     let mut m = ModuleBuilder::new("overflow");
-    let big = m.constant(Constant::Integer((1 << 60) - 1));
-    let mut body = FunctionBuilder::new(None, Arity::exactly(0), 2, 0);
+    let max = m.constant(Constant::Integer((1 << 60) - 1));
+    let mut body = FunctionBuilder::new(None, Arity::exactly(0), 3, 0);
     body.emit(I::LoadConstant {
         dst: 1,
-        constant: big,
+        constant: max,
     })
     .emit(I::AddImm {
-        dst: 1,
+        dst: 2,
         a: 1,
         imm: 1,
+    })
+    .emit(I::Return { src: 2 });
+    let body = m.function(body.finish().unwrap());
+    let id = cx.load(m.finish(body)).unwrap();
+    let big = cx.run(id).unwrap();
+    assert_eq!(big.as_fixnum(), None, "beyond the fixnum range");
+    assert_eq!(big.to_integer(&mut cx).unwrap().to_i64(), Some(1 << 60));
+}
+
+/// `(define (square-until n limit) (if (< limit n) n (square-until (* n n) limit)))`,
+/// run from 3 past 2^200: bignum multiplication and comparison, with a
+/// bignum constant as the limit.
+#[test]
+fn bignum_arithmetic_and_comparison() {
+    let mut cx = cx();
+    let mut m = ModuleBuilder::new("squares");
+    let square_var = m.variable("square-until");
+    let mut f = FunctionBuilder::new(Some("square-until"), Arity::exactly(2), 6, 0);
+    let again = f.label();
+    f.branch(
+        I::IfLt {
+            a: 2,
+            b: 1,
+            offset: 0,
+        },
+        again,
+    );
+    f.emit(I::Return { src: 1 });
+    f.bind(again);
+    f.emit(I::GetVariable {
+        dst: 3,
+        variable: square_var,
+    })
+    .emit(I::Mul { dst: 4, a: 1, b: 1 })
+    .emit(I::Mov { dst: 5, src: 2 })
+    .emit(I::TailCall { proc: 3, argc: 2 });
+    let f = m.function(f.finish().unwrap());
+    let unspecified = m.constant(Constant::Unspecified);
+    let mut body = FunctionBuilder::new(Some("body"), Arity::exactly(0), 2, 0);
+    body.emit(I::Closure {
+        dst: 1,
+        function: f,
+        free: vec![],
+    })
+    .emit(I::SetVariable {
+        src: 1,
+        variable: square_var,
+    })
+    .emit(I::LoadConstant {
+        dst: 1,
+        constant: unspecified,
     })
     .emit(I::Return { src: 1 });
     let body = m.function(body.finish().unwrap());
     let id = cx.load(m.finish(body)).unwrap();
-    let Error::Scheme(e) = cx.run(id).unwrap_err() else {
-        panic!("expected an overflow error");
+    cx.run(id).unwrap();
+    let square_until = cx.variable(id, "square-until").unwrap();
+
+    // 3, 9, 81, 6561, ...: 3^128 is the first square of squares above 2^200,
+    // which is about 3^126.
+    let limit = vali_num::Integer::from_limbs(false, &[0, 0, 0, 1 << 8]);
+    let limit_value = {
+        // 2^200, computed by the VM from the fixnum 2^50, so the limit is a
+        // bignum on the heap.
+        let mut m = ModuleBuilder::new("limit");
+        let big = m.constant(Constant::Integer(1 << 50));
+        let mut body = FunctionBuilder::new(None, Arity::exactly(0), 3, 0);
+        body.emit(I::LoadConstant {
+            dst: 1,
+            constant: big,
+        })
+        .emit(I::Mul { dst: 2, a: 1, b: 1 }) // 2^100
+        .emit(I::Mul { dst: 2, a: 2, b: 2 }) // 2^200
+        .emit(I::Return { src: 2 });
+        let body = m.function(body.finish().unwrap());
+        let id = cx.load(m.finish(body)).unwrap();
+        cx.run(id).unwrap()
     };
-    assert!(
-        e.message.contains("bignums are not supported yet"),
-        "{}",
-        e.message
-    );
+    assert_eq!(limit_value.to_integer(&mut cx).unwrap(), limit);
+    let result = cx
+        .call(&square_until, &[Handle::fixnum(3).unwrap(), limit_value])
+        .unwrap()
+        .to_integer(&mut cx)
+        .unwrap();
+    let mut expected = vali_num::Integer::from(3);
+    for _ in 0..7 {
+        expected = &expected * &expected;
+    }
+    assert_eq!(result, expected, "3^128");
+}
+
+/// A bignum mixed with a flonum gives a flonum.
+#[test]
+fn bignums_mix_with_flonums() {
+    let mut cx = cx();
+    let mut m = ModuleBuilder::new("mixed");
+    let big = m.constant(Constant::Integer(1 << 50));
+    let half = m.constant(Constant::Flonum(0.5));
+    let mut body = FunctionBuilder::new(None, Arity::exactly(0), 4, 0);
+    body.emit(I::LoadConstant {
+        dst: 1,
+        constant: big,
+    })
+    .emit(I::Mul { dst: 1, a: 1, b: 1 }) // 2^100, a bignum
+    .emit(I::LoadConstant {
+        dst: 2,
+        constant: half,
+    })
+    .emit(I::Mul { dst: 3, a: 1, b: 2 })
+    .emit(I::Return { src: 3 });
+    let body = m.function(body.finish().unwrap());
+    let id = cx.load(m.finish(body)).unwrap();
+    let result = cx.run(id).unwrap();
+    assert_eq!(result.to_f64(&mut cx), Ok(2f64.powi(99)));
 }
