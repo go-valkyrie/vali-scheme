@@ -143,7 +143,15 @@ const STANDARD: &[(&[&str], &str)] = &[
         include_str!("../lib/scheme/case-lambda.sld"),
     ),
     (&["scheme", "char"], include_str!("../lib/scheme/char.sld")),
+    (
+        &["scheme", "complex"],
+        include_str!("../lib/scheme/complex.sld"),
+    ),
     (&["scheme", "cxr"], include_str!("../lib/scheme/cxr.sld")),
+    (
+        &["scheme", "inexact"],
+        include_str!("../lib/scheme/inexact.sld"),
+    ),
     (&["scheme", "lazy"], include_str!("../lib/scheme/lazy.sld")),
     (
         &["scheme", "write"],

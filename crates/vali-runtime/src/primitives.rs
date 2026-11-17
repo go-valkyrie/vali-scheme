@@ -12,7 +12,7 @@ use crate::cx::Cx;
 use crate::handle::Error;
 use crate::strategy::Strategy;
 use crate::value::Value;
-use crate::vm::{Arith, Compare, Num, type_error};
+use crate::vm::type_error;
 use crate::{output, records};
 
 const fn at_least(n: u8) -> Arity {
@@ -20,126 +20,6 @@ const fn at_least(n: u8) -> Arity {
         required: n,
         optional: 0,
         rest: true,
-    }
-}
-
-fn add<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    fold(cx, Arith::Add, Value::fixnum(0).expect("fits"), args)
-}
-
-fn mul<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    fold(cx, Arith::Mul, Value::fixnum(1).expect("fits"), args)
-}
-
-fn sub<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    match args {
-        [x] => cx.arith(Arith::Sub, Value::fixnum(0).expect("fits"), *x),
-        [x, rest @ ..] => {
-            let mut acc = *x;
-            for &y in rest {
-                acc = cx.arith(Arith::Sub, acc, y)?;
-            }
-            Ok(acc)
-        }
-        [] => unreachable!("arity checked"),
-    }
-}
-
-fn fold<S: Strategy>(
-    cx: &mut Cx<S>,
-    op: Arith,
-    start: Value,
-    args: &[Value],
-) -> Result<Value, Error> {
-    let mut acc = start;
-    for &x in args {
-        acc = cx.arith(op, acc, x)?;
-    }
-    Ok(acc)
-}
-
-/// A chain of comparisons: `(< a b c)` is `a < b` and `b < c`. `>` and
-/// `>=` swap their operands.
-fn chain<S: Strategy>(cx: &Cx<S>, op: Compare, swap: bool, args: &[Value]) -> Result<Value, Error> {
-    let mut result = true;
-    for pair in args.windows(2) {
-        let (a, b) = if swap {
-            (pair[1], pair[0])
-        } else {
-            (pair[0], pair[1])
-        };
-        // Every argument is checked, even after the answer is known.
-        result &= cx.compare(op, a, b)?;
-    }
-    Ok(Value::boolean(result))
-}
-
-fn num_eq<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    chain(cx, Compare::Eq, false, args)
-}
-fn lt<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    chain(cx, Compare::Lt, false, args)
-}
-fn le<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    chain(cx, Compare::Le, false, args)
-}
-fn gt<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    chain(cx, Compare::Lt, true, args)
-}
-fn ge<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    chain(cx, Compare::Le, true, args)
-}
-
-fn division<S: Strategy>(
-    cx: &mut Cx<S>,
-    args: &[Value],
-    name: &str,
-    remainder: bool,
-) -> Result<Value, Error> {
-    let (a, b) = (args[0], args[1]);
-    // Two fixnums: no conversion. Only the quotient of the most negative
-    // fixnum by -1 leaves the fixnum range, and that takes the slow path.
-    if let (Some(x), Some(y)) = (a.as_fixnum(), b.as_fixnum())
-        && y != 0
-        && let Some(result) = Value::fixnum(if remainder { x % y } else { x / y })
-    {
-        return Ok(result);
-    }
-    let (Some(x), Some(y)) = (
-        cx.number(a).and_then(|n| n.exact()),
-        cx.number(b).and_then(|n| n.exact()),
-    ) else {
-        let culprit = if cx.number(a).and_then(|n| n.exact()).is_none() {
-            a
-        } else {
-            b
-        };
-        return Err(type_error(name, "an exact integer", culprit));
-    };
-    if y.is_zero() {
-        return Err(Error::scheme(format!("{name}: division by zero")));
-    }
-    // Truncating division, as R7RS's quotient and remainder are.
-    let result = if remainder { &x % &y } else { &x / &y };
-    Ok(cx.integer_raw(&result)?)
-}
-
-fn quotient<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    division(cx, args, "quotient", false)
-}
-fn remainder<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    division(cx, args, "remainder", true)
-}
-
-/// `modulo`: the remainder of division rounding towards negative infinity,
-/// with the sign of the divisor.
-fn modulo<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let r = division(cx, args, "modulo", true)?;
-    let (r_sign, divisor_sign) = (sign(cx, "modulo", r)?, sign(cx, "modulo", args[1])?);
-    if r_sign != 0 && r_sign != divisor_sign {
-        cx.arith(Arith::Add, r, args[1])
-    } else {
-        Ok(r)
     }
 }
 
@@ -260,11 +140,12 @@ fn eqv_values<S: Strategy>(cx: &Cx<S>, a: Value, b: Value) -> bool {
     if a == b {
         return true;
     }
+    // Distinct fixnums and immediates are never eqv.
+    if !a.is_pointer() && !b.is_pointer() {
+        return false;
+    }
     match (cx.number(a), cx.number(b)) {
-        (Some(Num::Flonum(x)), Some(Num::Flonum(y))) => {
-            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
-        }
-        (Some(Num::Integer(x)), Some(Num::Integer(y))) => x == y,
+        (Some(x), Some(y)) => x.eqv(&y),
         _ => false,
     }
 }
@@ -641,177 +522,6 @@ fn list_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error>
     Ok(unsafe { cx.car(pair) })
 }
 
-fn number_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Num, Error> {
-    cx.number(v).ok_or_else(|| type_error(name, "a number", v))
-}
-
-fn is_number<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(cx.number(args[0]).is_some()))
-}
-
-fn is_integer<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(match cx.number(args[0]) {
-        Some(Num::Fixnum(_) | Num::Integer(_)) => true,
-        Some(Num::Flonum(x)) => x.is_finite() && x.fract() == 0.0,
-        None => false,
-    }))
-}
-
-fn is_exact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(
-        number_arg(cx, "exact?", args[0])?.exact().is_some(),
-    ))
-}
-
-fn is_inexact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(
-        number_arg(cx, "inexact?", args[0])?.exact().is_none(),
-    ))
-}
-
-/// The sign of a number: -1, 0 or 1, with NaN as 0.
-fn sign<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<i32, Error> {
-    Ok(match number_arg(cx, name, v)? {
-        Num::Fixnum(n) => n.signum() as i32,
-        Num::Integer(n) if n.is_zero() => 0,
-        Num::Integer(n) => {
-            if n.is_negative() {
-                -1
-            } else {
-                1
-            }
-        }
-        Num::Flonum(x) if x > 0.0 => 1,
-        Num::Flonum(x) if x < 0.0 => -1,
-        Num::Flonum(_) => 0,
-    })
-}
-
-fn is_zero<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let zero = match number_arg(cx, "zero?", args[0])? {
-        Num::Flonum(x) => x == 0.0,
-        _ => sign(cx, "zero?", args[0])? == 0,
-    };
-    Ok(Value::boolean(zero))
-}
-
-fn is_positive<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(sign(cx, "positive?", args[0])? > 0))
-}
-
-fn is_negative<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(sign(cx, "negative?", args[0])? < 0))
-}
-
-fn parity<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<bool, Error> {
-    match cx.number(v) {
-        Some(Num::Fixnum(n)) => Ok(n % 2 != 0),
-        Some(Num::Integer(n)) => Ok(n.limbs().1.first().is_some_and(|l| l & 1 != 0)),
-        Some(Num::Flonum(x)) if x.is_finite() && x.fract() == 0.0 => Ok(x % 2.0 != 0.0),
-        _ => Err(type_error(name, "an integer", v)),
-    }
-}
-
-fn is_odd<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(parity(cx, "odd?", args[0])?))
-}
-
-fn is_even<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(!parity(cx, "even?", args[0])?))
-}
-
-fn abs<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    if sign(cx, "abs", args[0])? < 0 {
-        cx.arith(Arith::Sub, Value::fixnum(0).expect("fits"), args[0])
-    } else {
-        Ok(args[0])
-    }
-}
-
-/// `min` and `max`: if any argument is inexact, so is the result.
-fn extremum<S: Strategy>(
-    cx: &mut Cx<S>,
-    name: &str,
-    args: &[Value],
-    pick_greater: bool,
-) -> Result<Value, Error> {
-    let mut best = args[0];
-    number_arg(cx, name, best)?;
-    let mut inexact = cx.number(best).is_some_and(|n| n.exact().is_none());
-    for &x in &args[1..] {
-        inexact |= number_arg(cx, name, x)?.exact().is_none();
-        let x_less = cx.compare(Compare::Lt, x, best)?;
-        let best_less = cx.compare(Compare::Lt, best, x)?;
-        if (pick_greater && best_less) || (!pick_greater && x_less) {
-            best = x;
-        }
-    }
-    if inexact {
-        let x = cx.number(best).expect("checked").to_f64();
-        return Ok(cx.flonum_raw(x)?);
-    }
-    Ok(best)
-}
-
-fn min<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    extremum(cx, "min", args, false)
-}
-
-fn max<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    extremum(cx, "max", args, true)
-}
-
-fn exact_to_inexact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let x = number_arg(cx, "exact->inexact", args[0])?.to_f64();
-    Ok(cx.flonum_raw(x)?)
-}
-
-/// `inexact->exact` for whole numbers; other flonums need rationals.
-fn inexact_to_exact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    match number_arg(cx, "inexact->exact", args[0])? {
-        Num::Flonum(x) if x.is_finite() && x.fract() == 0.0 => {
-            Ok(cx.integer_raw(&whole_flonum(x))?)
-        }
-        Num::Flonum(_) => Err(Error::scheme(
-            "inexact->exact: rationals are not supported in the heap yet",
-        )),
-        _ => Ok(args[0]),
-    }
-}
-
-/// The exact integer a finite, whole flonum equals: its significand shifted
-/// by its exponent.
-fn whole_flonum(x: f64) -> vali_num::Integer {
-    use vali_num::Integer;
-    let bits = x.to_bits();
-    let exponent = ((bits >> 52) & 0x7ff) as i64;
-    let fraction = bits & ((1 << 52) - 1);
-    let significand = if exponent == 0 {
-        fraction << 1
-    } else {
-        fraction | 1 << 52
-    };
-    // x = significand × 2^shift
-    let shift = exponent - 1075;
-    let mut n = if shift >= 0 {
-        let mut n = Integer::from(significand);
-        let mut left = shift;
-        while left > 0 {
-            let step = left.min(62);
-            n = &n * &Integer::from(1u64 << step);
-            left -= step;
-        }
-        n
-    } else {
-        // Whole, so the bits shifted out are zero.
-        Integer::from(significand >> (-shift).min(63))
-    };
-    if x < 0.0 {
-        n = &Integer::from(0) - &n;
-    }
-    n
-}
-
 fn is_boolean<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     Ok(Value::boolean(args[0].as_boolean().is_some()))
 }
@@ -857,47 +567,6 @@ fn symbol_eq<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Erro
         }
     }
     Ok(Value::boolean(args.windows(2).all(|p| p[0] == p[1])))
-}
-
-fn radix_arg(name: &str, args: &[Value]) -> Result<vali_num::Radix, Error> {
-    use vali_num::Radix;
-    match args.get(1).copied().filter(|v| *v != Value::DEFAULT) {
-        None => Ok(Radix::Decimal),
-        Some(v) => match v.as_fixnum() {
-            Some(2) => Ok(Radix::Binary),
-            Some(8) => Ok(Radix::Octal),
-            Some(10) => Ok(Radix::Decimal),
-            Some(16) => Ok(Radix::Hexadecimal),
-            _ => Err(type_error(name, "a radix of 2, 8, 10 or 16", v)),
-        },
-    }
-}
-
-fn number_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let radix = radix_arg("number->string", args)?;
-    let number = match number_arg(cx, "number->string", args[0])? {
-        Num::Fixnum(n) => vali_num::Number::Integer(n.into()),
-        Num::Integer(n) => vali_num::Number::Integer(n),
-        Num::Flonum(x) => vali_num::Number::Real(x),
-    };
-    let text = number
-        .to_string_radix(radix)
-        .ok_or_else(|| Error::scheme("number->string: inexact numbers print only in radix 10"))?;
-    Ok(cx.string_raw(&text, false)?)
-}
-
-/// `string->number`: `#f` for text that is not a number.
-fn string_to_number<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let radix = radix_arg("string->number", args)?;
-    let text = string_arg(cx, "string->number", args[0])?.to_owned();
-    match vali_num::parse(&text, radix) {
-        Err(_) => Ok(Value::FALSE),
-        Ok(vali_num::Number::Integer(n)) => Ok(cx.integer_raw(&n)?),
-        Ok(vali_num::Number::Real(x)) => Ok(cx.flonum_raw(x)?),
-        Ok(_) => Err(Error::scheme(
-            "string->number: rationals and complex numbers are not supported in the heap yet",
-        )),
-    }
 }
 
 fn vector_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value, Error> {
@@ -994,18 +663,7 @@ fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
 
 /// The standard procedures implemented in Rust.
 fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
-    vec![
-        ("+", at_least(0), add),
-        ("*", at_least(0), mul),
-        ("-", at_least(1), sub),
-        ("=", at_least(1), num_eq),
-        ("<", at_least(1), lt),
-        ("<=", at_least(1), le),
-        (">", at_least(1), gt),
-        (">=", at_least(1), ge),
-        ("quotient", Arity::exactly(2), quotient),
-        ("remainder", Arity::exactly(2), remainder),
-        ("modulo", Arity::exactly(2), modulo),
+    let mut table: Vec<(&'static str, Arity, NativeFn<S>)> = vec![
         ("cons", Arity::exactly(2), cons),
         ("car", Arity::exactly(1), car),
         ("cdr", Arity::exactly(1), cdr),
@@ -1068,38 +726,6 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("char-whitespace?", Arity::exactly(1), char_whitespace),
         ("string-upcase", Arity::exactly(1), string_upcase),
         ("string-downcase", Arity::exactly(1), string_downcase),
-        (
-            "number->string",
-            Arity {
-                required: 1,
-                optional: 1,
-                rest: false,
-            },
-            number_to_string,
-        ),
-        (
-            "string->number",
-            Arity {
-                required: 1,
-                optional: 1,
-                rest: false,
-            },
-            string_to_number,
-        ),
-        ("number?", Arity::exactly(1), is_number),
-        ("integer?", Arity::exactly(1), is_integer),
-        ("exact?", Arity::exactly(1), is_exact),
-        ("inexact?", Arity::exactly(1), is_inexact),
-        ("zero?", Arity::exactly(1), is_zero),
-        ("positive?", Arity::exactly(1), is_positive),
-        ("negative?", Arity::exactly(1), is_negative),
-        ("odd?", Arity::exactly(1), is_odd),
-        ("even?", Arity::exactly(1), is_even),
-        ("abs", Arity::exactly(1), abs),
-        ("min", at_least(1), min),
-        ("max", at_least(1), max),
-        ("exact->inexact", Arity::exactly(1), exact_to_inexact),
-        ("inexact->exact", Arity::exactly(1), inexact_to_exact),
         ("boolean?", Arity::exactly(1), is_boolean),
         ("procedure?", Arity::exactly(1), is_procedure),
         ("vector?", Arity::exactly(1), is_vector),
@@ -1146,7 +772,9 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("%record?", Arity::exactly(2), records::is_record),
         ("%record-ref", Arity::exactly(3), records::record_ref),
         ("%record-set!", Arity::exactly(4), records::record_set),
-    ]
+    ];
+    table.extend(crate::numbers::table());
+    table
 }
 
 /// The names of the standard procedures implemented in Rust, which

@@ -10,7 +10,6 @@ use std::any::Any;
 use std::collections::HashSet;
 
 use vali_abi::{Tag, TypeCode};
-use vali_num::{Integer, Number};
 use vali_syntax::{Datum, DatumKind, ScopeSetId, Span, Syntax};
 
 use crate::cx::{Cx, get, put};
@@ -69,8 +68,8 @@ impl<S: Strategy> Cx<S> {
     /// `v` must be a valid value.
     unsafe fn datum_of(&self, v: Value, span: Span, open: &mut HashSet<u64>) -> Option<Datum> {
         let datum = |kind| Some(Datum { kind, span });
-        if let Some(n) = v.as_fixnum() {
-            return datum(DatumKind::Number(Number::Integer(Integer::from(n))));
+        if let Some(n) = self.number(v) {
+            return datum(DatumKind::Number(n));
         }
         if let Some(b) = v.as_boolean() {
             return datum(DatumKind::Boolean(b));
@@ -87,9 +86,6 @@ impl<S: Strategy> Cx<S> {
         match v.tag() {
             // SAFETY: valid values with these tags are live objects of the
             // type the tag names.
-            Tag::Flonum => datum(DatumKind::Number(Number::Real(unsafe {
-                self.flonum_value(v)
-            }))),
             Tag::String => datum(DatumKind::String(unsafe { self.string_str(v) }.to_owned())),
             Tag::Symbol => datum(DatumKind::Symbol(unsafe { self.symbol_name(v) }.to_owned())),
             Tag::Pair => {
@@ -119,12 +115,6 @@ impl<S: Strategy> Cx<S> {
                     open.remove(&address);
                 }
                 datum(DatumKind::List { items, tail })
-            }
-            Tag::Other if self.is_other(v, TypeCode::Bignum) => {
-                // SAFETY: `v` is a live bignum.
-                datum(DatumKind::Number(Number::Integer(unsafe {
-                    self.bignum_value(v)
-                })))
             }
             Tag::Other if self.is_other(v, TypeCode::Bytevector) => {
                 // SAFETY: `v` is a live bytevector.

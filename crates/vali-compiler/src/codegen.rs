@@ -77,10 +77,10 @@ fn error(message: impl Into<String>, span: Option<Span>) -> CompileError {
     }
 }
 
-/// A datum as a constant.
-fn constant(d: &Datum) -> Result<Constant> {
-    Ok(match &d.kind {
-        DatumKind::Number(Number::Integer(n)) => match n.to_i64() {
+/// A number as a constant.
+fn number_constant(n: &Number) -> Constant {
+    match n {
+        Number::Integer(n) => match n.to_i64() {
             Some(n) => Constant::Integer(n),
             None => {
                 let (negative, limbs) = n.limbs();
@@ -90,13 +90,23 @@ fn constant(d: &Datum) -> Result<Constant> {
                 }
             }
         },
-        DatumKind::Number(Number::Real(x)) => Constant::Flonum(*x),
-        DatumKind::Number(_) => {
-            return Err(error(
-                "rationals and complex numbers are not supported yet",
-                Some(d.span),
-            ));
-        }
+        Number::Real(x) => Constant::Flonum(*x),
+        Number::Rational(r) => Constant::Ratio(
+            Box::new(number_constant(&Number::Integer(r.numerator()))),
+            Box::new(number_constant(&Number::Integer(r.denominator()))),
+        ),
+        Number::Complex(c) => Constant::Complex(
+            Box::new(number_constant(&c.real_part())),
+            Box::new(number_constant(&c.imag_part())),
+        ),
+        _ => unreachable!("vali-num has no other kinds of number"),
+    }
+}
+
+/// A datum as a constant.
+fn constant(d: &Datum) -> Result<Constant> {
+    Ok(match &d.kind {
+        DatumKind::Number(n) => number_constant(n),
         DatumKind::Boolean(b) => Constant::Boolean(*b),
         DatumKind::Character(c) => Constant::Character(*c),
         DatumKind::String(s) => Constant::String(s.as_str().into()),

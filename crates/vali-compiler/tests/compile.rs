@@ -923,6 +923,130 @@ fn syntax_objects_at_run_time() {
 }
 
 #[test]
+fn the_numeric_tower() {
+    check(&[
+        // Literals are constants of every kind.
+        (
+            "(list 1/2 -3/4 1+2i 1.5-0.5i +i 6/4)",
+            "(1/2 -3/4 1+2i 1.5-0.5i 0+1i 3/2)",
+        ),
+        ("(list (/ 1 3) (/ 6 3) (/ 1 2.0) (/ 2))", "(1/3 2 0.5 1/2)"),
+        ("(+ 1/2 1/3 1/6)", "1"),
+        ("(* 2/3 3/2)", "1"),
+        ("(- 1/2 0.5)", "0.0"),
+        ("(* +i +i)", "-1"),
+        (
+            "(list (+ 1+2i 1-2i) (* 1+2i 3-i) (/ 5+5i 3-i))",
+            "(2 5+5i 1+2i)",
+        ),
+        (
+            "(list (< 1/3 0.5 2/3) (= 1/2 0.5) (= 1+2i 1.0+2.0i) (> 9007199254740993 9007199254740992.0))",
+            "(#t #t #t #t)",
+        ),
+        (
+            "(list (eqv? 1/2 1/2) (eqv? 1/2 0.5) (eqv? 1+2i 1+2i) (equal? '(1/2) (list (/ 1 2))))",
+            "(#t #f #t #t)",
+        ),
+        ("(memv 1/2 (list 1 (/ 2 4) 3))", "(1/2 3)"),
+        (
+            "(list (exact 0.5) (exact 2.0) (inexact 1/4) (inexact 1+2i) (exact 0.5+1.5i))",
+            "(1/2 2 0.25 1.0+2.0i 1/2+3/2i)",
+        ),
+        (
+            "(list (numerator 6/4) (denominator 6/4) (denominator 0.5) (numerator 5))",
+            "(3 2 2.0 5)",
+        ),
+        (
+            "(list (floor -7/2) (ceiling -7/2) (truncate -7/2) (round 7/2) (round 5/2) (round 2.5) (floor 2.5))",
+            "(-4 -3 -3 4 2 2.0 2.0)",
+        ),
+        (
+            "(list (quotient -7 2) (remainder -7 2) (modulo -7 2) (modulo 7 -2) (modulo -7.0 2))",
+            "(-3 -1 1 -1 1.0)",
+        ),
+        (
+            "(list (floor-quotient -7 2) (floor-remainder -7 2) (truncate-quotient -7 2) (truncate-remainder -7 2))",
+            "(-4 1 -3 -1)",
+        ),
+        (
+            "(call-with-values (lambda () (floor/ -7 2)) list)",
+            "(-4 1)",
+        ),
+        (
+            "(let-values (((q r) (truncate/ -7 2))) (list q r))",
+            "(-3 -1)",
+        ),
+        (
+            "(let-values (((s r) (exact-integer-sqrt 17))) (list s r))",
+            "(4 1)",
+        ),
+        (
+            "(list (gcd 32 -36) (gcd) (lcm 32 -36) (lcm) (gcd 4.0 6))",
+            "(4 0 288 1 2.0)",
+        ),
+        (
+            "(list (expt 2 100) (expt 2/3 3) (expt 2 -2) (expt 2.0 3) (expt 0 0) (expt +i 2))",
+            "(1267650600228229401496703205376 8/27 1/4 8.0 1 -1)",
+        ),
+        (
+            "(list (abs -1/2) (abs -5) (min 1/2 1/3) (max 1 2.0) (min 1 2))",
+            "(1/2 5 1/3 2.0 1)",
+        ),
+        (
+            "(list (number? 1/2) (complex? 1+i) (real? 1+i) (real? 1/2) (rational? 1/2) (rational? 1.5) (rational? +inf.0))",
+            "(#t #t #f #t #t #t #f)",
+        ),
+        (
+            "(list (integer? 2.0) (integer? 1/2) (exact-integer? 2) (exact-integer? 2.0) (exact? 1/2) (inexact? 1.0+i))",
+            "(#t #f #t #f #t #t)",
+        ),
+        (
+            "(list (zero? 0/5) (positive? 1/2) (negative? -1/2) (odd? 7) (even? 1267650600228229401496703205376) (even? 4.0))",
+            "(#t #t #t #t #t #t)",
+        ),
+        (
+            "(list (number->string 1/3) (number->string 255 16) (number->string 1+2i) (string->number \"1/3\") (string->number \"#xff\") (string->number \"2+3i\") (string->number \"x\"))",
+            "(\"1/3\" \"ff\" \"1+2i\" 1/3 255 2+3i #f)",
+        ),
+        (
+            "(list (rationalize 1/3 1/100) (rationalize 3/10 1/10) (rationalize -3/10 1/10) (rationalize 0.3 1/10))",
+            "(1/3 1/3 -1/3 0.3333333333333333)",
+        ),
+        // Large values stay exact.
+        ("(* 1/3 (expt 10 30))", "1000000000000000000000000000000/3"),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(error("(/ 1 0)").contains("/: division by zero"));
+    assert!(error("(< 1 +i)").contains("<: expected a real number"));
+    assert!(error("(floor/ 1/2 1)").contains("floor/: expected an integer, got 1/2"));
+    assert!(error("(exact +inf.0)").contains("exact: no exact value"));
+    assert!(error("(exact-integer-sqrt -1)").contains("expected an exact non-negative integer"));
+    assert!(error("(+ 1 'a)").contains("+: expected a number, got a"));
+}
+
+#[test]
+fn inexact_and_complex_libraries() {
+    check(&[
+        (
+            "(import (scheme base) (scheme inexact))
+             (list (sqrt 16) (sqrt -4) (sqrt 9/4) (sqrt 2.25) (exp 0) (log 1) (sin 0) (cos 0) (atan 0 1))",
+            "(4 0+2i 3/2 1.5 1 0 0 1 0)",
+        ),
+        (
+            "(import (scheme base) (scheme inexact))
+             (list (log 8 2) (atan 1 0) (nan? +nan.0) (infinite? -inf.0) (finite? 1/2) (finite? +nan.0))",
+            "(3.0 1.5707963267948966 #t #t #t #f)",
+        ),
+        (
+            "(import (scheme base) (scheme complex))
+             (list (make-rectangular 1 2) (make-rectangular 1.5 0) (make-polar 2 0) (real-part 3-4i)
+                   (imag-part 3-4i) (imag-part 2.5) (magnitude 3-4i) (magnitude -5/2) (angle 1) (angle -1))",
+            "(1+2i 1.5 2 3 -4 0 5 5/2 0 3.141592653589793)",
+        ),
+    ]);
+}
+
+#[test]
 fn lists_from_r7rs() {
     check(&[
         (

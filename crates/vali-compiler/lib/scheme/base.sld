@@ -23,8 +23,13 @@
    ;; Auxiliary syntax, bound so that literals match by binding.
    else => _ ... unquote unquote-splicing
    ;; Procedures.
-   + * - = < <= > >= quotient remainder modulo abs min max
-   number? integer? exact? inexact? zero? positive? negative? odd? even?
+   + * - / = < <= > >= quotient remainder modulo abs min max
+   floor/ floor-quotient floor-remainder truncate/ truncate-quotient
+   truncate-remainder gcd lcm floor ceiling round truncate rationalize
+   numerator denominator exact inexact exact-integer-sqrt expt
+   number->string string->number
+   number? complex? real? rational? integer? exact-integer?
+   exact? inexact? zero? positive? negative? odd? even?
    cons car cdr set-car! set-cdr! list length reverse append list-tail
    list-ref memq memv member assq assv assoc null? pair? list?
    caar cadr cdar cddr map for-each list-copy make-list list-set!
@@ -409,6 +414,20 @@
               (else #f))))
 
     (define (square x) (* x x))
+
+    ;; rationalize (R7RS 6.2.6): the simplest rational within e of x, the
+    ;; one with the smallest denominator, by its continued fraction.
+    (define (rationalize x e)
+      (define (simplest lo hi)
+        (let ((fl (floor lo)))
+          (cond ((= fl lo) fl)
+                ((< fl (floor hi)) (+ fl 1))
+                (else (+ fl (/ (simplest (/ (- hi fl)) (/ (- lo fl)))))))))
+      (let* ((e (abs e)) (lo (- x e)) (hi (+ x e)))
+        (cond ((positive? lo) (simplest lo hi))
+              ((negative? hi) (- (simplest (- hi) (- lo))))
+              ((and (exact? x) (exact? e)) 0)
+              (else 0.0))))
 
     ;; Optional start and end indices into an object of length `len`,
     ;; checked, as (start . end).

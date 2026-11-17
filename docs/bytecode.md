@@ -8,7 +8,7 @@ The instruction set the VM interprets and the JIT compiles from (ADR 0005). This
 
 A **module** is what one library's body compiles to:
 
-- a **constant pool**: integers of any size, flonums, booleans, characters, the empty list, the unspecified value, and immutable strings, symbols, pairs, vectors and bytevectors of constants. Heap constants are created in each isolate when the module loads there;
+- a **constant pool**: integers of any size, flonums, exact rationals (a ratio of two integer constants in lowest terms), complex numbers (a pair of real constants, both exact or both flonums), booleans, characters, the empty list, the unspecified value, and immutable strings, symbols, pairs, vectors and bytevectors of constants. Heap constants are created in each isolate when the module loads there. A malformed numeric constant fails the load;
 - a **variable table**: the module's variables. Code refers to them by index. Each entry has a name and a link, which says where its cell is once the module loads (ADR 0005 #4):
   - **defined**: the module defines it, and its instance has the cell;
   - **imported** from a library, by the library's identity and the name it exports: the cell is that library's instance's. An importer cannot assign it;

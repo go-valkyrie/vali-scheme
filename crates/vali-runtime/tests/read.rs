@@ -59,8 +59,12 @@ fn errors() {
         panic!("expected a read error");
     };
     assert!(e.message.starts_with("read: "), "{}", e.message);
-    let Error::Scheme(e) = cx.read("1/2").unwrap_err() else {
-        panic!("expected an unsupported number");
-    };
-    assert!(e.message.contains("rationals"), "{}", e.message);
+}
+
+#[test]
+fn every_kind_of_number() {
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    let values = cx.read("1/2 -6/4 1+2i 1.5-0.5i +i #e1.25").unwrap();
+    let written: Vec<String> = values.iter().map(|v| cx.write_string(v).unwrap()).collect();
+    assert_eq!(written, ["1/2", "-3/2", "1+2i", "1.5-0.5i", "0+1i", "5/4"]);
 }

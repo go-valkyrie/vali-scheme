@@ -80,19 +80,8 @@ impl<S: Strategy> DatumBuilder for HeapBuilder<'_, S> {
     type Datum = Value;
 
     fn number(&mut self, value: Number, _span: Span) -> Value {
-        match value {
-            Number::Integer(n) => {
-                let result = self.cx.integer_raw(&n);
-                self.attempt(result)
-            }
-            Number::Real(x) => {
-                let result = self.cx.flonum_raw(x);
-                self.attempt(result)
-            }
-            _ => self.fail(Error::scheme(
-                "read: rationals and complex numbers are not supported in the heap yet",
-            )),
-        }
+        let result = self.cx.number_raw(&value);
+        self.attempt(result)
     }
 
     fn boolean(&mut self, value: bool, _span: Span) -> Value {

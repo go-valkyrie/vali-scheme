@@ -151,6 +151,44 @@ unsafe fn set(fp: *mut u64, i: usize, v: Value) {
     unsafe { *fp.sub(i + 1) = v.raw() }
 }
 
+/// The number a numeric constant stands for, if it is a well-formed one: a
+/// ratio of two integers in lowest terms that is not an integer, or a
+/// complex number of two reals of the same exactness that is not real.
+fn constant_number(constant: &Constant) -> Option<vali_num::Number> {
+    use vali_num::{Number, arith};
+    let integer = |c: &Constant| match c {
+        Constant::Integer(n) => Some(Number::from(*n)),
+        Constant::Bignum { negative, limbs } => {
+            Some(Number::Integer(Integer::from_limbs(*negative, limbs)))
+        }
+        _ => None,
+    };
+    match constant {
+        Constant::Ratio(n, d) => {
+            let (n, d) = (integer(n)?, integer(d)?);
+            let r = arith::div(&n, &d).ok()?;
+            let lowest = arith::numerator(&r)
+                .ok()
+                .is_some_and(|m| arith::num_eq(&m, &n));
+            (matches!(r, Number::Rational(_)) && lowest).then_some(r)
+        }
+        Constant::Complex(re, im) => {
+            let part = |c: &Constant| match c {
+                Constant::Flonum(x) => Some(Number::Real(*x)),
+                Constant::Ratio(..) => constant_number(c),
+                _ => integer(c),
+            };
+            let (re, im) = (part(re)?, part(im)?);
+            if re.is_exact() != im.is_exact() {
+                return None;
+            }
+            let z = arith::make_rectangular(&re, &im).ok()?;
+            matches!(z, Number::Complex(_)).then_some(z)
+        }
+        _ => None,
+    }
+}
+
 /// FNV-1a: a fixed, deterministic hash for symbol names (ADR 0001 #4).
 fn symbol_hash(name: &str) -> u64 {
     name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
@@ -171,33 +209,6 @@ enum Next {
     Return(Value),
     /// Something was raised.
     Raise(Error),
-}
-
-/// Numbers the generic arithmetic understands. Rationals and complex
-/// numbers come next.
-pub(crate) enum Num {
-    Fixnum(i64),
-    Integer(Integer),
-    Flonum(f64),
-}
-
-impl Num {
-    /// The exact integer, if this is one.
-    pub(crate) fn exact(&self) -> Option<Integer> {
-        match self {
-            Num::Fixnum(n) => Some(Integer::from(*n)),
-            Num::Integer(n) => Some(n.clone()),
-            Num::Flonum(_) => None,
-        }
-    }
-
-    pub(crate) fn to_f64(&self) -> f64 {
-        match self {
-            Num::Fixnum(n) => *n as f64,
-            Num::Integer(n) => n.to_f64(),
-            Num::Flonum(x) => *x,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -477,6 +488,12 @@ impl<S: Strategy> Cx<S> {
                 self.integer_raw(&Integer::from_limbs(*negative, limbs))?
             }
             Constant::Bytevector(bytes) => self.bytevector_raw(bytes)?,
+            Constant::Ratio(..) | Constant::Complex(..) => {
+                let n = constant_number(constant).ok_or_else(|| {
+                    Error::scheme(format!("invalid numeric constant {constant:?}"))
+                })?;
+                self.number_raw(&n)?
+            }
             Constant::Vector(items) => {
                 // SAFETY: the fill is a valid value.
                 let v = unsafe { self.make_vector_raw(items.len(), Value::UNSPECIFIED)? };
@@ -537,21 +554,6 @@ impl<S: Strategy> Cx<S> {
         v.tag() == Tag::Other && unsafe { self.header(v, t) }.and_then(Header::type_code) == Some(t)
     }
 
-    pub(crate) fn number(&self, v: Value) -> Option<Num> {
-        if let Some(n) = v.as_fixnum() {
-            return Some(Num::Fixnum(n));
-        }
-        if v.tag() == Tag::Flonum {
-            // SAFETY: a valid value tagged as a flonum is a live flonum.
-            return Some(Num::Flonum(unsafe { self.flonum_value(v) }));
-        }
-        if self.is_other(v, TypeCode::Bignum) {
-            // SAFETY: `v` is a live bignum.
-            return Some(Num::Integer(unsafe { self.bignum_value(v) }));
-        }
-        None
-    }
-
     /// A bignum's value.
     ///
     /// # Safety
@@ -588,75 +590,6 @@ impl<S: Strategy> Cx<S> {
             }
         }
         Ok(v)
-    }
-
-    /// Generic arithmetic: the slow path behind the fixnum fast paths. Exact
-    /// integers of any size stay exact; a flonum operand makes the result a
-    /// flonum.
-    pub(crate) fn arith(&mut self, op: Arith, a: Value, b: Value) -> Result<Value, Error> {
-        let name = match op {
-            Arith::Add => "+",
-            Arith::Sub => "-",
-            Arith::Mul => "*",
-        };
-        let (x, y) = match (self.number(a), self.number(b)) {
-            (Some(x), Some(y)) => (x, y),
-            (None, _) => return Err(type_error(name, "a number", a)),
-            (_, None) => return Err(type_error(name, "a number", b)),
-        };
-        if let (Num::Fixnum(x), Num::Fixnum(y)) = (&x, &y) {
-            let result = match op {
-                Arith::Add => x.checked_add(*y),
-                Arith::Sub => x.checked_sub(*y),
-                Arith::Mul => x.checked_mul(*y),
-            };
-            if let Some(v) = result.and_then(Value::fixnum) {
-                return Ok(v);
-            }
-        }
-        match (x.exact(), y.exact()) {
-            (Some(x), Some(y)) => {
-                let result = match op {
-                    Arith::Add => &x + &y,
-                    Arith::Sub => &x - &y,
-                    Arith::Mul => &x * &y,
-                };
-                Ok(self.integer_raw(&result)?)
-            }
-            _ => {
-                let (x, y) = (x.to_f64(), y.to_f64());
-                let result = match op {
-                    Arith::Add => x + y,
-                    Arith::Sub => x - y,
-                    Arith::Mul => x * y,
-                };
-                Ok(self.flonum_raw(result)?)
-            }
-        }
-    }
-
-    /// Generic comparison.
-    pub(crate) fn compare(&self, op: Compare, a: Value, b: Value) -> Result<bool, Error> {
-        let name = match op {
-            Compare::Lt => "<",
-            Compare::Le => "<=",
-            Compare::Eq => "=",
-        };
-        let (x, y) = match (self.number(a), self.number(b)) {
-            (Some(x), Some(y)) => (x, y),
-            (None, _) => return Err(type_error(name, "a number", a)),
-            (_, None) => return Err(type_error(name, "a number", b)),
-        };
-        let ordering = match (x.exact(), y.exact()) {
-            (Some(x), Some(y)) => Some(x.cmp(&y)),
-            _ => x.to_f64().partial_cmp(&y.to_f64()),
-        };
-        Ok(match (op, ordering) {
-            (_, None) => false,
-            (Compare::Lt, Some(o)) => o.is_lt(),
-            (Compare::Le, Some(o)) => o.is_le(),
-            (Compare::Eq, Some(o)) => o.is_eq(),
-        })
     }
 
     /// A `%catch`'s thunk returned: its catch is done. Out of line, so the

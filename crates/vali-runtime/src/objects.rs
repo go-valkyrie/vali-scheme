@@ -56,6 +56,7 @@ impl<S: Strategy> Cx<S> {
         unsafe {
             match t {
                 TypeCode::Pair | TypeCode::RecordType => 2,
+                TypeCode::Ratnum | TypeCode::ExactComplex | TypeCode::InexactComplex => 2,
                 TypeCode::Flonum | TypeCode::Box | TypeCode::Syntax => 1,
                 TypeCode::Symbol => 2,
                 TypeCode::String => 4,
@@ -84,7 +85,12 @@ impl<S: Strategy> Cx<S> {
         // SAFETY: as above.
         let fields = unsafe { Self::object_fields(v, t) };
         match t {
-            TypeCode::Pair | TypeCode::RecordType | TypeCode::Box | TypeCode::Record => {
+            TypeCode::Pair
+            | TypeCode::RecordType
+            | TypeCode::Box
+            | TypeCode::Record
+            | TypeCode::Ratnum
+            | TypeCode::ExactComplex => {
                 (0..fields).for_each(|i| f(field(i)));
             }
             // The first word is the code pointer, not a value.

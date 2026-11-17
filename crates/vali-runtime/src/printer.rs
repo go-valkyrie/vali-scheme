@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use vali_abi::{Tag, TypeCode};
-use vali_num::{Number, Radix};
+use vali_num::Number;
 
 use crate::cx::Cx;
 use crate::handle::{Error, Handle};
@@ -197,6 +197,10 @@ impl<S: Strategy> Printer<'_, S> {
                 Tag::Flonum => {
                     let _ = write!(self.out, "{}", Number::Real(self.cx.flonum_value(v)));
                 }
+                Tag::Other if self.cx.number(v).is_some() => {
+                    let n = self.cx.number(v).expect("a number");
+                    let _ = write!(self.out, "{n}");
+                }
                 Tag::String => {
                     let text = self.cx.string_str(v).to_owned();
                     self.string(&text);
@@ -215,10 +219,6 @@ impl<S: Strategy> Printer<'_, S> {
                     let header = self.cx.header(v, TypeCode::Record);
                     let type_code = header.and_then(vali_abi::Header::type_code);
                     match type_code {
-                        Some(TypeCode::Bignum) => {
-                            let n = self.cx.bignum_value(v);
-                            self.out.push_str(&n.to_string_radix(Radix::Decimal));
-                        }
                         Some(TypeCode::Box) => self.out.push_str("#<box>"),
                         Some(TypeCode::Record) => {
                             let name = self.cx.record_type_name(v).unwrap_or("?");
@@ -328,6 +328,16 @@ impl<S: Strategy> Cx<S> {
         printer.find_cycles(v);
         printer.print(v);
         printer.out
+    }
+
+    /// `v` as R7RS `write` prints it, cut short after 100 characters, for
+    /// error messages.
+    pub(crate) fn written(&self, v: Value) -> String {
+        let text = self.print(v, Mode::Write);
+        match text.char_indices().nth(100) {
+            Some((end, _)) => format!("{}...", &text[..end]),
+            None => text,
+        }
     }
 
     /// `v` as R7RS `write` prints it.

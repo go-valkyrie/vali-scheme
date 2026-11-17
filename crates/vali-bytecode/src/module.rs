@@ -77,6 +77,12 @@ pub enum Constant {
     },
     /// An immutable bytevector.
     Bytevector(Vec<u8>),
+    /// An exact rational that is not an integer: its numerator and
+    /// denominator, integer constants in lowest terms.
+    Ratio(Box<Constant>, Box<Constant>),
+    /// A complex number: its real and imaginary parts, real constants that
+    /// are both exact or both flonums.
+    Complex(Box<Constant>, Box<Constant>),
 }
 
 /// One function's code and metadata.
