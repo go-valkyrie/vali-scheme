@@ -5,6 +5,7 @@
 - **Amended:** 2026-11-16, this bytecode is the run format only; distribution uses ADR 0012
 - **Amended:** 2026-11-16, bindings that are never assigned are constants or direct slots; cells only for assigned locals captured by closures
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
+- **Amended:** 2026-11-17, variables are defined or imported, and belong to library instances (item 4)
 - **Related:** 0001 (artifacts), 0002 (values), 0004 (frames), 0006 (versioning), 0009 (untrusted code), 0012 (distribution format)
 
 ## Context
@@ -36,6 +37,8 @@ Options **B and D**, as follows.
 2. **Registers are frame slots** (ADR 0004), addressed by 8-bit operands in the common forms, so three fit in one word. Functions with more than 256 slots use wide variants. A function's slot count is fixed at compile time.
 3. **Calls** put the callee and its arguments in consecutive slots at the top of the caller's frame. Those slots become the bottom of the callee's frame, as in Lua, so arguments are never copied. Multiple values come back in consecutive slots with a count.
 4. **Names are resolved ahead of time.** Library-level variables are indexes into the module's variable table, and constants are indexes into its constant pool. Both tables are filled in when the artifact loads (ADR 0006). No instruction looks anything up by name.
+   - **Each entry of the variable table is defined by the module or imported:** imported entries name the exporting library by identity and the variable by its exported name.
+   - **Variables belong to library instances.** Each instance of a library, one per phase where it is used (ADR 0001 #2), has its own cell for each variable it defines. Loading a module links each imported entry to the cell of the instance it imports from. There is no table of globals shared by name, so a program defining `memv` cannot change what another library's `memv` means.
 
    **Bindings are cells only when they must be.** The compiler knows which bindings are ever `set!`:
    - **A binding that is never assigned** is a constant, read straight from the constant pool or inlined. Calls to a known procedure that is never assigned are direct calls. The interface records which exports are constant (ADR 0001), so this holds across libraries.

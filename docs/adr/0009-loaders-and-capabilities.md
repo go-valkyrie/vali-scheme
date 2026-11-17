@@ -6,6 +6,7 @@
 - **Amended:** 2026-11-16, marking Rust bridges as expansion-safe: meaning, enforcement, fingerprinting
 - **Amended:** 2026-11-16, loaders may serve distribution artifacts instead of source (ADR 0012)
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
+- **Amended:** 2026-11-17, the synchronous and asynchronous loader traits, and fetching the import graph before expansion (item 1)
 - **Related:** 0001 (cache validity), 0003 (memory limit), 0005 (untrusted bytecode), 0006 (native code), 0008 (isolates)
 
 ## Context
@@ -25,6 +26,9 @@ In each of these, a read nobody registered leaves a stale cache, with no error.
 ### Loaders
 
 1. **Libraries are found only through a loader that the host supplies.** Given a library name and the library importing it, a loader returns one of four things: the library's source with a canonical identity, a distribution artifact (ADR 0012), a cached artifact, or nothing. There is no built-in search path. Loaders come in a synchronous and an asynchronous form.
+   - **The two forms have the same shape:** `Loader::load` returns a result, and `AsyncLoader::load` returns a future of the same result, `Send` so it can run on a multi-threaded executor. Every `Loader` is also an `AsyncLoader`.
+   - **Loading happens before expansion, never during it.** A library's imports and its `include` declarations are known before its body is expanded, so compiling with an asynchronous loader first fetches the whole import graph, awaiting as it goes, then expands and compiles with everything in memory. The expander never awaits, which it couldn't do from inside a transformer anyway, since the VM is synchronous.
+   - **An `include` inside a body,** not in a library's declarations, is only known during expansion. It needs a synchronous loader; under a purely asynchronous one it is an error that says so.
 2. **Vali caches and reports by identity, not by name.** Two names that resolve to the same identity are the same library. Source spans in errors name the identity.
 3. **Vali's own libraries,** `(scheme base)` and the rest, come from a built-in loader that hosts combine with their own.
 4. **A loader that serves a cached artifact must also be able to serve the source or a distribution artifact,** for when the cached one is stale or was built by another Vali version (ADR 0005).

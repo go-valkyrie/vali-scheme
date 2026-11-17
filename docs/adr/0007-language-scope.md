@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, decided: the full numeric tower, SRFI 125 with SRFI 128, partial `(rnrs …)` aliases, SRFI 226; adds the Rust interface to numbers
+- **Amended:** 2026-11-17, standard libraries as embedded sources; programs without imports see `(scheme base)` (item 11)
 - **Related:** 0001 (libraries and phasing), 0002 (tags), 0004 (continuations), 0008 (tasks), 0009 (capabilities), 0011 (licences of dependencies)
 
 ## Context
@@ -56,6 +57,8 @@ Evaluating Steel and scheme-rs turned up standard procedures that real programs 
 9. **All of R7RS-small:** every `(scheme …)` library, proper tail calls, full `call/cc`, `dynamic-wind`, `define-record-type`, parameters, exceptions (`raise`, `guard`, `error`), string ports and bytevectors. Libraries that reach outside the program, such as `(scheme file)`, `(scheme process-context)`, `(scheme time)` and `(scheme load)`, work through capabilities (ADR 0009).
 10. **Macros:** `syntax-rules`, `syntax-case`, `datum->syntax`, `syntax->datum`, `free-identifier=?`, `bound-identifier=?`, `identifier?`, `generate-temporaries`, `with-syntax`, `quasisyntax`, `syntax-violation`, and syntax parameters (SRFI 139). Scheme code can read a syntax object's source location.
 11. **Libraries:** `define-library` and R6RS `library`, which expand to the same module form.
+    - **The standard libraries are `define-library` source files embedded in the binary,** which the built-in loader serves (ADR 0009 #3). Each imports one internal library of Rust primitives, re-exports what it needs, and defines in Scheme whatever is easier there. They go through the same machinery as a user's libraries, and until cached artifacts exist they are expanded when first imported.
+    - **A program with no `import` form sees `(scheme base)`,** so scripts, tests and the REPL stay short. A program that has an `import` sees only what it imports, as R7RS requires.
 12. **Reader extensions:** keywords (SRFI 88, with `keyword?`), `[ ]` as parentheses, block and datum comments, datum labels.
 13. **Hash tables: SRFI 125, with SRFI 128 comparators.** SRFI 125 keeps SRFI 69's names as deprecated procedures, so most SRFI 69 code runs unchanged.
 14. **Control: SRFI 226** (*Control Features*): prompts and delimited continuations, continuation marks, and parameters defined on them (ADR 0004).
