@@ -132,12 +132,26 @@ impl<S: Strategy> Loaded<S> {
     }
 }
 
+/// A pointer to a variable's cell (ADR 0005 #4).
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub(crate) struct Cell(pub(crate) *mut Value);
+
+// SAFETY: a cell pointer points into storage its own isolate owns, which
+// moves between threads only whole and is used by one at a time (ADR 0008).
+unsafe impl Send for Cell {}
+
 /// One isolate's instance of a loaded module: its constants, created in the
-/// isolate's heap, and its variables.
+/// isolate's heap, the cells of the variables it defines, and a pointer to
+/// the cell of each entry of its variable table.
 pub(crate) struct Instance<S: Strategy> {
     pub(crate) loaded: Arc<Loaded<S>>,
     pub(crate) constants: Vec<Value>,
-    pub(crate) variables: Vec<Value>,
+    /// Boxed so the cells stay put as instances are added. Code reaches
+    /// them only through `variables`.
+    #[expect(dead_code, reason = "owns the cells that `variables` points into")]
+    pub(crate) cells: Box<[std::cell::UnsafeCell<Value>]>,
+    pub(crate) variables: Box<[Cell]>,
 }
 
 /// A module loaded into an isolate.

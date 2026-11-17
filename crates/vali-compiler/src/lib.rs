@@ -74,7 +74,6 @@ pub fn compile_datums(datums: &[Datum], name: &str) -> Result<Module, CompileErr
         vars: &expander.vars,
         lambdas: &expander.lambdas,
         loops: &loops,
-        rebound: &expander.rebound,
         module: ModuleBuilder::new(name),
     };
     let module = generator.program(program)?;

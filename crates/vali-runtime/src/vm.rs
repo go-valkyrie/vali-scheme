@@ -15,10 +15,15 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use std::cell::UnsafeCell;
 use vali_abi::{Header, Tag, TypeCode, data};
-use vali_bytecode::{Arity, Constant, Module, Opcode, field_d, field_e_signed, fields, validate};
 
-use crate::code::{Code, Instance, Kind, Loaded, ModuleId, NativeFn};
+use vali_bytecode::{
+    Arity, Constant, Link as VariableLink, Module, Opcode, field_d, field_e_signed, fields,
+    validate,
+};
+
+use crate::code::{Cell, Code, Instance, Kind, Loaded, ModuleId, NativeFn};
 use crate::cx::{Cx, get, put};
 use crate::handle::{Error, Handle, SchemeError};
 use crate::page::OutOfMemory;
@@ -178,8 +183,11 @@ pub(crate) fn type_error(operation: &str, expected: &str, got: Value) -> Error {
 /// Loading modules, and the procedures Rust code calls.
 impl<S: Strategy> Cx<S> {
     /// Validates `module` and loads it into this isolate: its constants are
-    /// created in the heap, and each of its variables is bound to the value
-    /// of the global of the same name, if there is one.
+    /// created in the heap, and its variables are linked (ADR 0005 #4). A
+    /// variable it defines gets a cell of its own, unbound until the body
+    /// sets it; an imported one shares the cell of the loaded library that
+    /// exports it; a global one shares the global's cell, which a host
+    /// defines, before or after.
     pub fn load(&mut self, module: Module) -> Result<ModuleId, Error> {
         validate(&module)
             .map_err(|e| Error::scheme(format!("invalid bytecode in {}: {e}", module.name)))?;
@@ -188,20 +196,66 @@ impl<S: Strategy> Cx<S> {
         for constant in &loaded.module.constants {
             constants.push(self.constant(constant)?);
         }
-        let variables = loaded
+        let defined = loaded
             .module
             .variables
             .iter()
-            .map(|name| self.globals.get(name).copied().unwrap_or(Value::UNBOUND))
+            .filter(|v| v.link == VariableLink::Defined)
+            .count();
+        let cells: Box<[UnsafeCell<Value>]> = (0..defined)
+            .map(|_| UnsafeCell::new(Value::UNBOUND))
             .collect();
+        let mut next = 0;
+        let mut variables = Vec::with_capacity(loaded.module.variables.len());
+        for variable in &loaded.module.variables {
+            variables.push(match &variable.link {
+                VariableLink::Defined => {
+                    next += 1;
+                    Cell(cells[next - 1].get())
+                }
+                VariableLink::Global => Cell(self.global_cell(&variable.name)),
+                VariableLink::Imported(library) => self.exported(library, &variable.name)?,
+            });
+        }
         let id = self.instances.len();
         self.instance_of.insert(Arc::as_ptr(&loaded) as usize, id);
         self.instances.push(Instance {
             loaded,
             constants,
-            variables,
+            cells,
+            variables: variables.into(),
         });
         Ok(ModuleId(id))
+    }
+
+    /// Makes the loaded module `module` the library with identity
+    /// `identity`, which modules loaded later can import from.
+    pub fn register_library(&mut self, identity: &str, module: ModuleId) {
+        self.libraries.insert(identity.into(), module);
+    }
+
+    /// The cell the library `library` exports as `name`.
+    fn exported(&self, library: &str, name: &str) -> Result<Cell, Error> {
+        let Some(&ModuleId(id)) = self.libraries.get(library) else {
+            return Err(Error::scheme(format!("library {library} is not loaded")));
+        };
+        let instance = &self.instances[id];
+        let export = instance
+            .loaded
+            .module
+            .exports
+            .iter()
+            .find(|e| &*e.name == name)
+            .ok_or_else(|| Error::scheme(format!("library {library} does not export {name}")))?;
+        Ok(instance.variables[usize::from(export.variable)])
+    }
+
+    /// The cell of the global `name`, made unbound if there is none yet.
+    fn global_cell(&mut self, name: &str) -> *mut Value {
+        self.globals
+            .entry(name.into())
+            .or_insert_with(|| Box::new(UnsafeCell::new(Value::UNBOUND)))
+            .get()
     }
 
     /// Runs a loaded module's body, returning its result.
@@ -223,8 +277,9 @@ impl<S: Strategy> Cx<S> {
             .module
             .variables
             .iter()
-            .position(|v| &**v == name)?;
-        let value = instance.variables[index];
+            .position(|v| &*v.name == name)?;
+        // SAFETY: cells belong to this isolate and hold valid values.
+        let value = unsafe { *instance.variables[index].0 };
         if value == Value::UNBOUND {
             return None;
         }
@@ -236,7 +291,8 @@ impl<S: Strategy> Cx<S> {
     /// loaded later start out bound to.
     pub fn define(&mut self, name: &str, value: &Handle) -> Result<(), Error> {
         let value = self.get(value)?;
-        self.globals.insert(name.into(), value);
+        // SAFETY: the cell belongs to this isolate.
+        unsafe { *self.global_cell(name) = value };
         Ok(())
     }
 
@@ -250,8 +306,12 @@ impl<S: Strategy> Cx<S> {
 
     /// The value bound to the global `name`, if there is one.
     pub fn global(&mut self, name: &str) -> Option<Handle> {
-        let value = *self.globals.get(name)?;
-        // SAFETY: globals hold valid values.
+        // SAFETY: global cells hold valid values.
+        let value = unsafe { *self.globals.get(name)?.get() };
+        if value == Value::UNBOUND {
+            return None;
+        }
+        // SAFETY: as above.
         Some(unsafe { self.root(value) })
     }
 
@@ -266,7 +326,8 @@ impl<S: Strategy> Cx<S> {
         let pointer = &*code as *const Code<S>;
         self.natives.push(code);
         let closure = self.closure_raw(pointer, &[])?;
-        self.globals.insert(name.into(), closure);
+        // SAFETY: the cell belongs to this isolate.
+        unsafe { *self.global_cell(name) = closure };
         // SAFETY: just allocated.
         Ok(unsafe { self.root(closure) })
     }
@@ -731,10 +792,10 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// The constants and variables of the loaded module at `module`.
-    fn instance_registers(&mut self, module: usize) -> (*const Value, *mut Value) {
+    fn instance_registers(&mut self, module: usize) -> (*const Value, *const Cell) {
         let index = self.instance_of[&module];
-        let instance = &mut self.instances[index];
-        (instance.constants.as_ptr(), instance.variables.as_mut_ptr())
+        let instance = &self.instances[index];
+        (instance.constants.as_ptr(), instance.variables.as_ptr())
     }
 
     /// Runs until the entry frame at `top` receives its result, keeping the
@@ -759,7 +820,7 @@ impl<S: Strategy> Cx<S> {
         let mut pc: usize;
         let mut code: *const u32 = std::ptr::null();
         let mut constants: *const Value = std::ptr::null();
-        let mut variables: *mut Value = std::ptr::null_mut();
+        let mut variables: *const Cell = std::ptr::null();
         let mut current_module = 0usize;
         let mut next = Next::Call {
             base: 0,
@@ -1060,7 +1121,7 @@ impl<S: Strategy> Cx<S> {
                         }
                         Opcode::GetVariable => {
                             let index = usize::from(field_d(word));
-                            let value = *variables.add(index);
+                            let value = *(*variables.add(index)).0;
                             if value == Value::UNBOUND {
                                 let closure = slot(fp, 0);
                                 let Kind::Bytecode { module, .. } =
@@ -1069,14 +1130,14 @@ impl<S: Strategy> Cx<S> {
                                     unreachable!()
                                 };
                                 let loaded: &Loaded<S> = &*module;
-                                let name = &loaded.module.variables[index];
+                                let name = &loaded.module.variables[index].name;
                                 fail!(Error::scheme(format!("unbound variable: {name}")));
                             }
                             set(fp, a, value);
                             pc += 1;
                         }
                         Opcode::SetVariable => {
-                            *variables.add(usize::from(field_d(word))) = slot(fp, a);
+                            *(*variables.add(usize::from(field_d(word)))).0 = slot(fp, a);
                             pc += 1;
                         }
                         Opcode::Closure => {

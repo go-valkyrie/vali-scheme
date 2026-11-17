@@ -31,9 +31,11 @@ pub struct Cx<S: Strategy> {
     pub(crate) instances: Vec<Instance<S>>,
     /// Which instance belongs to each loaded module, by its address.
     pub(crate) instance_of: HashMap<usize, usize>,
-    /// Values that variables of newly loaded modules are bound to by name,
-    /// until libraries and imports exist.
-    pub(crate) globals: HashMap<Box<str>, Value>,
+    /// The cells of the host's globals, by name, which variables linked
+    /// as globals share. Boxed so the cells stay put.
+    pub(crate) globals: HashMap<Box<str>, Box<std::cell::UnsafeCell<Value>>>,
+    /// Loaded libraries, by identity, which imports link to.
+    pub(crate) libraries: HashMap<Box<str>, crate::code::ModuleId>,
     /// Interned symbols.
     pub(crate) symbols: HashMap<Box<str>, Value>,
     /// Descriptors of Rust procedures, which closures point to. Each is
@@ -109,6 +111,7 @@ impl<S: Strategy> Cx<S> {
             instances: Vec::new(),
             instance_of: HashMap::new(),
             globals: HashMap::new(),
+            libraries: HashMap::new(),
             symbols: HashMap::new(),
             natives: Vec::new(),
             stack: Vec::new(),

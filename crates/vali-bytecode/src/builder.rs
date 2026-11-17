@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::instruction::{Instruction, JUMP_RANGE};
-use crate::module::{Arity, Constant, Function, Module};
+use crate::module::{Arity, Constant, Export, Function, Link, Module, Variable};
 
 /// A position in a function's code, bound once and used by any number of
 /// branches.
@@ -141,8 +141,9 @@ impl FunctionBuilder {
 pub struct ModuleBuilder {
     name: Box<str>,
     constants: Vec<Constant>,
-    variables: Vec<Box<str>>,
-    variable_index: HashMap<Box<str>, u16>,
+    variables: Vec<Variable>,
+    variable_index: HashMap<Variable, u16>,
+    exports: Vec<Export>,
     functions: Vec<Option<Function>>,
 }
 
@@ -171,19 +172,57 @@ impl ModuleBuilder {
         u16::try_from(index).expect("at most 65,536 constants")
     }
 
-    /// The index of the variable named `name`, adding it if it is new.
+    /// The index of the global variable named `name`, adding it if it is
+    /// new.
     ///
     /// # Panics
     ///
     /// If the module would exceed 65,536 variables.
     pub fn variable(&mut self, name: &str) -> u16 {
-        if let Some(&index) = self.variable_index.get(name) {
+        self.linked(name, Link::Global)
+    }
+
+    /// The index of the variable `name` that this module defines, adding
+    /// it if it is new.
+    ///
+    /// # Panics
+    ///
+    /// As [`ModuleBuilder::variable`].
+    pub fn defined(&mut self, name: &str) -> u16 {
+        self.linked(name, Link::Defined)
+    }
+
+    /// The index of the variable that the library `library` exports as
+    /// `name`, adding it if it is new.
+    ///
+    /// # Panics
+    ///
+    /// As [`ModuleBuilder::variable`].
+    pub fn imported(&mut self, library: &str, name: &str) -> u16 {
+        self.linked(name, Link::Imported(library.into()))
+    }
+
+    fn linked(&mut self, name: &str, link: Link) -> u16 {
+        let variable = Variable {
+            name: name.into(),
+            link,
+        };
+        if let Some(&index) = self.variable_index.get(&variable) {
             return index;
         }
         let index = u16::try_from(self.variables.len()).expect("at most 65,536 variables");
-        self.variables.push(name.into());
-        self.variable_index.insert(name.into(), index);
+        self.variables.push(variable.clone());
+        self.variable_index.insert(variable, index);
         index
+    }
+
+    /// Exports the variable at `index` as `name`.
+    pub fn export(&mut self, name: &str, variable: u16) -> &mut Self {
+        self.exports.push(Export {
+            name: name.into(),
+            variable,
+        });
+        self
     }
 
     /// Reserves an index for a function defined later with
@@ -226,6 +265,7 @@ impl ModuleBuilder {
             name: self.name,
             constants: self.constants,
             variables: self.variables,
+            exports: self.exports,
             functions,
             body,
         }

@@ -20,7 +20,7 @@
 //! supplies. The derived forms are macros in `prelude.scm`, bound in the
 //! core scope.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use vali_syntax::{
@@ -161,9 +161,6 @@ fn too_many(e: TooManyScopes) -> CompileError {
 pub(crate) struct Expander {
     pub(crate) vars: Vec<VarInfo>,
     pub(crate) lambdas: Vec<Lambda>,
-    /// Module variables the program defines, so calls to them are never
-    /// inlined as standard procedures.
-    pub(crate) rebound: HashSet<String>,
     context: ScopeContext,
     table: BindingTable<String, Binding>,
     /// The scopes of the core forms.
@@ -207,7 +204,6 @@ impl Expander {
         Ok(Expander {
             vars: Vec::new(),
             lambdas: Vec::new(),
-            rebound: HashSet::new(),
             context,
             table,
             core,
@@ -449,7 +445,6 @@ impl Expander {
             vars: &self.vars,
             lambdas: &self.lambdas,
             loops: &loops,
-            rebound: &self.rebound,
             module: ModuleBuilder::new(name),
         };
         let module = generator.program(body)?;
@@ -910,7 +905,6 @@ impl Expander {
             }) => return Ok(existing.clone()),
             Err(_) => return Err(error(format!("define: {name} is bound twice"), id.span())),
         }
-        self.rebound.insert(global.clone());
         Ok(global)
     }
 
@@ -1001,7 +995,7 @@ impl Expander {
                     self.global_in_context(&global, stx)?;
                     Ok(Expr::Global(global))
                 }
-                None => Ok(Expr::Global(name.to_owned())),
+                None => Ok(Expr::Free(name.to_owned())),
                 Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
                     stx.span(),
@@ -1144,7 +1138,7 @@ impl Expander {
                 self.compiled.quoted.push(form.clone());
                 let index = number(self.compiled.quoted.len() - 1, span);
                 Ok(Expr::Call(
-                    Box::new(Expr::Global(QUOTE_SYNTAX.to_owned())),
+                    Box::new(Expr::Free(QUOTE_SYNTAX.to_owned())),
                     vec![index],
                     span,
                 ))
@@ -1219,7 +1213,7 @@ impl Expander {
             // No clause matched.
             let input = self.local(tmp);
             return Ok(Expr::Call(
-                Box::new(Expr::Global("syntax-violation".to_owned())),
+                Box::new(Expr::Free("syntax-violation".to_owned())),
                 vec![
                     Expr::Const(Datum {
                         kind: DatumKind::Boolean(false),
@@ -1285,7 +1279,7 @@ impl Expander {
             let v = self.hidden_local(name);
             self.bind(&id, Binding::PatternVar(v, depth), keyword)?;
             let element = Expr::Call(
-                Box::new(Expr::Global("vector-ref".to_owned())),
+                Box::new(Expr::Free("vector-ref".to_owned())),
                 vec![Expr::Local(m), number(i, span)],
                 span,
             );
@@ -1307,7 +1301,7 @@ impl Expander {
         };
         let input = self.local(tmp);
         let matched = Expr::Call(
-            Box::new(Expr::Global(SYNTAX_MATCH.to_owned())),
+            Box::new(Expr::Free(SYNTAX_MATCH.to_owned())),
             vec![input, number(k, span)],
             span,
         );
@@ -1369,7 +1363,7 @@ impl Expander {
             args.push(self.local(v));
         }
         Ok(Expr::Call(
-            Box::new(Expr::Global(SYNTAX_BUILD.to_owned())),
+            Box::new(Expr::Free(SYNTAX_BUILD.to_owned())),
             args,
             span,
         ))

@@ -9,7 +9,11 @@ The instruction set the VM interprets and the JIT compiles from (ADR 0005). This
 A **module** is what one library's body compiles to:
 
 - a **constant pool**: integers of any size, flonums, booleans, characters, the empty list, the unspecified value, and immutable strings, symbols, pairs, vectors and bytevectors of constants. Heap constants are created in each isolate when the module loads there;
-- a **variable table**: the module's variables, named for linking and debugging. Code refers to them by index;
+- a **variable table**: the module's variables. Code refers to them by index. Each entry has a name and a link, which says where its cell is once the module loads (ADR 0005 #4):
+  - **defined**: the module defines it, and its instance has the cell;
+  - **imported** from a library, by the library's identity and the name it exports: the cell is that library's instance's. An importer cannot assign it;
+  - **global**: the isolate's global of that name, which a host defines, before or after the module loads;
+- an **export table**: the names other modules import variables by, each naming an entry of the variable table;
 - a **function table**;
 - the index of its **body**, a function of no arguments and no free variables.
 
@@ -139,6 +143,7 @@ The loader rejects a module unless:
 - every function's code decodes, and its last instruction is `jump`, `tail-call` or `return`, so execution cannot run off the end;
 - every slot operand lies inside the frame, including the header, procedure and arguments of every `call`;
 - every constant, variable, function and free-variable index exists, and every `closure` captures as many slots as its function has free variables;
+- no `set-variable` assigns an imported variable, and no name is exported twice;
 - every branch lands on the start of an instruction.
 
 A module that passes can be run without further checks in the dispatch loop (ADR 0005 #7).

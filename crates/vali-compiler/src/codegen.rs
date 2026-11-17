@@ -67,7 +67,6 @@ pub(crate) struct Generator<'a> {
     pub(crate) vars: &'a [VarInfo],
     pub(crate) lambdas: &'a [Lambda],
     pub(crate) loops: &'a HashSet<VarId>,
-    pub(crate) rebound: &'a HashSet<String>,
     pub(crate) module: ModuleBuilder,
 }
 
@@ -312,12 +311,15 @@ impl Generator<'_> {
                 self.deliver(f, s, target);
                 Ok(())
             }
-            Expr::Global(name) => {
+            Expr::Global(name) | Expr::Free(name) => {
                 if target == Target::Effect {
                     return Ok(());
                 }
                 let dst = self.dst(f, target)?;
-                let variable = self.module.variable(name);
+                let variable = match e {
+                    Expr::Global(_) => self.module.defined(name),
+                    _ => self.module.variable(name),
+                };
                 f.b.emit(I::GetVariable { dst, variable });
                 self.deliver(f, dst, target);
                 Ok(())
@@ -337,7 +339,7 @@ impl Generator<'_> {
             }
             Expr::SetGlobal(name, value) => {
                 let src = self.value(f, value)?;
-                let variable = self.module.variable(name);
+                let variable = self.module.defined(name);
                 f.b.emit(I::SetVariable { src, variable });
                 self.load(f, Constant::Unspecified, target)
             }
@@ -436,8 +438,7 @@ impl Generator<'_> {
     fn test(&mut self, f: &mut Frame, c: &Expr, otherwise: Label) -> Result<()> {
         let saved = f.next;
         if let Expr::Call(callee, args, _) = c
-            && let Expr::Global(name) = &**callee
-            && !self.rebound.contains(name)
+            && let Expr::Free(name) = &**callee
         {
             let branch = match (name.as_str(), &args[..]) {
                 ("<", [a, b]) => match small(b) {
@@ -557,7 +558,7 @@ impl Generator<'_> {
 
     /// Whether `callee` is the standard procedure `name`, safe to inline.
     fn inlinable(&self, callee: &Expr, name: &str) -> bool {
-        matches!(callee, Expr::Global(n) if n == name && !self.rebound.contains(n))
+        matches!(callee, Expr::Free(n) if n == name)
     }
 
     fn call(
@@ -573,8 +574,7 @@ impl Generator<'_> {
         {
             return self.loop_call(f, *v, args, target);
         }
-        if let Expr::Global(name) = callee
-            && !self.rebound.contains(name)
+        if let Expr::Free(name) = callee
             && self.inline(f, name, args, target)?
         {
             return Ok(());
@@ -601,7 +601,7 @@ impl Generator<'_> {
     fn is_general_call(&self, callee: &Expr, argc: usize) -> bool {
         match callee {
             Expr::Local(v) => !self.loops.contains(v),
-            Expr::Global(name) => self.rebound.contains(name) || !Self::inlined(name, argc),
+            Expr::Free(name) => !Self::inlined(name, argc),
             _ => true,
         }
     }

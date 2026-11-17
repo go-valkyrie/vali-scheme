@@ -37,8 +37,12 @@ pub(crate) enum Expr {
     Const(Datum),
     /// A lexical variable.
     Local(VarId),
-    /// A variable of the module, linked to a global of the same name.
+    /// A module variable the program defines.
     Global(String),
+    /// A free identifier: the global of that name, which the standard
+    /// procedures are until they live in libraries. Only these are
+    /// inlined, so a program's own definitions never are.
+    Free(String),
     SetLocal(VarId, Box<Expr>),
     SetGlobal(String, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),

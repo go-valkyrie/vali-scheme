@@ -101,13 +101,47 @@ pub struct Module {
     pub name: Box<str>,
     /// Its constant pool.
     pub constants: Vec<Constant>,
-    /// Its variables, by name. Names are for linking and debugging; code
-    /// refers to variables by index.
-    pub variables: Vec<Box<str>>,
+    /// Its variables. Code refers to them by index; loading links each to
+    /// a cell (ADR 0005 #4).
+    pub variables: Vec<Variable>,
+    /// The variables other modules can import, by exported name.
+    pub exports: Vec<Export>,
     /// Its functions. `closure` refers to them by index.
     pub functions: Vec<Function>,
     /// The function that runs the module's body.
     pub body: u32,
+}
+
+/// One entry of a module's variable table.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Variable {
+    /// Its name: for an imported variable, the name its library exports
+    /// it under.
+    pub name: Box<str>,
+    /// Where its cell is.
+    pub link: Link,
+}
+
+/// Where a variable's cell is, once its module is loaded.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Link {
+    /// The module defines it: its instance has the cell.
+    Defined,
+    /// The library with this identity exports it: the cell is that
+    /// library's instance's.
+    Imported(Box<str>),
+    /// The isolate's global of that name, which a host defines. Until the
+    /// standard libraries are libraries, free names link this way.
+    Global,
+}
+
+/// A variable a module exports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Export {
+    /// The name importers use.
+    pub name: Box<str>,
+    /// The variable, by index.
+    pub variable: u16,
 }
 
 /// The instructions of `code`, each with the index of its first word.

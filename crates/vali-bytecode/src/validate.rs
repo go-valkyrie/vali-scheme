@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::instruction::Instruction;
-use crate::module::{Arity, Module, branch_target};
+use crate::module::{Arity, Link, Module, branch_target};
 
 /// The largest frame format version 1 can address: slot operands are 8 bits,
 /// and wide forms do not exist yet.
@@ -60,6 +60,22 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             None,
             "the body takes no arguments and no free variables".into(),
         );
+    }
+    let mut exported = HashSet::new();
+    for export in &module.exports {
+        if usize::from(export.variable) >= module.variables.len() {
+            return fail(
+                None,
+                None,
+                format!(
+                    "export {} names variable {}, which does not exist",
+                    export.name, export.variable
+                ),
+            );
+        }
+        if !exported.insert(&export.name) {
+            return fail(None, None, format!("{} is exported twice", export.name));
+        }
     }
     for (index, function) in module.functions.iter().enumerate() {
         let index = index as u32;
@@ -126,10 +142,21 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
                     }
                     slot(*dst)
                 }
-                Instruction::GetVariable { dst: s, variable }
-                | Instruction::SetVariable { src: s, variable } => {
+                Instruction::GetVariable { dst: s, variable } => {
                     if usize::from(*variable) >= module.variables.len() {
                         return fail(format!("variable {variable} does not exist"));
+                    }
+                    slot(*s)
+                }
+                Instruction::SetVariable { src: s, variable } => {
+                    match module.variables.get(usize::from(*variable)) {
+                        None => return fail(format!("variable {variable} does not exist")),
+                        // An importer cannot assign another library's
+                        // variable (R7RS 5.6.1).
+                        Some(v) if matches!(v.link, Link::Imported(_)) => {
+                            return fail(format!("variable {variable} is imported"));
+                        }
+                        Some(_) => {}
                     }
                     slot(*s)
                 }

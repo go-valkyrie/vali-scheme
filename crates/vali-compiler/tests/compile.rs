@@ -687,3 +687,13 @@ fn syntax_case_errors() {
     );
     assert!(compile_error("(syntax-case 1 () (_ 1))").contains("not supported yet"));
 }
+
+#[test]
+fn a_program_definition_does_not_change_what_macros_mean() {
+    // case's memv is the standard one, whatever the program defines.
+    check(&[(
+        "(define (memv . args) #f)
+         (case 2 ((1 2) 'yes) (else 'no))",
+        "yes",
+    )]);
+}
