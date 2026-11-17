@@ -20,7 +20,7 @@
 //! supplies. The derived forms are macros in `prelude.scm`, bound in the
 //! core scope.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use vali_syntax::{
@@ -29,11 +29,12 @@ use vali_syntax::{
     free_identifier_eq,
 };
 
-use vali_bytecode::{ModuleBuilder, validate};
+use vali_bytecode::{Export, Link, Module, ModuleBuilder, validate};
 use vali_runtime::{Cx, Handle, NoCollection};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
+use crate::library::{ExportSpec, ImportSet, LibraryForm, LibraryName};
 use crate::pattern::{self, Builder, Match, Pattern, Spelling, Template, Vars};
 use crate::phase::{self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, Shared};
 
@@ -98,8 +99,12 @@ const CORE: &[(&str, Core)] = &[
 pub(crate) enum Binding {
     Core(Core),
     Local(VarId),
-    /// A module variable the program defines.
-    Global(String),
+    /// A top-level variable: the unit, library or program, that defines
+    /// it, and its name there.
+    Variable(usize, String),
+    /// A standard procedure implemented in Rust, reached as the global of
+    /// that name, and inlined where the compiler can.
+    Primitive(String),
     /// A macro, by number.
     Macro(usize),
     /// A `syntax-case` pattern variable: the hidden local holding what it
@@ -158,6 +163,17 @@ fn too_many(e: TooManyScopes) -> CompileError {
     }
 }
 
+/// A library or the program, as it is compiled.
+struct Unit {
+    identity: String,
+    /// What it exports, by external name.
+    interface: HashMap<String, Binding>,
+    /// The units it imports, which its instances need first.
+    imports: Vec<usize>,
+    /// Its compiled module, once there is one.
+    module: Option<Module>,
+}
+
 pub(crate) struct Expander {
     pub(crate) vars: Vec<VarInfo>,
     pub(crate) lambdas: Vec<Lambda>,
@@ -165,8 +181,18 @@ pub(crate) struct Expander {
     table: BindingTable<String, Binding>,
     /// The scopes of the core forms.
     core: ScopeSetId,
-    /// The scopes of the program's own forms.
+    /// The scope of a program with no imports, beside the core scope.
+    program_scope: Scope,
+    /// The scopes of the current unit's own forms.
     top: ScopeSetId,
+    /// The units compiled so far, the current one last.
+    units: Vec<Unit>,
+    /// Each library name, to its unit.
+    by_name: HashMap<LibraryName, usize>,
+    /// What `(vali core)` exports: the core forms and the prelude's macros.
+    core_interface: Vec<(String, Binding)>,
+    /// The units instantiated in the phase-1 isolate.
+    phase1_units: HashSet<usize>,
     /// The `lambda`s being expanded, outermost first.
     stack: Vec<LambdaId>,
     /// Suffixes for module variables that macros introduce.
@@ -189,9 +215,6 @@ impl Expander {
         let core_scope = context.new_scope(ScopeKind::Library).map_err(too_many)?;
         let program_scope = context.new_scope(ScopeKind::Library).map_err(too_many)?;
         let core = context.intern(&[core_scope]).map_err(too_many)?;
-        let top = context
-            .intern(&[core_scope, program_scope])
-            .map_err(too_many)?;
         let mut table = BindingTable::new();
         for &(name, form) in CORE {
             table
@@ -201,13 +224,21 @@ impl Expander {
                     span: None,
                 })?;
         }
-        Ok(Expander {
+        let mut expander = Expander {
             vars: Vec::new(),
             lambdas: Vec::new(),
             context,
             table,
             core,
-            top,
+            program_scope,
+            top: core,
+            units: Vec::new(),
+            by_name: HashMap::new(),
+            core_interface: CORE
+                .iter()
+                .map(|&(name, form)| (name.to_owned(), Binding::Core(form)))
+                .collect(),
+            phase1_units: HashSet::new(),
             stack: Vec::new(),
             fresh: 0,
             macros: Vec::new(),
@@ -215,27 +246,237 @@ impl Expander {
             phase1: None,
             compiled: Compiled::default(),
             floors: Vec::new(),
-        })
+        };
+        let prelude = expander.open_lambda(None);
+        expander.prelude()?;
+        expander.close_lambda(prelude, Vec::new(), None, Expr::Unspecified);
+        Ok(expander)
     }
 
-    /// Expands a whole program. Returns the body `lambda`'s number.
-    pub(crate) fn program(&mut self, datums: &[vali_syntax::Datum]) -> Result<LambdaId> {
-        let forms = datums
-            .iter()
-            .map(|d| Syntax::from_datum(d, self.top))
-            .collect();
-        let body = self.open_lambda(None);
-        self.prelude()?;
-        let span = datums.first().map_or(
+    /// Notes that `name` is a library's name for the next unit compiled.
+    pub(crate) fn name_next(&mut self, name: LibraryName) {
+        self.by_name.insert(name, self.units.len());
+    }
+
+    /// Expands and compiles a library, which becomes the next unit.
+    pub(crate) fn library(&mut self, identity: &str, form: &LibraryForm) -> Result<Module> {
+        let scope = self.scope(ScopeKind::Library)?;
+        let top = self.context.intern(&[scope]).map_err(too_many)?;
+        self.unit(
+            identity,
+            Some(&form.imports),
+            top,
+            &form.body,
+            &form.exports,
+            form.span,
+        )
+    }
+
+    /// Expands and compiles a program. With imports, it sees only what it
+    /// imports; with none, the core forms, the prelude and the standard
+    /// procedures, which it can shadow.
+    pub(crate) fn program(
+        &mut self,
+        identity: &str,
+        imports: &[ImportSet],
+        body: &[vali_syntax::Datum],
+    ) -> Result<Module> {
+        let span = body.first().map_or(
             Span {
-                source: vali_syntax::SourceId(0),
+                source: SourceId(0),
                 range: Default::default(),
             },
             |d| d.span,
         );
+        if imports.is_empty() {
+            let core = self.context.scopes(self.core).to_vec();
+            let top = self
+                .context
+                .intern(&[core, vec![self.program_scope]].concat())
+                .map_err(too_many)?;
+            return self.unit(identity, None, top, body, &[], span);
+        }
+        let scope = self.scope(ScopeKind::Library)?;
+        let top = self.context.intern(&[scope]).map_err(too_many)?;
+        self.unit(identity, Some(imports), top, body, &[], span)
+    }
+
+    /// Expands `body` as a new unit whose forms carry `top`, with
+    /// `imports` bound there, and compiles it into a module that exports
+    /// every variable it defines, by name, for linking.
+    fn unit(
+        &mut self,
+        identity: &str,
+        imports: Option<&[ImportSet]>,
+        top: ScopeSetId,
+        body: &[vali_syntax::Datum],
+        exports: &[ExportSpec],
+        span: Span,
+    ) -> Result<Module> {
+        let index = self.units.len();
+        let mut imported = Vec::new();
+        for set in imports.unwrap_or_default() {
+            if let Some(&unit) = self.by_name.get(set.library()) {
+                imported.push(unit);
+            }
+        }
+        self.units.push(Unit {
+            identity: identity.to_owned(),
+            interface: HashMap::new(),
+            imports: imported,
+            module: None,
+        });
+        self.top = top;
+        for set in imports.unwrap_or_default() {
+            self.import(set, top, span)?;
+        }
+        let forms = body.iter().map(|d| Syntax::from_datum(d, top)).collect();
+        let lambda = self.open_lambda(None);
         let expr = self.body(forms, true, span)?;
-        self.close_lambda(body, Vec::new(), None, expr);
-        Ok(body)
+        self.close_lambda(lambda, Vec::new(), None, expr);
+        let mut interface = HashMap::new();
+        for spec in exports {
+            let id = Syntax::identifier(&spec.internal, top, spec.span, None);
+            let Some(binding) = self.resolve(&id)? else {
+                return Err(error(
+                    format!(
+                        "{} is exported but neither defined nor imported",
+                        spec.internal
+                    ),
+                    spec.span,
+                ));
+            };
+            if interface.insert(spec.external.clone(), binding).is_some() {
+                return Err(error(
+                    format!("{} is exported twice", spec.external),
+                    spec.span,
+                ));
+            }
+        }
+        let module = self.module(lambda, identity)?;
+        let unit = &mut self.units[index];
+        unit.interface = interface;
+        unit.module = Some(module.clone());
+        Ok(module)
+    }
+
+    /// Compiles the `lambda` `body` as a module's body, exporting every
+    /// variable the module defines under its own name.
+    fn module(&self, body: LambdaId, name: &str) -> Result<Module> {
+        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
+        let generator = crate::codegen::Generator {
+            vars: &self.vars,
+            lambdas: &self.lambdas,
+            loops: &loops,
+            module: ModuleBuilder::new(name),
+        };
+        let mut module = generator.program(body)?;
+        for (i, variable) in module.variables.iter().enumerate() {
+            if variable.link == Link::Defined {
+                module.exports.push(Export {
+                    name: variable.name.clone(),
+                    variable: u16::try_from(i).expect("at most 65,536 variables"),
+                });
+            }
+        }
+        validate(&module).map_err(|e| CompileError {
+            message: format!("{name}: the compiler produced invalid bytecode: {e}"),
+            span: None,
+        })?;
+        Ok(module)
+    }
+
+    /// What the library `name` exports, by name.
+    fn interface(&self, name: &LibraryName, span: Span) -> Result<Vec<(String, Binding)>> {
+        if *name == LibraryName::new(["vali", "core"]) {
+            return Ok(self.core_interface.clone());
+        }
+        if *name == LibraryName::new(["vali", "primitive"]) {
+            return Ok(vali_runtime::primitive_names()
+                .into_iter()
+                .map(|n| (n.to_owned(), Binding::Primitive(n.to_owned())))
+                .collect());
+        }
+        let Some(&unit) = self.by_name.get(name) else {
+            return Err(error(format!("library {name} is not available"), span));
+        };
+        let mut bindings: Vec<_> = self.units[unit]
+            .interface
+            .iter()
+            .map(|(n, b)| (n.clone(), b.clone()))
+            .collect();
+        bindings.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(bindings)
+    }
+
+    /// What an import set brings in, by the names it brings them in under.
+    fn import_bindings(&self, set: &ImportSet, span: Span) -> Result<Vec<(String, Binding)>> {
+        let missing = |name: &str, library: &LibraryName| {
+            error(format!("{library} does not export {name}"), span)
+        };
+        Ok(match set {
+            ImportSet::Library(name) => self.interface(name, span)?,
+            ImportSet::Only(inner, names) => {
+                let all = self.import_bindings(inner, span)?;
+                let mut kept = Vec::new();
+                for name in names {
+                    let found = all
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .ok_or_else(|| missing(name, set.library()))?;
+                    kept.push(found.clone());
+                }
+                kept
+            }
+            ImportSet::Except(inner, names) => {
+                let all = self.import_bindings(inner, span)?;
+                for name in names {
+                    if !all.iter().any(|(n, _)| n == name) {
+                        return Err(missing(name, set.library()));
+                    }
+                }
+                all.into_iter()
+                    .filter(|(n, _)| !names.contains(n))
+                    .collect()
+            }
+            ImportSet::Prefix(inner, prefix) => self
+                .import_bindings(inner, span)?
+                .into_iter()
+                .map(|(n, b)| (format!("{prefix}{n}"), b))
+                .collect(),
+            ImportSet::Rename(inner, renames) => {
+                let mut all = self.import_bindings(inner, span)?;
+                for (from, to) in renames {
+                    let entry = all
+                        .iter_mut()
+                        .find(|(n, _)| n == from)
+                        .ok_or_else(|| missing(from, set.library()))?;
+                    entry.0.clone_from(to);
+                }
+                all
+            }
+        })
+    }
+
+    /// Binds what `set` imports at `top`. Importing one name twice is
+    /// fine if both mean the same.
+    fn import(&mut self, set: &ImportSet, top: ScopeSetId, span: Span) -> Result<()> {
+        for (name, binding) in self.import_bindings(set, span)? {
+            match self
+                .table
+                .bind(name.clone(), top, Phases::All, binding.clone())
+            {
+                Ok(()) => {}
+                Err(AlreadyBound { existing }) if *existing == binding => {}
+                Err(_) => {
+                    return Err(error(
+                        format!("{name} is imported twice, with different meanings"),
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Expands the prelude, whose forms carry only the core scope, so the
@@ -440,20 +681,17 @@ impl Expander {
         let expr = self.named(spec, name);
         self.floors.pop();
         self.close_lambda(body, Vec::new(), None, expr?);
-        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        let generator = crate::codegen::Generator {
-            vars: &self.vars,
-            lambdas: &self.lambdas,
-            loops: &loops,
-            module: ModuleBuilder::new(name),
-        };
-        let module = generator.program(body)?;
-        validate(&module).map_err(|e| CompileError {
-            message: format!("{name}: the compiler produced invalid bytecode: {e}"),
-            span: Some(spec.span()),
-        })?;
-        let cx = self.phase1()?;
+        let module = self.module(body, name)?;
+        // Instantiate the libraries the transformer uses at phase 1.
         let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), spec.span());
+        for variable in &module.variables {
+            if let Link::Imported(identity) = &variable.link
+                && let Some(unit) = self.units.iter().position(|u| *u.identity == **identity)
+            {
+                self.instantiate(unit).map_err(failed)?;
+            }
+        }
+        let cx = self.phase1()?;
         let id = cx.load(module).map_err(failed)?;
         let procedure = cx.run(id).map_err(failed)?;
         if cx.get(&procedure).map_err(failed)?.tag() != vali_abi::Tag::Closure {
@@ -463,6 +701,31 @@ impl Expander {
             ));
         }
         Ok(procedure)
+    }
+
+    /// Loads and runs `unit` in the phase-1 isolate, after what it imports,
+    /// unless it is there already: a fresh instance for this expansion
+    /// (ADR 0001 #2).
+    fn instantiate(&mut self, unit: usize) -> std::result::Result<(), vali_runtime::Error> {
+        if self.phase1_units.contains(&unit) {
+            return Ok(());
+        }
+        for dependency in self.units[unit].imports.clone() {
+            self.instantiate(dependency)?;
+        }
+        let module = self.units[unit]
+            .module
+            .clone()
+            .expect("an imported library is compiled before its importers");
+        let identity = self.units[unit].identity.clone();
+        let cx = self
+            .phase1()
+            .map_err(|e| vali_runtime::Error::scheme(e.message))?;
+        let id = cx.load(module)?;
+        cx.run(id)?;
+        cx.register_library(&identity, id);
+        self.phase1_units.insert(unit);
+        Ok(())
     }
 
     /// The phase-1 isolate, made on first use.
@@ -549,10 +812,19 @@ impl Expander {
         Ok(())
     }
 
-    /// An error if a program's variable is used by a transformer, which
-    /// runs before the program does.
-    fn global_in_context(&self, global: &str, id: &Syntax) -> Result<()> {
-        if self.floors.is_empty() {
+    /// A reference to the top-level variable `name` of unit `owner`.
+    fn variable(&self, owner: usize, name: String) -> Expr {
+        if owner == self.units.len() - 1 {
+            Expr::Global(name)
+        } else {
+            Expr::Imported(self.units[owner].identity.clone(), name)
+        }
+    }
+
+    /// An error if a transformer uses a variable of the unit being
+    /// compiled, which runs only after the transformer has.
+    fn global_in_context(&self, owner: usize, global: &str, id: &Syntax) -> Result<()> {
+        if self.floors.is_empty() || owner != self.units.len() - 1 {
             return Ok(());
         }
         Err(error(
@@ -813,6 +1085,9 @@ impl Expander {
                         .to_owned();
                     let m = self.transformer(spec, &name)?;
                     self.bind(&id, Binding::Macro(m), "define-syntax")?;
+                    if id.scopes() == self.core {
+                        self.core_interface.push((name, Binding::Macro(m)));
+                    }
                 }
                 Some((Binding::Core(Core::Define), parts)) => {
                     if definitions_end {
@@ -892,18 +1167,24 @@ impl Expander {
             self.fresh += 1;
             format!("{name}~{}", self.fresh)
         };
+        let unit = self.units.len() - 1;
         match self.table.bind(
             name.to_owned(),
             id.scopes(),
             Phases::All,
-            Binding::Global(global.clone()),
+            Binding::Variable(unit, global.clone()),
         ) {
             Ok(()) => {}
             // A redefinition at top level assigns the same variable.
             Err(AlreadyBound {
-                existing: Binding::Global(existing),
-            }) => return Ok(existing.clone()),
-            Err(_) => return Err(error(format!("define: {name} is bound twice"), id.span())),
+                existing: Binding::Variable(owner, existing),
+            }) if *owner == unit => return Ok(existing.clone()),
+            Err(AlreadyBound { .. }) => {
+                return Err(error(
+                    format!("define: {name} is imported, and cannot be redefined"),
+                    id.span(),
+                ));
+            }
         }
         Ok(global)
     }
@@ -991,10 +1272,11 @@ impl Expander {
                     self.in_context(v, stx)?;
                     Ok(self.local(v))
                 }
-                Some(Binding::Global(global)) => {
-                    self.global_in_context(&global, stx)?;
-                    Ok(Expr::Global(global))
+                Some(Binding::Variable(owner, global)) => {
+                    self.global_in_context(owner, &global, stx)?;
+                    Ok(self.variable(owner, global))
                 }
+                Some(Binding::Primitive(name)) => Ok(Expr::Free(name)),
                 None => Ok(Expr::Free(name.to_owned())),
                 Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
@@ -1103,11 +1385,21 @@ impl Expander {
                         };
                         Ok(Expr::SetLocal(v, Box::new(value)))
                     }
-                    Some(Binding::Global(global)) => {
-                        self.global_in_context(&global, target)?;
+                    Some(Binding::Variable(owner, global)) => {
+                        self.global_in_context(owner, &global, target)?;
+                        if owner != self.units.len() - 1 {
+                            return Err(error(
+                                format!("{keyword}: {name} is imported, and cannot be assigned"),
+                                target.span(),
+                            ));
+                        }
                         let value = self.expr(value)?;
                         Ok(Expr::SetGlobal(global, Box::new(value)))
                     }
+                    Some(Binding::Primitive(_)) => Err(error(
+                        format!("{keyword}: {name} is imported, and cannot be assigned"),
+                        target.span(),
+                    )),
                     Some(Binding::Core(_) | Binding::Macro(_) | Binding::PatternVar(..)) => {
                         Err(error(
                             format!("{keyword}: {name} is a syntactic keyword"),

@@ -311,13 +311,14 @@ impl Generator<'_> {
                 self.deliver(f, s, target);
                 Ok(())
             }
-            Expr::Global(name) | Expr::Free(name) => {
+            Expr::Global(name) | Expr::Free(name) | Expr::Imported(_, name) => {
                 if target == Target::Effect {
                     return Ok(());
                 }
                 let dst = self.dst(f, target)?;
                 let variable = match e {
                     Expr::Global(_) => self.module.defined(name),
+                    Expr::Imported(library, _) => self.module.imported(library, name),
                     _ => self.module.variable(name),
                 };
                 f.b.emit(I::GetVariable { dst, variable });

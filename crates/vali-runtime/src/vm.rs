@@ -234,6 +234,11 @@ impl<S: Strategy> Cx<S> {
         self.libraries.insert(identity.into(), module);
     }
 
+    /// The loaded library with identity `identity`, if there is one.
+    pub fn library(&self, identity: &str) -> Option<ModuleId> {
+        self.libraries.get(identity).copied()
+    }
+
     /// The cell the library `library` exports as `name`.
     fn exported(&self, library: &str, name: &str) -> Result<Cell, Error> {
         let Some(&ModuleId(id)) = self.libraries.get(library) else {

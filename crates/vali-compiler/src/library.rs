@@ -5,9 +5,6 @@
 //! import graph and to expand each library: library forms are never the
 //! output of a macro.
 
-// Compiling libraries, which uses these, comes in the next commit.
-#![allow(dead_code, reason = "used once libraries compile")]
-
 use std::fmt;
 
 use vali_num::Number;
@@ -90,6 +87,13 @@ impl ImportSet {
             | ImportSet::Rename(set, _) => set.library(),
         }
     }
+}
+
+/// Whether `name` is a library the compiler provides itself, with no
+/// source: `(vali core)`, the core forms and the prelude's macros, and
+/// `(vali primitive)`, the procedures implemented in Rust.
+pub(crate) fn is_builtin(name: &LibraryName) -> bool {
+    *name == LibraryName::new(["vali", "core"]) || *name == LibraryName::new(["vali", "primitive"])
 }
 
 /// What a library exports: an identifier, or `(rename internal external)`.

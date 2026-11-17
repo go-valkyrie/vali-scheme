@@ -6,9 +6,6 @@
 //! its whole import graph, awaiting the loader as it goes, then expands and
 //! compiles with everything in memory, so the expander never awaits.
 
-// Compiling libraries, which uses the graph, comes in the next commit.
-#![allow(dead_code, reason = "used once libraries compile")]
-
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -262,7 +259,7 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
         .collect();
     work.reverse();
     while let Some((name, importer)) = work.pop() {
-        if by_name.contains_key(&name) {
+        if by_name.contains_key(&name) || library::is_builtin(&name) {
             continue;
         }
         let (library_identity, form) = match local.get(&name) {
@@ -338,8 +335,10 @@ fn order(found: Vec<Library>, by_name: HashMap<LibraryName, usize>) -> Result<Gr
         state[i] = State::Open;
         path.push(i);
         for set in &found[i].form.imports {
-            let j = by_name[set.library()];
-            visit(j, found, by_name, state, path, order)?;
+            // Built-in libraries are not in the graph.
+            if let Some(&j) = by_name.get(set.library()) {
+                visit(j, found, by_name, state, path, order)?;
+            }
         }
         path.pop();
         state[i] = State::Done;

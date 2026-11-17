@@ -43,6 +43,9 @@ pub(crate) enum Expr {
     /// procedures are until they live in libraries. Only these are
     /// inlined, so a program's own definitions never are.
     Free(String),
+    /// A variable a library defines: the library's identity, and the
+    /// variable's name there.
+    Imported(String, String),
     SetLocal(VarId, Box<Expr>),
     SetGlobal(String, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),

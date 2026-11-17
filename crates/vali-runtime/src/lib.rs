@@ -30,6 +30,7 @@ pub use cx::Cx;
 pub use handle::{Error, Handle, SchemeError};
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
+pub use primitives::primitive_names;
 pub use strategy::{Allocate, References, Space, Strategy};
 pub use value::Value;
 

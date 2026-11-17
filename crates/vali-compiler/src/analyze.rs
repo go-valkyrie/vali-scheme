@@ -34,7 +34,11 @@ impl Walker<'_> {
 
     fn walk_here(&mut self, e: &Expr, lambda: LambdaId, tail: bool) {
         match e {
-            Expr::Unspecified | Expr::Const(_) | Expr::Global(_) | Expr::Free(_) => {}
+            Expr::Unspecified
+            | Expr::Const(_)
+            | Expr::Global(_)
+            | Expr::Free(_)
+            | Expr::Imported(..) => {}
             Expr::Local(v) => self.reference(*v, None, lambda, tail),
             Expr::SetLocal(_, value) | Expr::SetGlobal(_, value) => self.walk(value, lambda, false),
             Expr::If(c, t, f) => {
