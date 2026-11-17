@@ -614,6 +614,15 @@ fn list_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error>
     Ok(unsafe { cx.car(pair) })
 }
 
+/// `(apply f a ... list)`: asks the VM to tail-call `f`.
+fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
+    let mut call_args = rest.to_vec();
+    call_args.extend(elements(cx, "apply", last)?);
+    cx.tail_call(args[0], call_args);
+    Ok(Value::UNSPECIFIED)
+}
+
 impl<S: Strategy> Cx<S> {
     /// Binds the standard procedures implemented so far as globals, which
     /// variables of the same name in modules loaded afterwards are bound to.
@@ -680,6 +689,7 @@ impl<S: Strategy> Cx<S> {
             ("assoc", Arity::exactly(2), assoc),
             ("list-tail", Arity::exactly(2), list_tail),
             ("list-ref", Arity::exactly(2), list_ref),
+            ("apply", at_least(1), apply),
         ];
         for &(name, arity, f) in table {
             self.define_native(name, arity, f)?;

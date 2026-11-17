@@ -240,6 +240,14 @@ impl<S: Strategy> Cx<S> {
         Ok(())
     }
 
+    /// From inside a Rust procedure: asks the VM to tail-call `procedure`
+    /// with `args` in place of the Rust procedure's own result, which is
+    /// then ignored (ADR 0004 #10). This is how a Rust procedure calls
+    /// Scheme without running Scheme code inside itself.
+    pub fn tail_call(&mut self, procedure: Value, args: Vec<Value>) {
+        self.tail_call = Some((procedure, args));
+    }
+
     /// The value bound to the global `name`, if there is one.
     pub fn global(&mut self, name: &str) -> Option<Handle> {
         let value = *self.globals.get(name)?;
@@ -840,6 +848,25 @@ impl<S: Strategy> Cx<S> {
                             Kind::Native(f) => {
                                 let result =
                                     attempt!(self.call_native(callee, f, fp, base + 4, argc));
+                                if let Some((procedure, args)) = self.tail_call.take() {
+                                    // The Rust procedure asked for a tail
+                                    // call: make it in its place.
+                                    if !fits(fp.sub(base + 3), args.len() + 2, limit) {
+                                        fail!(Error::scheme(
+                                            "too many arguments to fit in this stack segment"
+                                        ));
+                                    }
+                                    set(fp, base + 3, procedure);
+                                    for (i, &arg) in args.iter().enumerate() {
+                                        set(fp, base + 4 + i, arg);
+                                    }
+                                    next = Next::Call {
+                                        base,
+                                        argc: args.len(),
+                                        resume,
+                                    };
+                                    continue;
+                                }
                                 if resume == ENTRY {
                                     return Ok(result);
                                 }
@@ -893,6 +920,19 @@ impl<S: Strategy> Cx<S> {
                         match callee.kind {
                             Kind::Native(f) => {
                                 let result = attempt!(self.call_native(callee, f, fp, 1, argc));
+                                if let Some((procedure, args)) = self.tail_call.take() {
+                                    if !fits(fp, args.len() + 2, limit) {
+                                        fail!(Error::scheme(
+                                            "too many arguments to fit in this stack segment"
+                                        ));
+                                    }
+                                    set(fp, 0, procedure);
+                                    for (i, &arg) in args.iter().enumerate() {
+                                        set(fp, 1 + i, arg);
+                                    }
+                                    next = Next::TailCall { argc: args.len() };
+                                    continue;
+                                }
                                 next = Next::Return(result);
                                 continue;
                             }

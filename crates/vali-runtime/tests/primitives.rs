@@ -179,3 +179,100 @@ fn searching_lists() {
         assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
     }
 }
+
+#[test]
+fn apply_tail_calls_any_procedure() {
+    let mut cx = cx();
+    let apply = cx.global("apply").unwrap();
+    let plus = cx.global("+").unwrap();
+    let list = cx.global("list").unwrap();
+    let args = cx.read("1 2 (3 4)").unwrap();
+    let all: Vec<_> = std::iter::once(plus).chain(args).collect();
+    let sum = cx.call(&apply, &all).unwrap();
+    assert_eq!(sum.as_fixnum(), Some(10));
+    // apply of apply: (apply apply list '(1 (2 3)))
+    let args = cx.read("(1 (2 3))").unwrap();
+    let nested: Vec<_> = [apply.clone(), list].into_iter().chain(args).collect();
+    let result = cx.call(&apply, &nested).unwrap();
+    assert_eq!(cx.write_string(&result).unwrap(), "(1 2 3)");
+    // Errors from the applied procedure come back as usual.
+    let car = cx.global("car").unwrap();
+    let args = cx.read("(5)").unwrap();
+    let Err(Error::Scheme(e)) = cx.call(&apply, &[car, args[0].clone()]) else {
+        panic!("expected an error");
+    };
+    assert_eq!(e.message, "car: expected a pair, got 5");
+}
+
+/// `(define (g x) (apply + x '(1 2)))`, and `(define (h x) (+ 100 (g x)))`:
+/// apply in tail position, and called normally from bytecode.
+#[test]
+fn apply_from_bytecode() {
+    use vali_bytecode::{Arity, Constant, FunctionBuilder, Instruction as I, ModuleBuilder};
+    let mut cx = cx();
+    let mut m = ModuleBuilder::new("apply");
+    let apply = m.variable("apply");
+    let plus = m.variable("+");
+    let g_var = m.variable("g");
+    let h_var = m.variable("h");
+    let tail = m.constant(Constant::Pair(
+        Box::new(Constant::Integer(1)),
+        Box::new(Constant::Pair(
+            Box::new(Constant::Integer(2)),
+            Box::new(Constant::EmptyList),
+        )),
+    ));
+    let mut g = FunctionBuilder::new(Some("g"), Arity::exactly(1), 6, 0);
+    g.emit(I::GetVariable {
+        dst: 2,
+        variable: apply,
+    })
+    .emit(I::GetVariable {
+        dst: 3,
+        variable: plus,
+    })
+    .emit(I::Mov { dst: 4, src: 1 })
+    .emit(I::LoadConstant {
+        dst: 5,
+        constant: tail,
+    })
+    .emit(I::TailCall { proc: 2, argc: 3 });
+    let g = m.function(g.finish().unwrap());
+    let mut h = FunctionBuilder::new(Some("h"), Arity::exactly(1), 7, 0);
+    h.emit(I::GetVariable {
+        dst: 5,
+        variable: g_var,
+    })
+    .emit(I::Mov { dst: 6, src: 1 })
+    .emit(I::Call { base: 2, argc: 1 })
+    .emit(I::AddImm {
+        dst: 5,
+        a: 5,
+        imm: 100,
+    })
+    .emit(I::Return { src: 5 });
+    let h = m.function(h.finish().unwrap());
+    let unspecified = m.constant(Constant::Unspecified);
+    let mut body = FunctionBuilder::new(None, Arity::exactly(0), 2, 0);
+    for (function, variable) in [(g, g_var), (h, h_var)] {
+        body.emit(I::Closure {
+            dst: 1,
+            function,
+            free: vec![],
+        })
+        .emit(I::SetVariable { src: 1, variable });
+    }
+    body.emit(I::LoadConstant {
+        dst: 1,
+        constant: unspecified,
+    })
+    .emit(I::Return { src: 1 });
+    let body = m.function(body.finish().unwrap());
+    let id = cx.load(m.finish(body)).unwrap();
+    cx.run(id).unwrap();
+    let h = cx.variable(id, "h").unwrap();
+    let result = cx
+        .call(&h, &[vali_runtime::Handle::fixnum(7).unwrap()])
+        .unwrap();
+    assert_eq!(result.as_fixnum(), Some(110));
+}

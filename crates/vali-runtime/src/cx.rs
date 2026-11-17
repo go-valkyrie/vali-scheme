@@ -54,6 +54,8 @@ pub struct Cx<S: Strategy> {
     pub(crate) running: bool,
     /// Calls made, the fuel used so far (ADR 0009).
     pub(crate) fuel_used: u64,
+    /// A tail call a Rust procedure asked for, made when it returns.
+    pub(crate) tail_call: Option<(Value, Vec<Value>)>,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -111,6 +113,7 @@ impl<S: Strategy> Cx<S> {
             max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
             fuel_used: 0,
+            tail_call: None,
         }
     }
 
