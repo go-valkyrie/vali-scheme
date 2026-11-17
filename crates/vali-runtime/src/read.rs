@@ -165,6 +165,16 @@ impl<S: Strategy> DatumBuilder for HeapBuilder<'_, S> {
         // A fresh box stands in until the label's datum exists.
         let result = self.cx.new_object(TypeCode::Box, 1, 0);
         let placeholder = self.attempt(result);
+        if self.error.is_none() {
+            // SAFETY: a box just allocated, whose field holds values.
+            unsafe {
+                self.cx.init_field(
+                    placeholder,
+                    Cx::<S>::LAYOUT.field(TypeCode::Box, 0),
+                    Value::FALSE,
+                );
+            }
+        }
         self.pending.insert(label, placeholder);
         placeholder
     }

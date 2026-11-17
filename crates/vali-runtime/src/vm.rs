@@ -218,7 +218,9 @@ impl<S: Strategy> Cx<S> {
         let loaded = Loaded::<S>::new(module);
         let mut constants = Vec::with_capacity(loaded.module.constants.len());
         for constant in &loaded.module.constants {
-            constants.push(self.constant(constant)?);
+            let value = self.constant(constant)?;
+            self.hold(value);
+            constants.push(value);
         }
         let defined = loaded
             .module
@@ -321,7 +323,10 @@ impl<S: Strategy> Cx<S> {
     pub fn define(&mut self, name: &str, value: &Handle) -> Result<(), Error> {
         let value = self.get(value)?;
         // SAFETY: the cell belongs to this isolate.
-        unsafe { *self.global_cell(name) = value };
+        unsafe {
+            let cell = self.global_cell(name);
+            self.write_cell(cell, value);
+        }
         Ok(())
     }
 
@@ -351,7 +356,10 @@ impl<S: Strategy> Cx<S> {
         self.natives.push(code);
         let closure = self.closure_raw(pointer, &[])?;
         // SAFETY: the cell belongs to this isolate.
-        unsafe { *self.global_cell("%catch") = closure };
+        unsafe {
+            let cell = self.global_cell("%catch");
+            self.write_cell(cell, closure);
+        }
         Ok(())
     }
 
@@ -367,7 +375,10 @@ impl<S: Strategy> Cx<S> {
         self.natives.push(code);
         let closure = self.closure_raw(pointer, &[])?;
         // SAFETY: the cell belongs to this isolate.
-        unsafe { *self.global_cell(name) = closure };
+        unsafe {
+            let cell = self.global_cell(name);
+            self.write_cell(cell, closure);
+        }
         // SAFETY: just allocated.
         Ok(unsafe { self.root(closure) })
     }
@@ -409,9 +420,10 @@ impl<S: Strategy> Cx<S> {
         let v = self.new_object(TypeCode::Symbol, 2, data::symbol::INTERNED)?;
         // SAFETY: the symbol was just allocated with both fields.
         unsafe {
-            put(v, Self::LAYOUT.symbol_name(), string.raw());
+            self.init_field(v, Self::LAYOUT.symbol_name(), string);
             put(v, Self::LAYOUT.symbol_hash(), symbol_hash(name));
         }
+        self.hold(v);
         self.symbols.insert(name.into(), v);
         Ok(v)
     }
@@ -457,7 +469,7 @@ impl<S: Strategy> Cx<S> {
         unsafe {
             put(v, Self::LAYOUT.closure_code(), code as u64);
             for (i, x) in free.iter().enumerate() {
-                put(v, Self::LAYOUT.closure_free(i), x.raw());
+                self.init_field(v, Self::LAYOUT.closure_free(i), *x);
             }
         }
         Ok(v)
@@ -1289,7 +1301,10 @@ impl<S: Strategy> Cx<S> {
                             pc += 1;
                         }
                         Opcode::SetVariable => {
-                            *(*variables.add(usize::from(field_d(word)))).0 = slot(fp, a);
+                            self.write_cell(
+                                (*variables.add(usize::from(field_d(word)))).0,
+                                slot(fp, a),
+                            );
                             pc += 1;
                         }
                         Opcode::Closure => {
@@ -1322,10 +1337,10 @@ impl<S: Strategy> Cx<S> {
                         }
                         Opcode::MakeBox => {
                             let cell = attempt!(self.new_object(TypeCode::Box, 1, 0));
-                            put(
+                            self.init_field(
                                 cell,
                                 Self::LAYOUT.field(TypeCode::Box, 0),
-                                slot(fp, b).raw(),
+                                slot(fp, b),
                             );
                             set(fp, a, cell);
                             pc += 1;
@@ -1347,10 +1362,10 @@ impl<S: Strategy> Cx<S> {
                             if !self.is_other(cell, TypeCode::Box) {
                                 fail!(type_error("set-box", "a box", cell));
                             }
-                            put(
+                            self.write_field(
                                 cell,
                                 Self::LAYOUT.field(TypeCode::Box, 0),
-                                slot(fp, b).raw(),
+                                slot(fp, b),
                             );
                             pc += 1;
                         }
@@ -1544,7 +1559,7 @@ impl<S: Strategy> Cx<S> {
                                     b + 1
                                 )));
                             }
-                            put(closure, Self::LAYOUT.closure_free(b), slot(fp, c).raw());
+                            self.write_field(closure, Self::LAYOUT.closure_free(b), slot(fp, c));
                             pc += 1;
                         }
                     }

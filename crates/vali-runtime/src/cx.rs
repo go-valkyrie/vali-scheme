@@ -175,7 +175,58 @@ impl<S: Strategy> Cx<S> {
             // SAFETY: the object was just allocated with room for its header.
             unsafe { put(v, offset, header.0) };
         }
+        S::allocated(&mut self.heap, v);
         Ok(v)
+    }
+
+    /// Tells the strategy the runtime keeps a reference to `v` outside the
+    /// heap, for as long as the isolate lives: a module's constant, an
+    /// interned symbol, a type the runtime made.
+    pub(crate) fn hold(&mut self, v: Value) {
+        if v.is_pointer() {
+            S::retain(&mut self.heap, v);
+        }
+    }
+
+    /// Stores `x` in a field of `v`, an object just allocated, telling the
+    /// strategy.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live object with a field at `offset` that holds
+    /// values, and `x` a valid value.
+    #[inline(always)]
+    pub(crate) unsafe fn init_field(&mut self, v: Value, offset: i32, x: Value) {
+        // SAFETY: passed on to the caller.
+        unsafe { put(v, offset, x.raw()) };
+        S::init(&mut self.heap, x);
+    }
+
+    /// Stores `x` over the value in a field of `v`, telling the strategy.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live object with a field at `offset` that holds a
+    /// valid value, and `x` a valid value.
+    #[inline(always)]
+    pub(crate) unsafe fn write_field(&mut self, v: Value, offset: i32, x: Value) {
+        // SAFETY: passed on to the caller.
+        let old = Value::from_raw(unsafe { get(v, offset) });
+        // SAFETY: as above.
+        unsafe { put(v, offset, x.raw()) };
+        S::write(&mut self.heap, old, x);
+    }
+
+    /// Stores `x` over the value in a variable's cell, telling the strategy.
+    ///
+    /// # Safety
+    ///
+    /// `cell` must be a cell of this isolate, and `x` a valid value.
+    #[inline(always)]
+    pub(crate) unsafe fn write_cell(&mut self, cell: *mut Value, x: Value) {
+        // SAFETY: passed on to the caller.
+        let old = unsafe { std::mem::replace(&mut *cell, x) };
+        S::write(&mut self.heap, old, x);
     }
 
     /// A new pair.
@@ -187,8 +238,8 @@ impl<S: Strategy> Cx<S> {
         let pair = self.new_object(TypeCode::Pair, 2, 0)?;
         // SAFETY: the pair was just allocated with both fields.
         unsafe {
-            put(pair, Self::LAYOUT.car(), car.raw());
-            put(pair, Self::LAYOUT.cdr(), cdr.raw());
+            self.init_field(pair, Self::LAYOUT.car(), car);
+            self.init_field(pair, Self::LAYOUT.cdr(), cdr);
         }
         Ok(pair)
     }
@@ -218,7 +269,7 @@ impl<S: Strategy> Cx<S> {
         unsafe {
             put(v, Self::LAYOUT.length(TypeCode::Vector), len as u64);
             for i in 0..len {
-                put(v, Self::LAYOUT.vector_element(i), fill.raw());
+                self.init_field(v, Self::LAYOUT.vector_element(i), fill);
             }
         }
         Ok(v)
@@ -263,8 +314,8 @@ impl<S: Strategy> Cx<S> {
                 Self::LAYOUT.string_char_count(),
                 s.chars().count() as u64,
             );
-            put(v, Self::LAYOUT.string_bytes(), bytes.raw());
-            put(v, Self::LAYOUT.string_hints(), Value::FALSE.raw());
+            self.init_field(v, Self::LAYOUT.string_bytes(), bytes);
+            self.init_field(v, Self::LAYOUT.string_hints(), Value::FALSE);
         }
         Ok(v)
     }
@@ -307,7 +358,7 @@ impl<S: Strategy> Cx<S> {
     /// `v` must be a live pair and `x` a valid value.
     pub unsafe fn set_car(&mut self, v: Value, x: Value) {
         // SAFETY: passed on to the caller.
-        unsafe { put(v, Self::LAYOUT.car(), x.raw()) }
+        unsafe { self.write_field(v, Self::LAYOUT.car(), x) }
     }
 
     /// Sets a pair's `cdr`.
@@ -317,7 +368,7 @@ impl<S: Strategy> Cx<S> {
     /// `v` must be a live pair and `x` a valid value.
     pub unsafe fn set_cdr(&mut self, v: Value, x: Value) {
         // SAFETY: passed on to the caller.
-        unsafe { put(v, Self::LAYOUT.cdr(), x.raw()) }
+        unsafe { self.write_field(v, Self::LAYOUT.cdr(), x) }
     }
 
     /// A flonum's value.
@@ -358,7 +409,7 @@ impl<S: Strategy> Cx<S> {
     /// valid value.
     pub unsafe fn vector_set(&mut self, v: Value, i: usize, x: Value) {
         // SAFETY: passed on to the caller.
-        unsafe { put(v, Self::LAYOUT.vector_element(i), x.raw()) }
+        unsafe { self.write_field(v, Self::LAYOUT.vector_element(i), x) }
     }
 
     /// A bytevector's bytes.

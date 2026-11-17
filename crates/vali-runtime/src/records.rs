@@ -7,7 +7,7 @@
 
 use vali_abi::TypeCode;
 
-use crate::cx::{Cx, get, put};
+use crate::cx::{Cx, get};
 use crate::handle::Error;
 use crate::strategy::Strategy;
 use crate::value::Value;
@@ -102,16 +102,8 @@ pub(crate) fn make_record_type<S: Strategy>(
     let rtd = cx.new_object(TypeCode::RecordType, 2, 0)?;
     // SAFETY: just allocated with both fields.
     unsafe {
-        put(
-            rtd,
-            Cx::<S>::LAYOUT.field(TypeCode::RecordType, 0),
-            args[0].raw(),
-        );
-        put(
-            rtd,
-            Cx::<S>::LAYOUT.field(TypeCode::RecordType, 1),
-            fields.raw(),
-        );
+        cx.init_field(rtd, Cx::<S>::LAYOUT.field(TypeCode::RecordType, 0), args[0]);
+        cx.init_field(rtd, Cx::<S>::LAYOUT.field(TypeCode::RecordType, 1), fields);
     }
     Ok(rtd)
 }
@@ -169,16 +161,12 @@ pub(crate) fn make_record<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result
     // SAFETY: just allocated with its type and `count` fields; the indices
     // vector was made by `%record-constructor-indices` for this type.
     unsafe {
-        put(
-            record,
-            Cx::<S>::LAYOUT.field(TypeCode::Record, 0),
-            rtd.raw(),
-        );
+        cx.init_field(record, Cx::<S>::LAYOUT.field(TypeCode::Record, 0), rtd);
         for i in 0..count {
-            put(
+            cx.init_field(
                 record,
                 Cx::<S>::LAYOUT.field(TypeCode::Record, 1 + i),
-                Value::UNSPECIFIED.raw(),
+                Value::UNSPECIFIED,
             );
         }
         for (k, &value) in args[2..].iter().enumerate() {
@@ -188,10 +176,10 @@ pub(crate) fn make_record<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result
                 .and_then(|i| usize::try_from(i).ok())
                 .filter(|&i| i < count)
                 .ok_or_else(|| Error::scheme("record constructor: corrupt indices"))?;
-            put(
+            cx.write_field(
                 record,
                 Cx::<S>::LAYOUT.field(TypeCode::Record, 1 + i),
-                value.raw(),
+                value,
             );
         }
     }
@@ -243,7 +231,7 @@ pub(crate) fn record_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<
 pub(crate) fn record_set<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let offset = checked(cx, args[0], args[1], args[2])?;
     // SAFETY: as above, and the value is valid.
-    unsafe { put(args[0], offset, args[3].raw()) };
+    unsafe { cx.write_field(args[0], offset, args[3]) };
     Ok(Value::UNSPECIFIED)
 }
 
@@ -268,9 +256,9 @@ impl<S: Strategy> Cx<S> {
         let record = self.new_object(TypeCode::Record, 1 + values.len(), values.len() as u32)?;
         // SAFETY: just allocated with its type and fields.
         unsafe {
-            put(record, Self::LAYOUT.field(TypeCode::Record, 0), rtd.raw());
-            for (i, v) in values.iter().enumerate() {
-                put(record, Self::LAYOUT.field(TypeCode::Record, 1 + i), v.raw());
+            self.init_field(record, Self::LAYOUT.field(TypeCode::Record, 0), rtd);
+            for (i, &v) in values.iter().enumerate() {
+                self.init_field(record, Self::LAYOUT.field(TypeCode::Record, 1 + i), v);
             }
         }
         Ok(record)
@@ -295,6 +283,7 @@ impl<S: Strategy> Cx<S> {
             Some(rtd) => rtd,
             None => {
                 let rtd = self.internal_type("error-object", &["message", "irritants"])?;
+                self.hold(rtd);
                 self.error_object_type = Some(rtd);
                 rtd
             }
@@ -347,6 +336,7 @@ impl<S: Strategy> Cx<S> {
             Some(rtd) => Ok(rtd),
             None => {
                 let rtd = self.internal_type("values", &["list"])?;
+                self.hold(rtd);
                 self.values_type = Some(rtd);
                 Ok(rtd)
             }

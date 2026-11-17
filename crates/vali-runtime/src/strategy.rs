@@ -62,6 +62,20 @@ pub trait References: Allocate {
     /// The runtime has dropped one reference to `v`, a heap object.
     #[inline(always)]
     fn release(_heap: &mut Self::Heap, _v: crate::Value) {}
+
+    /// `v` was just allocated, its fields not yet written.
+    #[inline(always)]
+    fn allocated(_heap: &mut Self::Heap, _v: crate::Value) {}
+
+    /// `new`, any value, was stored into a field of an object just
+    /// allocated.
+    #[inline(always)]
+    fn init(_heap: &mut Self::Heap, _new: crate::Value) {}
+
+    /// `new` was stored over `old` in a field of an object or a variable's
+    /// cell: the store hook (ADR 0003). Either may be any value.
+    #[inline(always)]
+    fn write(_heap: &mut Self::Heap, _old: crate::Value, _new: crate::Value) {}
 }
 
 /// A memory strategy: every capability trait together.
