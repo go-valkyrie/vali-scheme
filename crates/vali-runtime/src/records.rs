@@ -165,7 +165,7 @@ pub(crate) fn make_record<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result
     {
         return Err(Error::scheme("record constructor: corrupt indices"));
     }
-    let record = cx.new_object(TypeCode::Record, 1 + count, 0)?;
+    let record = cx.new_object(TypeCode::Record, 1 + count, count as u32)?;
     // SAFETY: just allocated with its type and `count` fields; the indices
     // vector was made by `%record-constructor-indices` for this type.
     unsafe {
@@ -265,7 +265,7 @@ impl<S: Strategy> Cx<S> {
 
     /// A record of the runtime's type `rtd` holding `values`.
     fn internal_record(&mut self, rtd: Value, values: &[Value]) -> Result<Value, Error> {
-        let record = self.new_object(TypeCode::Record, 1 + values.len(), 0)?;
+        let record = self.new_object(TypeCode::Record, 1 + values.len(), values.len() as u32)?;
         // SAFETY: just allocated with its type and fields.
         unsafe {
             put(record, Self::LAYOUT.field(TypeCode::Record, 0), rtd.raw());

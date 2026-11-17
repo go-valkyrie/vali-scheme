@@ -1,6 +1,7 @@
 //! Memory for one heap: whole pages, and large objects allocated one by one.
 
 use std::alloc::{self, Layout};
+use std::collections::HashMap;
 use std::fmt;
 use std::ptr::NonNull;
 
@@ -37,7 +38,8 @@ pub struct HeapConfig {
 pub struct PageSource {
     limit: usize,
     used: usize,
-    blocks: Vec<(NonNull<u8>, Layout)>,
+    /// Every block, by address, with its layout.
+    blocks: HashMap<usize, Layout>,
 }
 
 // SAFETY: the blocks are owned by the source, and only freed in `drop`.
@@ -58,7 +60,7 @@ impl PageSource {
         PageSource {
             limit: config.max_bytes.unwrap_or(usize::MAX),
             used: 0,
-            blocks: Vec::new(),
+            blocks: HashMap::new(),
         }
     }
 
@@ -86,17 +88,31 @@ impl PageSource {
         // least one header word.
         let block = NonNull::new(unsafe { alloc::alloc(layout) }).ok_or(OutOfMemory)?;
         self.used = used;
-        self.blocks.push((block, layout));
+        self.blocks.insert(block.as_ptr() as usize, layout);
         Ok(block)
+    }
+
+    /// Returns a large object's memory to the system.
+    ///
+    /// # Safety
+    ///
+    /// `block` must have come from [`PageSource::large`] and not have been
+    /// freed since; nothing may use it afterwards.
+    pub unsafe fn free_large(&mut self, block: NonNull<u8>, _bytes: usize) {
+        if let Some(layout) = self.blocks.remove(&(block.as_ptr() as usize)) {
+            self.used -= layout.size();
+            // SAFETY: allocated with exactly this layout, freed once.
+            unsafe { alloc::dealloc(block.as_ptr(), layout) };
+        }
     }
 }
 
 impl Drop for PageSource {
     fn drop(&mut self) {
-        for (block, layout) in self.blocks.drain(..) {
+        for (block, layout) in self.blocks.drain() {
             // SAFETY: each block was allocated with exactly this layout and
             // is freed once.
-            unsafe { alloc::dealloc(block.as_ptr(), layout) };
+            unsafe { alloc::dealloc(block as *mut u8, layout) };
         }
     }
 }
