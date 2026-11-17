@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
+use crate::expand::{RED_ZONE, STACK_GROWTH};
 
 struct Reference {
     /// The arguments, if the reference is the operator of a call.
@@ -28,6 +29,10 @@ struct Walker<'a> {
 
 impl Walker<'_> {
     fn walk(&mut self, e: &Expr, lambda: LambdaId, tail: bool) {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.walk_here(e, lambda, tail));
+    }
+
+    fn walk_here(&mut self, e: &Expr, lambda: LambdaId, tail: bool) {
         match e {
             Expr::Unspecified | Expr::Const(_) | Expr::Global(_) => {}
             Expr::Local(v) => self.reference(*v, None, lambda, tail),

@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+stacker = "0.1"
 vali-bytecode.workspace = true
 vali-num.workspace = true
 vali-syntax.workspace = true

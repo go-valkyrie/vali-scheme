@@ -16,6 +16,7 @@ mod analyze;
 mod ast;
 mod codegen;
 mod expand;
+mod pattern;
 
 use std::fmt;
 

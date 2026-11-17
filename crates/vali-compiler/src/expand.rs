@@ -12,18 +12,42 @@
 //! A free identifier, one with no binding, is a module variable linked to
 //! the global of that name; until libraries exist, that is how the standard
 //! procedures are reached.
+//!
+//! Macros are `syntax-rules` transformers, matched and built in Rust
+//! (`pattern`). Each use flips a fresh macro scope on its input and output;
+//! a use in a definition context also adds a use-site scope to its input,
+//! which definitions then drop, so a macro can define a name its use
+//! supplies. The derived forms are macros in `prelude.scm`, bound in the
+//! core scope.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 use vali_syntax::{
-    AlreadyBound, BindingTable, DatumKind, Exposed, Phase, Phases, Resolution, Scope, ScopeContext,
-    ScopeKind, ScopeSetId, Span, Syntax, TooManyScopes,
+    AlreadyBound, BindingTable, DatumKind, Exposed, Origin, Phase, Phases, Resolution, Scope,
+    ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax, TooManyScopes, free_identifier_eq,
 };
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
+use crate::pattern::{self, Builder, Match, Pattern, Spelling, Template, Vars};
+
+/// The derived forms, as macros.
+const PRELUDE: &str = include_str!("prelude.scm");
+
+/// How many macro steps may produce one form, counting both uses nested
+/// in expressions and a body's forms that expand into further uses, so a
+/// macro that expands into itself forever is reported. Legitimate code
+/// nests deeply too: a `cond` with a thousand clauses is a thousand uses
+/// deep.
+const MAX_MACRO_DEPTH: usize = 10_000;
 
 type Result<T> = std::result::Result<T, CompileError>;
+
+/// When less stack than this is left, recursion moves to a new segment of
+/// `STACK_GROWTH` bytes.
+pub(crate) const RED_ZONE: usize = 128 * 1024;
+pub(crate) const STACK_GROWTH: usize = 2 * 1024 * 1024;
 
 /// The core forms (ADR 0015 #15) that exist so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +60,10 @@ enum Core {
     Letrec,
     Set,
     Define,
+    DefineSyntax,
+    LetSyntax,
+    LetrecSyntax,
+    SyntaxRules,
 }
 
 const CORE: &[(&str, Core)] = &[
@@ -48,6 +76,10 @@ const CORE: &[(&str, Core)] = &[
     ("letrec*", Core::Letrec),
     ("set!", Core::Set),
     ("define", Core::Define),
+    ("define-syntax", Core::DefineSyntax),
+    ("let-syntax", Core::LetSyntax),
+    ("letrec-syntax", Core::LetrecSyntax),
+    ("syntax-rules", Core::SyntaxRules),
 ];
 
 /// What an identifier can be bound to.
@@ -57,6 +89,21 @@ enum Binding {
     Local(VarId),
     /// A module variable the program defines.
     Global(String),
+    /// A macro, by number.
+    Macro(usize),
+}
+
+/// A `syntax-rules` macro.
+struct Macro {
+    name: String,
+    clauses: Vec<Clause>,
+}
+
+struct Clause {
+    pattern: Pattern,
+    template: Template,
+    /// Each pattern variable's depth.
+    depths: Vec<usize>,
 }
 
 /// One form of a body, after the first pass.
@@ -98,6 +145,9 @@ pub(crate) struct Expander {
     stack: Vec<LambdaId>,
     /// Suffixes for module variables that macros introduce.
     fresh: usize,
+    macros: Vec<Macro>,
+    /// Macro uses in expressions being expanded, one inside another.
+    depth: usize,
 }
 
 impl Expander {
@@ -128,6 +178,8 @@ impl Expander {
             top,
             stack: Vec::new(),
             fresh: 0,
+            macros: Vec::new(),
+            depth: 0,
         })
     }
 
@@ -138,6 +190,7 @@ impl Expander {
             .map(|d| Syntax::from_datum(d, self.top))
             .collect();
         let body = self.open_lambda(None);
+        self.prelude()?;
         let span = datums.first().map_or(
             Span {
                 source: vali_syntax::SourceId(0),
@@ -148,6 +201,32 @@ impl Expander {
         let expr = self.body(forms, true, span)?;
         self.close_lambda(body, Vec::new(), None, expr);
         Ok(body)
+    }
+
+    /// Expands the prelude, whose forms carry only the core scope, so the
+    /// macros it defines are bound where the core forms are.
+    fn prelude(&mut self) -> Result<()> {
+        let read = vali_syntax::read(PRELUDE, SourceId(u32::MAX));
+        if let Some(e) = read.errors.first() {
+            return Err(CompileError {
+                message: format!("the prelude does not read: {}", e.kind),
+                span: None,
+            });
+        }
+        let forms = read
+            .datums
+            .iter()
+            .map(|d| Syntax::from_datum(d, self.core))
+            .collect();
+        self.body(
+            forms,
+            true,
+            Span {
+                source: SourceId(u32::MAX),
+                range: Default::default(),
+            },
+        )?;
+        Ok(())
     }
 
     // Scopes and bindings.
@@ -187,22 +266,242 @@ impl Expander {
         }
     }
 
-    /// The core form `stx` is, if it is a list whose head names one.
-    fn core_form(&mut self, stx: &Syntax) -> Result<Option<(Core, Vec<Syntax>)>> {
+    /// The keyword `stx` uses, a core form or a macro, if it is a list
+    /// whose head names one.
+    fn form(&mut self, stx: &Syntax) -> Result<Option<(Binding, Vec<Syntax>)>> {
         if !stx.is_list() {
             return Ok(None);
         }
-        let Exposed::List { items, tail: None } = self.expose(stx)? else {
+        let Exposed::List { items, tail } = self.expose(stx)? else {
             return Ok(None);
         };
         match items.first() {
             Some(head) if head.as_identifier().is_some() => match self.resolve(head)? {
-                Some(Binding::Core(form)) => Ok(Some((form, items))),
+                Some(Binding::Core(form)) if tail.is_none() => {
+                    Ok(Some((Binding::Core(form), items)))
+                }
+                Some(Binding::Macro(m)) => Ok(Some((Binding::Macro(m), items))),
                 _ => Ok(None),
             },
             _ => Ok(None),
         }
     }
+
+    /// The core form `stx` is, if it is a list whose head names one.
+    fn core_form(&mut self, stx: &Syntax) -> Result<Option<(Core, Vec<Syntax>)>> {
+        Ok(match self.form(stx)? {
+            Some((Binding::Core(form), items)) => Some((form, items)),
+            _ => None,
+        })
+    }
+
+    /// `id` without the use-site scopes of the body defining it.
+    fn strip(&mut self, id: &Syntax, use_sites: &[Scope]) -> Result<Syntax> {
+        let mut id = id.clone();
+        for &scope in use_sites {
+            id = id.remove(&mut self.context, scope).map_err(too_many)?;
+        }
+        Ok(id)
+    }
+
+    // Macros.
+
+    /// Compiles a transformer, `(syntax-rules ...)`, for the macro `name`.
+    fn transformer(&mut self, spec: &Syntax, name: &str) -> Result<usize> {
+        let Some((Core::SyntaxRules, items)) = self.core_form(spec)? else {
+            return Err(error(
+                format!("{name}: expected a syntax-rules transformer"),
+                spec.span(),
+            ));
+        };
+        // `(syntax-rules (literal ...) clause ...)`, or with a custom
+        // ellipsis, `(syntax-rules ellipsis (literal ...) clause ...)`.
+        let (ellipsis, rest) = match &items[1..] {
+            [e, rest @ ..] if e.as_identifier().is_some() => {
+                (e.as_identifier().expect("checked").to_owned(), rest)
+            }
+            rest => ("...".to_owned(), rest),
+        };
+        let Some((literals, clauses)) = rest.split_first() else {
+            return Err(error(
+                "syntax-rules: expected a list of literals",
+                spec.span(),
+            ));
+        };
+        let literals = self.items(literals, "a list of literals")?;
+        if let Some(l) = literals.iter().find(|l| l.as_identifier().is_none()) {
+            return Err(error(
+                "syntax-rules: a literal must be an identifier",
+                l.span(),
+            ));
+        }
+        let spelling = Spelling {
+            ellipsis: &ellipsis,
+            literals: &literals,
+        };
+        let mut compiled = Vec::new();
+        for clause in clauses {
+            let parts = self.items(clause, "(pattern template)")?;
+            let [pattern, template] = &parts[..] else {
+                return Err(error(
+                    "syntax-rules: expected (pattern template)",
+                    clause.span(),
+                ));
+            };
+            // The pattern's first element stands for the keyword and is
+            // ignored: it is not a pattern variable.
+            let Exposed::List {
+                items: elements,
+                tail,
+            } = self.expose(pattern)?
+            else {
+                return Err(error(
+                    "syntax-rules: a pattern must be a list",
+                    pattern.span(),
+                ));
+            };
+            if elements.is_empty() {
+                return Err(error(
+                    "syntax-rules: a pattern must start with the keyword",
+                    pattern.span(),
+                ));
+            }
+            let rest = Syntax::list(
+                elements[1..].to_vec(),
+                tail,
+                pattern.scopes(),
+                pattern.span(),
+                None,
+            );
+            let mut vars = Vars::new();
+            let mut compiled_pattern =
+                pattern::pattern(&mut self.context, &spelling, &mut vars, &rest, 0)?;
+            if let Pattern::List { before, .. } = &mut compiled_pattern {
+                before.insert(0, Pattern::Discard);
+            }
+            let template =
+                pattern::template(&mut self.context, &spelling, &vars, template, 0, false)?;
+            compiled.push(Clause {
+                pattern: compiled_pattern,
+                template,
+                depths: vars.depths(),
+            });
+        }
+        self.macros.push(Macro {
+            name: name.to_owned(),
+            clauses: compiled,
+        });
+        Ok(self.macros.len() - 1)
+    }
+
+    /// One macro step: flips a fresh macro scope on the use, adds
+    /// `use_site` if the use is in a definition context, transforms it,
+    /// and flips the macro scope again on the output, so what the macro
+    /// introduced has the scope and what it passed through doesn't.
+    /// `chain` is how many macro steps produced `form` in a body.
+    fn apply_macro(
+        &mut self,
+        m: usize,
+        form: &Syntax,
+        use_site: Option<Scope>,
+        chain: usize,
+    ) -> Result<Syntax> {
+        if self.depth + chain >= MAX_MACRO_DEPTH {
+            return Err(error(
+                format!(
+                    "{}: too many macro steps; does the macro expand into itself forever?",
+                    self.macros[m].name
+                ),
+                form.span(),
+            ));
+        }
+        let scope = self.scope(ScopeKind::Macro)?;
+        let mut input = form.flip(&mut self.context, scope).map_err(too_many)?;
+        if let Some(use_site) = use_site {
+            input = self.add(&input, use_site)?;
+        }
+        let origin = Arc::new(Origin {
+            macro_name: self.macros[m].name.as_str().into(),
+            use_site: form.span(),
+            parent: form.origin().cloned(),
+        });
+        let table = &self.table;
+        let same = |cx: &ScopeContext, a: &Syntax, b: &Syntax| {
+            free_identifier_eq(cx, table, Phase(0), a, b)
+        };
+        let mac = &self.macros[m];
+        for clause in &mac.clauses {
+            let mut binds: Vec<Option<Match>> = vec![None; clause.depths.len()];
+            if pattern::matches(
+                &mut self.context,
+                &same,
+                &clause.pattern,
+                &input,
+                &mut binds,
+            )? {
+                let builder = Builder {
+                    depths: clause.depths.clone(),
+                    origin: Some(&origin),
+                    span: form.span(),
+                };
+                let output = builder.build(&clause.template, &mut binds)?;
+                return output.flip(&mut self.context, scope).map_err(too_many);
+            }
+        }
+        Err(error(
+            format!("{}: no pattern matches this use", mac.name),
+            form.span(),
+        ))
+    }
+
+    /// Expands a macro use as an expression.
+    fn macro_expr(&mut self, m: usize, form: &Syntax, name: Option<&str>) -> Result<Expr> {
+        let output = self.apply_macro(m, form, None, 0)?;
+        self.depth += 1;
+        let result = match name {
+            Some(name) => self.named(&output, name),
+            None => self.expr(&output),
+        };
+        self.depth -= 1;
+        result
+    }
+
+    /// `(let-syntax ((id transformer) ...) body ...)`, and
+    /// `letrec-syntax`, whose transformers see their own bindings.
+    fn let_syntax(
+        &mut self,
+        keyword: &str,
+        args: &[Syntax],
+        recursive: bool,
+        span: Span,
+    ) -> Result<Expr> {
+        let [bindings, body @ ..] = args else {
+            return Err(error(
+                format!("{keyword}: expected bindings and a body"),
+                span,
+            ));
+        };
+        let bindings = self.bindings(bindings, keyword)?;
+        let scope = self.scope(ScopeKind::Binder)?;
+        for (id, spec) in &bindings {
+            let spec = if recursive {
+                self.add(spec, scope)?
+            } else {
+                spec.clone()
+            };
+            let name = id.as_identifier().expect("checked").to_owned();
+            let m = self.transformer(&spec, &name)?;
+            let id = self.add(id, scope)?;
+            self.bind(&id, Binding::Macro(m), keyword)?;
+        }
+        let body = body
+            .iter()
+            .map(|f| self.add(f, scope))
+            .collect::<Result<Vec<_>>>()?;
+        self.body(body, false, span)
+    }
+
+    // Scopes and bindings.
 
     /// Binds `id`, refusing a second binding with the same scopes.
     fn bind(&mut self, id: &Syntax, binding: Binding, what: &str) -> Result<()> {
@@ -289,32 +588,63 @@ impl Expander {
     /// make module variables and may come between expressions; elsewhere
     /// they make local variables, all before the first expression.
     fn body(&mut self, forms: Vec<Syntax>, top: bool, span: Span) -> Result<Expr> {
-        let mut queue: VecDeque<Syntax> = if top {
-            forms.into()
+        // Each form with the number of macro steps that produced it.
+        let mut queue: VecDeque<(Syntax, usize)> = if top {
+            forms.into_iter().map(|f| (f, 0)).collect()
         } else {
             // Definitions in a body shadow the parameters around it.
             let scope = self.scope(ScopeKind::Binder)?;
             forms
                 .iter()
-                .map(|f| self.add(f, scope))
+                .map(|f| Ok((self.add(f, scope)?, 0)))
                 .collect::<Result<_>>()?
         };
         let mut items = Vec::new();
-        while let Some(form) = queue.pop_front() {
-            match self.core_form(&form)? {
-                Some((Core::Begin, parts)) => {
+        let mut use_sites = Vec::new();
+        while let Some((form, chain)) = queue.pop_front() {
+            let definitions_end = !top && items.iter().any(|i| matches!(i, Item::Expr(_)));
+            match self.form(&form)? {
+                Some((Binding::Core(Core::Begin), parts)) => {
                     for part in parts.into_iter().skip(1).rev() {
-                        queue.push_front(part);
+                        queue.push_front((part, chain));
                     }
                 }
-                Some((Core::Define, parts)) => {
-                    if !top && items.iter().any(|i| matches!(i, Item::Expr(_))) {
+                Some((Binding::Macro(m), _)) => {
+                    let use_site = self.scope(ScopeKind::UseSite)?;
+                    use_sites.push(use_site);
+                    let output = self.apply_macro(m, &form, Some(use_site), chain)?;
+                    queue.push_front((output, chain + 1));
+                }
+                Some((Binding::Core(Core::DefineSyntax), parts)) => {
+                    if definitions_end {
+                        return Err(error(
+                            "define-syntax: definitions must come before a body's expressions",
+                            form.span(),
+                        ));
+                    }
+                    let [_, id, spec] = &parts[..] else {
+                        return Err(error(
+                            "define-syntax: expected a name and a transformer",
+                            form.span(),
+                        ));
+                    };
+                    let id = self.strip(id, &use_sites)?;
+                    let name = id
+                        .as_identifier()
+                        .ok_or_else(|| error("define-syntax: expected a name", id.span()))?
+                        .to_owned();
+                    let m = self.transformer(spec, &name)?;
+                    self.bind(&id, Binding::Macro(m), "define-syntax")?;
+                }
+                Some((Binding::Core(Core::Define), parts)) => {
+                    if definitions_end {
                         return Err(error(
                             "define: definitions must come before a body's expressions",
                             form.span(),
                         ));
                     }
                     let (id, value) = self.definition(&form, &parts)?;
+                    let id = self.strip(&id, &use_sites)?;
                     items.push(if top {
                         Item::Global(self.define_global(&id)?, value)
                     } else {
@@ -459,21 +789,31 @@ impl Expander {
 
     // Expressions.
 
-    /// Expands `stx`, naming it `name` if it is a `lambda`.
+    /// Expands `stx`, naming it `name` if it is a `lambda`, or a macro
+    /// use that expands into one.
     fn named(&mut self, stx: &Syntax, name: &str) -> Result<Expr> {
-        if let Some((Core::Lambda, parts)) = self.core_form(stx)? {
-            return self.lambda(Some(name), &parts, stx.span());
+        match self.form(stx)? {
+            Some((Binding::Core(Core::Lambda), parts)) => {
+                self.lambda(Some(name), &parts, stx.span())
+            }
+            Some((Binding::Macro(m), _)) => self.macro_expr(m, stx, Some(name)),
+            _ => self.expr(stx),
         }
-        self.expr(stx)
     }
 
+    /// Expands an expression. Deeply nested code recurses deeply, so the
+    /// stack grows on demand.
     pub(crate) fn expr(&mut self, stx: &Syntax) -> Result<Expr> {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.expr_here(stx))
+    }
+
+    fn expr_here(&mut self, stx: &Syntax) -> Result<Expr> {
         if let Some(name) = stx.as_identifier() {
             return match self.resolve(stx)? {
                 Some(Binding::Local(v)) => Ok(self.local(v)),
                 Some(Binding::Global(global)) => Ok(Expr::Global(global)),
                 None => Ok(Expr::Global(name.to_owned())),
-                Some(Binding::Core(_)) => Err(error(
+                Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
                     stx.span(),
                 )),
@@ -501,11 +841,15 @@ impl Expander {
         let Some(head) = items.first() else {
             return Err(error("() is not an expression; quote it", span));
         };
-        if head.as_identifier().is_some()
-            && let Some(Binding::Core(form)) = self.resolve(head)?
-        {
-            let keyword = head.as_identifier().expect("an identifier").to_owned();
-            return self.core(form, &keyword, &items, span);
+        if head.as_identifier().is_some() {
+            match self.resolve(head)? {
+                Some(Binding::Core(form)) => {
+                    let keyword = head.as_identifier().expect("an identifier").to_owned();
+                    return self.core(form, &keyword, &items, span);
+                }
+                Some(Binding::Macro(m)) => return self.macro_expr(m, stx, None),
+                _ => {}
+            }
         }
         if items.len() - 1 > usize::from(u8::MAX) - 4 {
             return Err(error("too many arguments in one call", span));
@@ -575,7 +919,7 @@ impl Expander {
                         let value = self.expr(value)?;
                         Ok(Expr::SetGlobal(global, Box::new(value)))
                     }
-                    Some(Binding::Core(_)) => Err(error(
+                    Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                         format!("{keyword}: {name} is a syntactic keyword"),
                         target.span(),
                     )),
@@ -585,8 +929,14 @@ impl Expander {
                     )),
                 }
             }
-            Core::Define => Err(error(
-                "define is only allowed at top level or at the start of a body",
+            Core::Define | Core::DefineSyntax => Err(error(
+                format!("{keyword} is only allowed at top level or at the start of a body"),
+                span,
+            )),
+            Core::LetSyntax => self.let_syntax(keyword, args, false, span),
+            Core::LetrecSyntax => self.let_syntax(keyword, args, true, span),
+            Core::SyntaxRules => Err(error(
+                format!("{keyword} is only allowed as a macro's transformer"),
                 span,
             )),
         }

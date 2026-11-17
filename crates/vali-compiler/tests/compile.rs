@@ -171,7 +171,6 @@ fn mutually_recursive_definitions() {
 }
 
 #[test]
-#[ignore = "the derived forms return as macros with the prelude"]
 fn derived_forms() {
     check(&[
         ("(and)", "#t"),
@@ -279,4 +278,196 @@ fib: arity 1, 11 slots, 0 free
   0010  return r5
 "
     );
+}
+
+#[test]
+fn more_derived_forms() {
+    check(&[
+        (
+            "(case (* 2 3) ((2 3 5 7) 'prime) ((1 4 6 8 9) 'composite))",
+            "composite",
+        ),
+        (
+            "(case (car '(c d)) ((a e i o u) 'vowel) ((w y) 'semivowel) (else => (lambda (x) x)))",
+            "c",
+        ),
+        ("(case 5 ((5) => (lambda (x) (* x x))) (else 0))", "25"),
+        (
+            "(do ((vec (make-vector 5)) (i 0 (+ i 1))) ((= i 5) vec) (vector-set! vec i i))",
+            "#(0 1 2 3 4)",
+        ),
+        (
+            "(let ((x '(1 3 5 7 9))) (do ((x x (cdr x)) (sum 0 (+ sum (car x)))) ((null? x) sum)))",
+            "25",
+        ),
+    ]);
+}
+
+#[test]
+fn macros_are_hygienic() {
+    check(&[
+        // The temporary that `or` introduces doesn't capture the user's x.
+        ("(let ((x 1)) (or #f x))", "1"),
+        // What a macro introduces means what it meant where the macro was
+        // defined, whatever the use binds: here, the core `if`.
+        ("(let ((if list)) (when #t 5))", "5"),
+        // R7RS 4.3.2's example: the user's `t` and the macro's are distinct.
+        (
+            "(letrec-syntax
+               ((my-or (syntax-rules ()
+                         ((_) #f)
+                         ((_ e) e)
+                         ((_ e r ...) (let ((t e)) (if t t (my-or r ...)))))))
+               (let ((x #f) (y 7) (temp 8) (let odd?) (if even?))
+                 (my-or x (let temp) (if y) y)))",
+            "7",
+        ),
+        // A literal matches only an identifier bound the same way: the
+        // user's local `else` is a variable, not cond's keyword.
+        ("(let ((else #f)) (cond (else 1)))", "#<unspecified>"),
+        // But a macro's own `else` is still cond's.
+        (
+            "(define-syntax choose (syntax-rules () ((_ c a b) (cond (c a) (else b)))))
+             (let ((else #f)) (choose #f 1 2))",
+            "2",
+        ),
+    ]);
+}
+
+#[test]
+fn macros_can_define_names_their_uses_supply() {
+    check(&[
+        (
+            "(define-syntax def-one (syntax-rules () ((_ name) (define name 1))))
+             (def-one x)
+             x",
+            "1",
+        ),
+        (
+            "(define-syntax def-one (syntax-rules () ((_ name) (define name 1))))
+             (define (f) (def-one y) (+ y 1))
+             (f)",
+            "2",
+        ),
+        // A definition from a macro in a body is seen by the rest of it.
+        (
+            "(define-syntax def-pair
+               (syntax-rules () ((_ a b) (begin (define a 1) (define b 2)))))
+             (define (f) (def-pair p q) (list p q))
+             (f)",
+            "(1 2)",
+        ),
+    ]);
+    // A name the macro made up stays the macro's.
+    let Err(Error::Scheme(e)) = run(
+        "(define-syntax def-hidden (syntax-rules () ((_) (define hidden 1))))
+         (def-hidden)
+         hidden",
+    ) else {
+        panic!("expected hidden to be unbound");
+    };
+    assert_eq!(e.message, "unbound variable: hidden");
+}
+
+#[test]
+fn patterns_and_templates() {
+    check(&[
+        // A variable with less depth than its ellipses is repeated.
+        (
+            "(define-syntax tag (syntax-rules () ((_ t x ...) '((t x) ...))))
+             (tag k 1 2)",
+            "((k 1) (k 2))",
+        ),
+        // Two ellipses in a row flatten two levels.
+        (
+            "(define-syntax flat (syntax-rules () ((_ (a ...) ...) '(a ... ...))))
+             (flat (1 2) () (3))",
+            "(1 2 3)",
+        ),
+        // Nested ellipses, each consuming its own level.
+        (
+            "(define-syntax swap (syntax-rules () ((_ (a b ...) ...) '((b ... a) ...))))
+             (swap (1 2 3) (4) (5 6))",
+            "((2 3 1) (4) (6 5))",
+        ),
+        // Patterns after the ellipsis, and a dotted tail.
+        (
+            "(define-syntax ends (syntax-rules () ((_ a ... z) '(z a ...))))
+             (ends 1 2 3)",
+            "(3 1 2)",
+        ),
+        (
+            "(define-syntax rest (syntax-rules () ((_ a . r) 'r)))
+             (list (rest 1 2 3) (rest 1))",
+            "((2 3) ())",
+        ),
+        // Vectors.
+        (
+            "(define-syntax v (syntax-rules () ((_ #(a b ...)) '#(b ... a))))
+             (v #(1 2 3))",
+            "#(2 3 1)",
+        ),
+        // Datums in patterns match equal datums.
+        (
+            "(define-syntax lit (syntax-rules () ((_ 1) 'one) ((_ \"s\") 'string) ((_ x) 'other)))
+             (list (lit 1) (lit \"s\") (lit 2))",
+            "(one string other)",
+        ),
+        // A custom ellipsis, and the escape for a literal one.
+        (
+            "(define-syntax ell (syntax-rules dots () ((_ x dots) '(x dots ...))))
+             (ell 1 2)",
+            "(1 2 ...)",
+        ),
+        (
+            "(define-syntax esc (syntax-rules () ((_ x) '(x (... ...)))))
+             (esc 1)",
+            "(1 ...)",
+        ),
+        // let-syntax.
+        (
+            "(let-syntax ((double (syntax-rules () ((_ x) (* x 2))))) (double 21))",
+            "42",
+        ),
+        // A macro that expands into a lambda names it after its definition.
+        (
+            "(define-syntax fn (syntax-rules () ((_ args body) (lambda args body))))
+             (define add (fn (a b) (+ a b)))
+             (add 1 2)",
+            "3",
+        ),
+    ]);
+}
+
+#[test]
+fn macro_errors() {
+    let compile_error = |source: &str| compile(source, "test").unwrap_err().message;
+    assert!(
+        compile_error("(define-syntax m (syntax-rules () ((_ x) x))) (m)")
+            .contains("m: no pattern matches")
+    );
+    assert!(compile_error("(define-syntax m (syntax-rules () ((_) (m)))) (m)").contains("forever"));
+    assert!(
+        compile_error("(define-syntax m (syntax-rules () ((_) (m)))) (+ 1 (m))")
+            .contains("forever")
+    );
+    assert!(
+        compile_error("(define-syntax m (syntax-rules () ((_ x ...) x))) (m 1)")
+            .contains("needs 1 ellipses")
+    );
+    assert!(
+        compile_error("(define-syntax m (syntax-rules () ((_ ... x) x)))")
+            .contains("must follow a pattern")
+    );
+    assert!(compile_error("(define-syntax m 5)").contains("expected a syntax-rules transformer"));
+    assert!(compile_error("(+ 1 when)").contains("syntactic keyword"));
+}
+
+#[test]
+fn deeply_nested_code_compiles() {
+    // Each clause is a cond use inside the previous one's expansion, far
+    // deeper than a test thread's stack holds without growing it.
+    let clauses: String = (0..1000).map(|i| format!("((= x {i}) {i}) ")).collect();
+    let source = format!("(define x 999) (cond {clauses})");
+    check(&[(&source, "999")]);
 }

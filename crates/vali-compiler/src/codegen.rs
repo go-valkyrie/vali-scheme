@@ -21,6 +21,7 @@ use vali_syntax::{Datum, DatumKind, Span};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
+use crate::expand::{RED_ZONE, STACK_GROWTH};
 
 type Result<T> = std::result::Result<T, CompileError>;
 
@@ -291,7 +292,7 @@ impl Generator<'_> {
     /// slot it took.
     fn compile(&mut self, f: &mut Frame, e: &Expr, target: Target) -> Result<()> {
         let saved = f.next;
-        self.expr(f, e, target)?;
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.expr(f, e, target))?;
         f.next = saved;
         Ok(())
     }
