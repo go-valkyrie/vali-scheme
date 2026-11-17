@@ -96,3 +96,15 @@
              (loop (do "step" var step ...) ...)))))
     ((_ "step" x) x)
     ((_ "step" x y) y)))
+
+;;; From R6RS's (rnrs syntax-case): with-syntax binds pattern variables to
+;;; what each input matches, for a transformer's templates.
+
+(define-syntax with-syntax
+  (syntax-rules ()
+    ((_ () e1 e2 ...)
+     (let () e1 e2 ...))
+    ((_ ((out in)) e1 e2 ...)
+     (syntax-case in () (out (let () e1 e2 ...))))
+    ((_ ((out in) ...) e1 e2 ...)
+     (syntax-case (list in ...) () ((out ...) (let () e1 e2 ...))))))

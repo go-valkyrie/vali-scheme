@@ -114,6 +114,17 @@ impl Vars {
             .iter()
             .position(|(v, _)| bound_identifier_eq(v, id))
     }
+
+    /// A variable's number and depth, found by `bound-identifier=?`, as
+    /// `syntax-rules` finds them.
+    pub(crate) fn lookup(&self, id: &Syntax) -> Option<(usize, usize)> {
+        self.find(id).map(|v| (v, self.vars[v].1))
+    }
+
+    /// Each variable's identifier and depth, by number.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &(Syntax, usize)> {
+        self.vars.iter()
+    }
 }
 
 /// How a `syntax-rules` form spells its ellipsis and literals.
@@ -354,19 +365,22 @@ fn elements(
     Ok(true)
 }
 
+/// Finds a template's pattern variables: given an identifier, its number
+/// and its depth in its pattern, if it is one.
+pub(crate) type Find<'a> = &'a mut dyn FnMut(&ScopeContext, &Syntax) -> Option<(usize, usize)>;
+
 /// Compiles `stx` as a template, inside `depth` ellipses. With `escaped`,
 /// the ellipsis is an ordinary identifier: `(... template)`.
 pub(crate) fn template(
     cx: &mut ScopeContext,
     spelling: &Spelling<'_>,
-    vars: &Vars,
+    find: Find<'_>,
     stx: &Syntax,
     depth: usize,
     escaped: bool,
 ) -> Result<Template> {
     if stx.as_identifier().is_some() {
-        if let Some(v) = vars.find(stx) {
-            let needed = vars.vars[v].1;
+        if let Some((v, needed)) = find(cx, stx) {
             if depth < needed {
                 return Err(error(
                     format!(
@@ -391,11 +405,11 @@ pub(crate) fn template(
                 && let [first, inner] = &items[..]
                 && spelling.is_ellipsis(first)
             {
-                return template(cx, spelling, vars, inner, depth, true);
+                return template(cx, spelling, find, inner, depth, true);
             }
-            let items = elements_template(cx, spelling, vars, &items, depth, escaped)?;
+            let items = elements_template(cx, spelling, find, &items, depth, escaped)?;
             let tail = tail
-                .map(|t| template(cx, spelling, vars, &t, depth, escaped).map(Box::new))
+                .map(|t| template(cx, spelling, find, &t, depth, escaped).map(Box::new))
                 .transpose()?;
             Ok(Template::List {
                 items,
@@ -404,7 +418,7 @@ pub(crate) fn template(
             })
         }
         Exposed::Vector(items) => Ok(Template::Vector {
-            items: elements_template(cx, spelling, vars, &items, depth, escaped)?,
+            items: elements_template(cx, spelling, find, &items, depth, escaped)?,
             syntax: stx.clone(),
         }),
         Exposed::Atom(_) | Exposed::Identifier(_) => Ok(Template::Constant(stx.clone())),
@@ -414,7 +428,7 @@ pub(crate) fn template(
 fn elements_template(
     cx: &mut ScopeContext,
     spelling: &Spelling<'_>,
-    vars: &Vars,
+    find: Find<'_>,
     items: &[Syntax],
     depth: usize,
     escaped: bool,
@@ -431,7 +445,7 @@ fn elements_template(
             count += 1;
         }
         out.push((
-            template(cx, spelling, vars, &items[i], depth + count, escaped)?,
+            template(cx, spelling, find, &items[i], depth + count, escaped)?,
             count,
         ));
         i += 1 + count;

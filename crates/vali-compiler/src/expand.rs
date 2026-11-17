@@ -35,7 +35,7 @@ use vali_runtime::{Cx, Handle, NoCollection};
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
 use crate::pattern::{self, Builder, Match, Pattern, Spelling, Template, Vars};
-use crate::phase::{self, QUOTE_SYNTAX, Shared};
+use crate::phase::{self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, Shared};
 
 /// The derived forms, as macros.
 const PRELUDE: &str = include_str!("prelude.scm");
@@ -70,6 +70,8 @@ pub(crate) enum Core {
     LetrecSyntax,
     SyntaxRules,
     QuoteSyntax,
+    SyntaxCase,
+    Syntax,
 }
 
 const CORE: &[(&str, Core)] = &[
@@ -87,6 +89,8 @@ const CORE: &[(&str, Core)] = &[
     ("letrec-syntax", Core::LetrecSyntax),
     ("syntax-rules", Core::SyntaxRules),
     ("quote-syntax", Core::QuoteSyntax),
+    ("syntax-case", Core::SyntaxCase),
+    ("syntax", Core::Syntax),
 ];
 
 /// What an identifier can be bound to.
@@ -98,6 +102,9 @@ pub(crate) enum Binding {
     Global(String),
     /// A macro, by number.
     Macro(usize),
+    /// A `syntax-case` pattern variable: the hidden local holding what it
+    /// matched, and its depth.
+    PatternVar(VarId, usize),
 }
 
 /// A `syntax-rules` macro.
@@ -136,6 +143,14 @@ fn error(message: impl Into<String>, span: Span) -> CompileError {
     }
 }
 
+/// The constant `n`.
+fn number(n: usize, span: Span) -> Expr {
+    Expr::Const(Datum {
+        kind: DatumKind::Number(vali_num::Number::Integer(n.into())),
+        span,
+    })
+}
+
 fn too_many(e: TooManyScopes) -> CompileError {
     CompileError {
         message: e.to_string(),
@@ -164,8 +179,8 @@ pub(crate) struct Expander {
     depth: usize,
     /// The isolate transformers written in Scheme run in, once one exists.
     phase1: Option<Cx<NoCollection>>,
-    /// The syntax objects `quote-syntax` forms quote, by number.
-    quoted: Vec<Syntax>,
+    /// What phase-1 code's syntax procedures look up by number.
+    compiled: Compiled,
     /// For each transformer being expanded, one inside another, where its
     /// `lambda` sits in `stack`. Code above the innermost runs at phase 1.
     floors: Vec<usize>,
@@ -202,7 +217,7 @@ impl Expander {
             macros: Vec::new(),
             depth: 0,
             phase1: None,
-            quoted: Vec::new(),
+            compiled: Compiled::default(),
             floors: Vec::new(),
         })
     }
@@ -405,8 +420,9 @@ impl Expander {
             if let Pattern::List { before, .. } = &mut compiled_pattern {
                 before.insert(0, Pattern::Discard);
             }
+            let mut find = |_: &ScopeContext, id: &Syntax| vars.lookup(id);
             let template =
-                pattern::template(&mut self.context, &spelling, &vars, template, 0, false)?;
+                pattern::template(&mut self.context, &spelling, &mut find, template, 0, false)?;
             compiled.push(Clause {
                 pattern: compiled_pattern,
                 template,
@@ -474,13 +490,15 @@ impl Expander {
         procedure: &Handle,
         input: Syntax,
         form: &Syntax,
+        origin: Arc<Origin>,
     ) -> Result<Syntax> {
         let name = self.macros[m].name.clone();
         let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), form.span());
         let shared = Shared {
             context: std::mem::replace(&mut self.context, ScopeContext::new()),
             table: std::mem::take(&mut self.table),
-            quoted: std::mem::take(&mut self.quoted),
+            compiled: std::mem::take(&mut self.compiled),
+            origin: Some(origin),
         };
         let cx = self
             .phase1
@@ -492,7 +510,7 @@ impl Expander {
             Err(e) => {
                 self.context = shared.context;
                 self.table = shared.table;
-                self.quoted = shared.quoted;
+                self.compiled = shared.compiled;
                 return Err(failed(e));
             }
         };
@@ -504,7 +522,7 @@ impl Expander {
             .expect("the expander's state comes back");
         self.context = shared.context;
         self.table = shared.table;
-        self.quoted = shared.quoted;
+        self.compiled = shared.compiled;
         let output = result.map_err(failed)?;
         let cx = self.phase1.as_mut().expect("as above");
         let value = cx.get(&output).map_err(failed)?;
@@ -584,7 +602,7 @@ impl Expander {
         });
         if let Transformer::Procedure(procedure) = &self.macros[m].transformer {
             let procedure = procedure.clone();
-            let output = self.run_transformer(m, &procedure, input, form)?;
+            let output = self.run_transformer(m, &procedure, input, form, origin)?;
             return output.flip(&mut self.context, scope).map_err(too_many);
         }
         let table = &self.table;
@@ -988,6 +1006,10 @@ impl Expander {
                     format!("{name}: a syntactic keyword is not an expression"),
                     stx.span(),
                 )),
+                Some(Binding::PatternVar(..)) => Err(error(
+                    format!("{name}: a pattern variable can only be used in a template"),
+                    stx.span(),
+                )),
             };
         }
         if let Some(atom) = stx.as_atom() {
@@ -1092,10 +1114,12 @@ impl Expander {
                         let value = self.expr(value)?;
                         Ok(Expr::SetGlobal(global, Box::new(value)))
                     }
-                    Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
-                        format!("{keyword}: {name} is a syntactic keyword"),
-                        target.span(),
-                    )),
+                    Some(Binding::Core(_) | Binding::Macro(_) | Binding::PatternVar(..)) => {
+                        Err(error(
+                            format!("{keyword}: {name} is a syntactic keyword"),
+                            target.span(),
+                        ))
+                    }
                     None => Err(error(
                         format!("{keyword}: {name} is not defined"),
                         target.span(),
@@ -1116,26 +1140,239 @@ impl Expander {
                 let [form] = args else {
                     return Err(error(format!("{keyword}: expected one form"), span));
                 };
-                if self.floors.is_empty() {
-                    return Err(error(
-                        format!("{keyword}: syntax objects at run time are not supported yet"),
-                        span,
-                    ));
-                }
-                self.quoted.push(form.clone());
-                let index = Datum {
-                    kind: DatumKind::Number(vali_num::Number::Integer(
-                        (self.quoted.len() - 1).into(),
-                    )),
-                    span,
-                };
+                self.phase_only(keyword, span)?;
+                self.compiled.quoted.push(form.clone());
+                let index = number(self.compiled.quoted.len() - 1, span);
                 Ok(Expr::Call(
                     Box::new(Expr::Global(QUOTE_SYNTAX.to_owned())),
-                    vec![Expr::Const(index)],
+                    vec![index],
                     span,
                 ))
             }
+            Core::SyntaxCase => self.syntax_case(keyword, args, span),
+            Core::Syntax => self.syntax_template(keyword, args, span),
         }
+    }
+
+    // syntax-case.
+
+    /// An error unless the code being expanded is a transformer's: syntax
+    /// objects exist only at phase 1 for now.
+    fn phase_only(&self, keyword: &str, span: Span) -> Result<()> {
+        if self.floors.is_empty() {
+            return Err(error(
+                format!("{keyword}: syntax objects at run time are not supported yet"),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// A local variable of the current `lambda` that no identifier names.
+    fn hidden_local(&mut self, name: &str) -> VarId {
+        self.vars.push(VarInfo {
+            name: name.to_owned(),
+            binder: self.current(),
+            assigned: false,
+            captured: false,
+        });
+        self.vars.len() - 1
+    }
+
+    /// `(syntax-case input (literal ...) clause ...)`: the input in a
+    /// hidden local, then each clause in turn.
+    fn syntax_case(&mut self, keyword: &str, args: &[Syntax], span: Span) -> Result<Expr> {
+        self.phase_only(keyword, span)?;
+        let [input, literals, clauses @ ..] = args else {
+            return Err(error(
+                format!("{keyword}: expected an input, a list of literals and clauses"),
+                span,
+            ));
+        };
+        let literals = self.items(literals, "a list of literals")?;
+        if let Some(l) = literals.iter().find(|l| l.as_identifier().is_none()) {
+            return Err(error(
+                format!("{keyword}: a literal must be an identifier"),
+                l.span(),
+            ));
+        }
+        let input = self.expr(input)?;
+        let tmp = self.hidden_local(keyword);
+        let clauses = self.clauses(keyword, tmp, &literals, clauses, span)?;
+        Ok(Expr::Let(vec![(tmp, input)], Box::new(clauses)))
+    }
+
+    /// The first of `clauses`, falling through to the rest. A clause binds
+    /// its pattern variables, in a scope its fender and output have, to
+    /// hidden locals holding what each matched. With a fender, the rest is
+    /// a procedure, called if either the pattern or the fender fails, so it
+    /// is compiled once.
+    fn clauses(
+        &mut self,
+        keyword: &str,
+        tmp: VarId,
+        literals: &[Syntax],
+        clauses: &[Syntax],
+        span: Span,
+    ) -> Result<Expr> {
+        let Some((clause, rest)) = clauses.split_first() else {
+            // No clause matched.
+            let input = self.local(tmp);
+            return Ok(Expr::Call(
+                Box::new(Expr::Global("syntax-violation".to_owned())),
+                vec![
+                    Expr::Const(Datum {
+                        kind: DatumKind::Boolean(false),
+                        span,
+                    }),
+                    Expr::Const(Datum {
+                        kind: DatumKind::String("invalid syntax".to_owned()),
+                        span,
+                    }),
+                    input,
+                ],
+                span,
+            ));
+        };
+        let parts = self.items(clause, "(pattern [fender] output)")?;
+        let (pattern, fender, output) = match &parts[..] {
+            [pattern, output] => (pattern, None, output),
+            [pattern, fender, output] => (pattern, Some(fender), output),
+            _ => {
+                return Err(error(
+                    format!("{keyword}: expected (pattern [fender] output)"),
+                    clause.span(),
+                ));
+            }
+        };
+        let spelling = Spelling {
+            ellipsis: "...",
+            literals,
+        };
+        let mut vars = Vars::new();
+        let compiled = pattern::pattern(&mut self.context, &spelling, &mut vars, pattern, 0)?;
+        self.compiled.patterns.push((compiled, vars.len()));
+        let k = self.compiled.patterns.len() - 1;
+
+        // What follows if this clause fails: the rest, inline, or with a
+        // fender, a procedure that runs it.
+        let (rest, fail) = if fender.is_some() {
+            let thunk = self.open_lambda(None);
+            let body = self.clauses(keyword, tmp, literals, rest, span)?;
+            self.close_lambda(thunk, Vec::new(), None, body);
+            let fail = self.hidden_local("fail");
+            (None, Some((fail, Expr::Lambda(thunk))))
+        } else {
+            (
+                Some(self.clauses(keyword, tmp, literals, rest, span)?),
+                None,
+            )
+        };
+        let otherwise = |this: &mut Self| match &fail {
+            Some((f, _)) => Expr::Call(Box::new(this.local(*f)), Vec::new(), span),
+            None => unreachable!("only with a fender"),
+        };
+
+        let scope = self.scope(ScopeKind::Binder)?;
+        let m = self.hidden_local("match");
+        let mut binds = Vec::new();
+        let pattern_vars: Vec<(Syntax, usize)> = vars.iter().cloned().collect();
+        for (i, (id, depth)) in pattern_vars.into_iter().enumerate() {
+            let id = self.add(&id, scope)?;
+            let name = id
+                .as_identifier()
+                .expect("pattern variables are identifiers");
+            let v = self.hidden_local(name);
+            self.bind(&id, Binding::PatternVar(v, depth), keyword)?;
+            let element = Expr::Call(
+                Box::new(Expr::Global("vector-ref".to_owned())),
+                vec![Expr::Local(m), number(i, span)],
+                span,
+            );
+            binds.push((v, element));
+        }
+        let output = self.add(output, scope)?;
+        let output = self.expr(&output)?;
+        let body = match fender {
+            Some(fender) => {
+                let fender = self.add(fender, scope)?;
+                let fender = self.expr(&fender)?;
+                Expr::If(
+                    Box::new(fender),
+                    Box::new(output),
+                    Box::new(otherwise(self)),
+                )
+            }
+            None => output,
+        };
+        let input = self.local(tmp);
+        let matched = Expr::Call(
+            Box::new(Expr::Global(SYNTAX_MATCH.to_owned())),
+            vec![input, number(k, span)],
+            span,
+        );
+        let unmatched = match rest {
+            Some(rest) => rest,
+            None => otherwise(self),
+        };
+        let attempt = Expr::Let(
+            vec![(m, matched)],
+            Box::new(Expr::If(
+                Box::new(Expr::Local(m)),
+                Box::new(Expr::Let(binds, Box::new(body))),
+                Box::new(unmatched),
+            )),
+        );
+        Ok(match fail {
+            Some((fail, thunk)) => Expr::Let(vec![(fail, thunk)], Box::new(attempt)),
+            None => attempt,
+        })
+    }
+
+    /// `(syntax template)`: a call building the template, with the matches
+    /// of the pattern variables it uses, found by resolving its
+    /// identifiers, so a template inside a nested `lambda` still sees its
+    /// clause's variables.
+    fn syntax_template(&mut self, keyword: &str, args: &[Syntax], span: Span) -> Result<Expr> {
+        self.phase_only(keyword, span)?;
+        let [form] = args else {
+            return Err(error(format!("{keyword}: expected one template"), span));
+        };
+        let spelling = Spelling {
+            ellipsis: "...",
+            literals: &[],
+        };
+        let mut used: Vec<(VarId, usize)> = Vec::new();
+        let table = &self.table;
+        let mut find = |cx: &ScopeContext, id: &Syntax| match id.resolve(cx, table, Phase(0)) {
+            Resolution::Bound(&Binding::PatternVar(v, depth)) => {
+                let i = used.iter().position(|&(u, _)| u == v).unwrap_or_else(|| {
+                    used.push((v, depth));
+                    used.len() - 1
+                });
+                Some((i, depth))
+            }
+            _ => None,
+        };
+        let template = pattern::template(&mut self.context, &spelling, &mut find, form, 0, false)?;
+        if used.len() > usize::from(u8::MAX) - 5 {
+            return Err(error(
+                format!("{keyword}: a template may use at most 250 pattern variables"),
+                span,
+            ));
+        }
+        let depths = used.iter().map(|&(_, d)| d).collect();
+        self.compiled.templates.push((template, depths));
+        let mut args = vec![number(self.compiled.templates.len() - 1, span)];
+        for (v, _) in used {
+            self.in_context(v, form)?;
+            args.push(self.local(v));
+        }
+        Ok(Expr::Call(
+            Box::new(Expr::Global(SYNTAX_BUILD.to_owned())),
+            args,
+            span,
+        ))
     }
 
     /// `(lambda formals body ...)`, from its items.

@@ -551,3 +551,139 @@ fn transformer_errors() {
     assert!(compile_error("(define-syntax bad 5) (bad)").contains("bad:"));
     assert!(compile_error("(quote-syntax x)").contains("not supported yet"));
 }
+
+#[test]
+fn syntax_case() {
+    check(&[
+        // The regression: a template's tmp doesn't capture the user's.
+        (
+            "(define-syntax swap!
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ a b) #'(let ((tmp a)) (set! a b) (set! b tmp))))))
+             (define tmp 1)
+             (define other 2)
+             (swap! tmp other)
+             (list tmp other)",
+            "(2 1)",
+        ),
+        // The regression: _ in a syntax-case inside a helper.
+        (
+            "(define-syntax second-of
+               (lambda (stx)
+                 (define (second form)
+                   (syntax-case form ()
+                     ((_ b . _) #'b)))
+                 (syntax-case stx ()
+                   ((_ elements) (second #'elements)))))
+             (list (second-of (1 2 3)) (second-of (a 'b)))",
+            "(2 b)",
+        ),
+        // The regression: symbols from syntax->datum are eq?.
+        (
+            "(define-syntax one-of-x-y?
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ id) (if (memq (syntax->datum #'id) '(x y)) #'#t #'#f)))))
+             (list (one-of-x-y? x) (one-of-x-y? y) (one-of-x-y? z))",
+            "(#t #t #f)",
+        ),
+        // Ellipses, and datum->syntax for a computed result.
+        (
+            "(define-syntax count-args
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ arg ...) (datum->syntax stx (length (syntax->datum #'(arg ...))))))))
+             (list (count-args a b c) (count-args))",
+            "(3 0)",
+        ),
+        // Fenders, falling through to the next clause.
+        (
+            "(define-syntax kind
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ x) (identifier? #'x) #''identifier)
+                   ((_ x) #''other))))
+             (list (kind a) (kind 1))",
+            "(identifier other)",
+        ),
+        // Literals.
+        (
+            "(define-syntax arrow?
+               (lambda (stx)
+                 (syntax-case stx (=>)
+                   ((_ =>) #'#t)
+                   ((_ x) #'#f))))
+             (list (arrow? =>) (arrow? x))",
+            "(#t #f)",
+        ),
+        // with-syntax and generate-temporaries.
+        (
+            "(define-syntax let-list
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ e ...)
+                    (with-syntax (((t ...) (generate-temporaries #'(e ...))))
+                      #'(let ((t e) ...) (list t ...)))))))
+             (let-list 1 (+ 1 1) 3)",
+            "(1 2 3)",
+        ),
+        // A template in a lambda inside the clause still sees its variables.
+        (
+            "(define-syntax later
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ a) (let ((f (lambda () #'a))) (f))))))
+             (later 5)",
+            "5",
+        ),
+        // A recursive macro, as R7RS defines or.
+        (
+            "(define-syntax my-or
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_) #'#f)
+                   ((_ e) #'e)
+                   ((_ e r ...) #'(let ((t e)) (if t t (my-or r ...)))))))
+             (let ((t 5)) (my-or #f t))",
+            "5",
+        ),
+        // Vectors and nested ellipses in patterns and templates.
+        (
+            "(define-syntax table
+               (lambda (stx)
+                 (syntax-case stx ()
+                   ((_ #((k v ...) ...)) #''((v ... k) ...)))))
+             (table #((a 1 2) (b 3)))",
+            "((1 2 a) (3 b))",
+        ),
+    ]);
+}
+
+#[test]
+fn syntax_case_errors() {
+    let compile_error = |source: &str| compile(source, "test").unwrap_err().message;
+    assert!(
+        compile_error("(define-syntax m (lambda (stx) (syntax-case stx () ((_ x) #'x)))) (m)")
+            .contains("invalid syntax: (m)")
+    );
+    assert!(
+        compile_error("(define-syntax m (lambda (stx) (syntax-case stx () ((_ x) x)))) (m 1)")
+            .contains("x: a pattern variable can only be used in a template")
+    );
+    assert!(
+        compile_error(
+            "(define-syntax m
+               (lambda (stx) (syntax-case stx () ((_ x) (syntax-violation 'm \"bad thing\" stx #'x)))))
+             (m 1)"
+        )
+        .contains("m: bad thing: (m 1), in 1")
+    );
+    assert!(
+        compile_error(
+            "(define-syntax m (lambda (stx) (syntax-case stx () ((_ x ...) #'x)))) (m 1)"
+        )
+        .contains("needs 1 ellipses")
+    );
+    assert!(compile_error("(syntax-case 1 () (_ 1))").contains("not supported yet"));
+}
