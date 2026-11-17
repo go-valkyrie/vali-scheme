@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, complex numbers are headered objects, as the full numeric tower requires (ADR 0007)
+- **Amended:** 2026-11-17, a closure's code word points to its function, whose entry tier-up replaces; a call is a tag test and two loads
 - **Amended:** 2026-11-17, object layouts: one header word split between the memory strategy and the runtime; pairs and flonums carry a header only if the strategy wants one; the immediate subtags; UTF-8 strings; the built-in type codes (items 7 to 13)
 - **Related:** 0003 (memory management), 0006 (ABI version), 0008 (threads), 0010 (contracts), 0012 (distribution format)
 
@@ -28,7 +29,7 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
 |---|---|---|
 | `000` | Fixnum, 61-bit two's complement | Arithmetic and comparison work on the word directly; the value is the word shifted right by 3 |
 | `001` | Pair | `car`, `cdr`, `pair?` and walking lists. A pair has no runtime header: two words, `car` and `cdr`, plus a header only if the memory strategy wants one (item 8) |
-| `010` | Closure | Every call's "is this callable?" check, and `procedure?` in contracts. The code pointer sits at a fixed offset, so a call is a tag test and one load |
+| `010` | Closure | Every call's "is this callable?" check, and `procedure?` in contracts. The closure's first word points to its function, whose entry field tier-up replaces, as HotSpot's methods do; a call is a tag test, two dependent loads and an indirect call |
 | `011` | Symbol | `symbol?`, and the case analysis that macros do |
 | `100` | String | `string?`, probably the most common contract on data |
 | `101` | Flonum | Boxed IEEE 754 binary64. Generic arithmetic's test after the fixnum test |
@@ -74,7 +75,7 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
     |---|---|---|
     | Pair | `car`, `cdr` | None |
     | Flonum | The `f64` | None |
-    | Closure | The code pointer, at a fixed offset, then the free variables | The free-variable count |
+    | Closure | A pointer to its function (bytecode, side tables, and the current entry point, shared between isolates and outside every heap), then the free variables | The free-variable count |
     | Symbol | The name (an immutable string) and a precomputed hash | Interned, uninterned or generated |
     | String | Byte length, character count, a pointer to the bytes, a pointer to index hints | Immutable, all ASCII |
 

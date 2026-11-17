@@ -35,7 +35,7 @@ Precedent for the alternative is broad. Racket runs threads concurrently within 
 6. **Shared between isolates, read-only:** loaded artifacts and bytecode, JIT-compiled code (ADR 0006), the global table of symbols that appear in compiled code, and immutable literals. Symbols interned at run time go into the isolate's own table, which its collector can free and its memory limit counts; `string->symbol` looks in the global table first.
 7. **Memory strategies are single-threaded per heap.** Count updates are plain, there is no shared mark, and collection is per isolate, never stopping another isolate. A collector may still run on a thread of its own beside its isolate, if a strategy is built that way (ADR 0003).
 8. **Async bridges return `Send` futures,** since isolates are `Send`. A variant for `!Send` futures, run on a single thread, may come later.
-9. **Tier-up runs on a background compiler thread,** which reads shared bytecode and publishes code by atomically swapping a function's code pointer. Call counters may be approximate.
+9. **Tier-up runs on a background compiler thread,** which reads shared bytecode and publishes code by atomically replacing a function's entry point (ADR 0002). Call counters may be approximate.
 
 ## Consequences
 

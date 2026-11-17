@@ -5,6 +5,7 @@
 - **Amended:** 2026-11-16, the Scheme-level control API is SRFI 226 (ADR 0007)
 - **Amended:** 2026-11-16, reworked: each task runs on its own stack of runtime-owned segments, with native frames for compiled code, so native debuggers and profilers can unwind it
 - **Amended:** 2026-11-17, a suspended task lets its isolate run another task; the isolate, not the task, is the host's future (ADR 0008)
+- **Amended:** 2026-11-17, tier 0's frames are native frame records with named return addresses, and the interpreter links itself into the chain, so native debuggers and profilers unwind and name interpreted frames too
 - **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit)
 
 ## Context
@@ -27,7 +28,11 @@ How frames are represented decides all of this:
 3. **Native tools can unwind compiled code.** Generated code keeps frame pointers and emits standard call-frame information.
 4. **Segment boundaries are handled in generated code.** Each function's prologue checks the stack limit, as Go's and Cranelift's checks do; when it is exceeded, an overflow handler chains a new segment. Returning past the bottom of a segment goes through an underflow handler, which continues in the previous segment.
 5. **Every frame describes itself:** its procedure, its return address, the link to its caller, and its value slots. Values live across a call are kept in frame slots at that call, and each safepoint has an exact stack map (Cranelift's user stack maps; ADR 0003). The frame layout and the stack-map format are part of the ABI (ADR 0006).
-6. **Tier 0's frames are data.** The VM is Rust and runs on the thread's own stack. The Scheme frames it interprets live in the task's segments, in the same slot layout as native frames, so the collector and debugger extensions read both the same way. Calls between the VM and compiled code switch stacks, like calls into Rust.
+6. **Tier 0's frames are native frame records too.** The VM is Rust and runs on the thread's own stack. The Scheme frames it interprets live in the task's segments, which grow downward like native stacks, and each starts with the platform's frame record: the saved frame pointer and the return address, where the ABI puts them on x86-64 and AArch64. Interpreted and compiled frames therefore form one chain, which the collector, debuggers and profilers walk the same way. Calls between the VM and compiled code switch stacks, like calls into Rust.
+   - **Interpreted frames have named return addresses.** Each bytecode function gets a small native *marker stub*, a few bytes that never run, registered under the function's Scheme name through the GDB JIT interface, which GDB and LLDB both read. An interpreted frame's return address points into its function's stub, so a backtrace shows the Scheme name. The bytecode position is kept in a separate word. V8's `--interpreted-frames-native-stack` and CPython 3.12's perf trampolines do the same.
+   - **The interpreter links itself into the chain.** The VM is entered through a small trampoline written in assembly for each architecture. On every Scheme call and return, the VM stores the current Scheme frame's address into the trampoline's saved frame pointer, so an unwinder stopped anywhere in the interpreter continues through the Scheme frames and back to the native code that entered the VM.
+   - **What stays configurable:** frame records and the trampoline link are always on, since they cost about one load and three stores per interpreted call and return. Named stubs and their registration are on by default, with a switch for hosts that count every microsecond of load time. perf's map file is written only when asked for. Where generating code is forbidden, such as iOS, which relies on AOT compilation, every interpreted function shares one `<interpreted>` stub: unwinding still works, without names.
+   - **What still needs a debugger extension:** the current line within an interpreted function, since stubs carry no bytecode positions, and printing Scheme values.
 7. **Rust never runs on a task's segments.** Bridges and runtime calls switch to the thread's own stack first, as Go does for its runtime and cgo calls, so segments can stay small and Rust code cannot overflow them. A switch costs a few nanoseconds. If measurements show that matters for some bridges, those can be marked to run in place after a check that enough stack remains.
 8. **Continuations: full `call/cc`, SRFI 226's delimited continuations and continuation marks, and `dynamic-wind`,** all on segments:
    - capturing a continuation seals the current segment and continues in a fresh one, copying nothing;
@@ -39,7 +44,7 @@ How frames are represented decides all of this:
 
 ## Consequences
 
-- GDB, LLDB, perf and similar tools unwind JIT and AOT frames natively. JIT code must be registered with them, and interpreted frames need a debugger extension. Both are left to a later ADR on debugging and profiling.
+- GDB, LLDB, perf and similar tools unwind every frame natively, and name compiled frames and, through marker stubs, interpreted ones. JIT code must be registered with them, which is left to a later ADR on debugging and profiling.
 - `call/cc`, generators, exceptions and async share one mechanism. Capturing a continuation is cheap; reinstating a multi-shot continuation pays for copying.
 - A task's first segment can be small, so many suspended tasks cost little memory.
 - Every call from compiled code into Rust, and every switch between the VM and compiled code, costs a stack switch.
@@ -63,7 +68,7 @@ How frames are represented decides all of this:
 - Debugging and profiling, for a later ADR, including:
   - registering JIT code with debuggers (the GDB JIT interface) and with perf (`jitdump` files);
   - publishing each thread's current task stack under a known symbol, for debugger extensions;
-  - GDB and LLDB extensions that show interpreted frames and print values;
+  - GDB and LLDB extensions that show the current line of interpreted frames and print values;
   - a sampling profiler that walks task stacks.
 
 ## References
