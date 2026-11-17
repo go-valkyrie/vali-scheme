@@ -68,7 +68,8 @@
    read-u8 peek-u8 u8-ready? read-bytevector read-bytevector!
    newline write-char write-string write-u8 write-bytevector flush-output-port
    eof-object eof-object?
-   apply error (rename %raise raise) raise-continuable with-exception-handler
+   apply error raise raise-continuable with-exception-handler
+   call-with-current-continuation call/cc dynamic-wind
    guard error-object? error-object-message error-object-irritants
    values call-with-values
    ;; The syntax procedures, for transformers.
@@ -215,94 +216,189 @@
              (let ((i (%record-field-index type 'fname)))
                (lambda (obj value) (%record-set! obj type i value))))))))
 
-    ;; Exceptions (R7RS 6.11), over the VM's one escape, (%catch thunk
-    ;; handler): a raise inside the thunk unwinds to it and calls the
-    ;; handler with what was raised. %handlers is the stack of handlers
-    ;; raise-continuable calls; each guard pushes one that raises again, so
-    ;; it reaches the guard's own %catch.
-    (define %handlers '())
+    ;; The dynamic environment (R7RS 6.10, 6.11, 4.2.6). The VM keeps three
+    ;; registers, which every host call starts empty: dynamic-wind's
+    ;; winders, the exception handlers and the parameterization, each a
+    ;; list, innermost first. All that is done with them is done here. A
+    ;; winder records the handlers and parameterization its dynamic-wind
+    ;; was called with, which its before and after thunks run in.
+    (define (dynamic-wind before thunk after)
+      (before)
+      (let ((outer (%winders)))
+        (%set-winders!
+         (cons (vector before after (%handlers) (%parameterization)) outer))
+        (let ((result (thunk)))
+          (%set-winders! outer)
+          (after)
+          result)))
 
+    ;; Runs the after thunks from the current winders out to the tail they
+    ;; share with `target`, then the before thunks from there in to it.
+    (define (%travel-to target)
+      (define (common-tail x y)
+        (let ((lx (length x)) (ly (length y)))
+          (let loop ((x (if (> lx ly) (list-tail x (- lx ly)) x))
+                     (y (if (> ly lx) (list-tail y (- ly lx)) y)))
+            (if (eq? x y) x (loop (cdr x) (cdr y))))))
+      (define (enter! winder)
+        (%set-handlers! (vector-ref winder 2))
+        (%set-parameterization! (vector-ref winder 3)))
+      (let ((tail (common-tail (%winders) target)))
+        (let unwind ()
+          (let ((ws (%winders)))
+            (if (not (eq? ws tail))
+                (begin
+                  (%set-winders! (cdr ws))
+                  (enter! (car ws))
+                  ((vector-ref (car ws) 1))
+                  (unwind)))))
+        (let rewind ((ws target))
+          (if (not (eq? ws tail))
+              (begin
+                (rewind (cdr ws))
+                (enter! (car ws))
+                ((vector-ref (car ws) 0))
+                (%set-winders! ws))))))
+
+    ;; The dynamic environment, and going back to one.
+    (define (%dynamic-state)
+      (vector (%winders) (%handlers) (%parameterization)))
+    (define (%restore! state)
+      (%travel-to (vector-ref state 0))
+      (%set-handlers! (vector-ref state 1))
+      (%set-parameterization! (vector-ref state 2)))
+
+    ;; Continuations (R7RS 6.10), over the VM's %call/cc and %continue,
+    ;; which know nothing of the dynamic environment.
+    (define (call-with-current-continuation receiver)
+      (let ((state (%dynamic-state)))
+        (%call/cc
+         (lambda (k)
+           (receiver
+            (lambda results
+              (%restore! state)
+              (%continue k (if (and (pair? results) (null? (cdr results)))
+                               (car results)
+                               (apply values results)))))))))
+    (define call/cc call-with-current-continuation)
+
+    ;; Exceptions (R7RS 6.11). A handler runs where the raise happened,
+    ;; with the handlers outside it installed. An error from a Rust
+    ;; procedure calls raise where it happened too, through the VM, while a
+    ;; handler is installed; with none, it unwinds straight to the host.
     (define (with-exception-handler handler thunk)
-      (let ((outer %handlers))
-        (set! %handlers (cons handler outer))
-        (let ((result
-               (%catch thunk
-                       (lambda (condition)
-                         (set! %handlers outer)
-                         (handler condition)
-                         (error "an exception handler returned from a non-continuable exception"
-                                condition)))))
-          (set! %handlers outer)
+      (let ((outer (%handlers)))
+        (%set-handlers! (cons handler outer))
+        (let ((result (thunk)))
+          (%set-handlers! outer)
           result)))
 
     (define (raise-continuable obj)
-      (if (null? %handlers)
-          (%raise obj)
-          (let ((outer %handlers))
-            (set! %handlers (cdr outer))
-            (let ((result ((car outer) obj)))
-              (set! %handlers outer)
-              result))))
+      (let ((handlers (%handlers)))
+        (if (null? handlers)
+            (%raise obj)
+            (begin
+              (%set-handlers! (cdr handlers))
+              (let ((result ((car handlers) obj)))
+                (%set-handlers! handlers)
+                result)))))
 
-    ;; guard's work is a procedure here, since only this library can assign
-    ;; %handlers; the macro wraps the body and the clauses in lambdas.
+    (define (raise obj)
+      (let ((handlers (%handlers)))
+        (if (null? handlers)
+            (%raise obj)
+            (begin
+              (%set-handlers! (cdr handlers))
+              ((car handlers) obj)
+              ;; Raised in the handler's dynamic environment.
+              (error "an exception handler returned from a non-continuable exception"
+                     obj)))))
+
+    (%set-raise-handler! raise)
+
+    ;; guard (R7RS 4.2.7). Its handler runs where the raise happened: it
+    ;; captures the continuation there, and escapes with it to the guard's
+    ;; %catch. The guard goes back to its own dynamic environment, running
+    ;; after thunks on the way, and tries its clauses. If none applies, it
+    ;; re-enters the raise and calls raise-continuable there, with the
+    ;; handlers outside the guard. Nothing is captured unless something is
+    ;; raised.
+    (define %guard-escape (list 'guard-escape))
+
     (define (%guard body clauses)
-      (let ((outer %handlers))
-        (set! %handlers (cons %raise outer))
+      (let ((state (%dynamic-state))
+            (tag (list 'guard)))
+        (define (handler obj)
+          ((%call/cc
+            (lambda (k)
+              (%raise (vector %guard-escape tag obj k (%dynamic-state)))))))
+        (%set-handlers! (cons handler (%handlers)))
         (let ((result
-               (%catch body
-                       (lambda (condition)
-                         (set! %handlers outer)
-                         (clauses condition)))))
-          (set! %handlers outer)
+               (%catch
+                body
+                (lambda (c)
+                  (%restore! state)
+                  (cond ((not (and (vector? c)
+                                   (= (vector-length c) 5)
+                                   (eq? (vector-ref c 0) %guard-escape)))
+                         ;; Raised with no handler to call, so from here.
+                         (clauses c (lambda () (raise-continuable c))))
+                        ((eq? (vector-ref c 1) tag)
+                         (let ((obj (vector-ref c 2))
+                               (k (vector-ref c 3))
+                               (there (vector-ref c 4)))
+                           (clauses obj
+                                    (lambda ()
+                                      (%restore! there)
+                                      (%continue k (lambda () (raise-continuable obj)))))))
+                        ;; Bound for an outer guard.
+                        (else (%raise c)))))))
+          (%set-handlers! (vector-ref state 1))
           result)))
 
     (define-syntax guard
       (syntax-rules ()
         ((_ (var clause ...) body1 body2 ...)
          (%guard (lambda () (let () body1 body2 ...))
-                 (lambda (condition)
+                 (lambda (condition reraise)
                    (let ((var condition))
-                     (guard-clauses condition clause ...)))))))
+                     (guard-clauses reraise clause ...)))))))
 
     (define-syntax guard-clauses
       (syntax-rules (else =>)
-        ((_ c) (%raise c))
-        ((_ c (else e1 e2 ...)) (begin e1 e2 ...))
-        ((_ c (test => receiver) clause ...)
-         (let ((t test)) (if t (receiver t) (guard-clauses c clause ...))))
-        ((_ c (test) clause ...)
-         (let ((t test)) (if t t (guard-clauses c clause ...))))
-        ((_ c (test e1 e2 ...) clause ...)
-         (if test (begin e1 e2 ...) (guard-clauses c clause ...)))))
+        ((_ r) (r))
+        ((_ r (else e1 e2 ...)) (begin e1 e2 ...))
+        ((_ r (test => receiver) clause ...)
+         (let ((t test)) (if t (receiver t) (guard-clauses r clause ...))))
+        ((_ r (test) clause ...)
+         (let ((t test)) (if t t (guard-clauses r clause ...))))
+        ((_ r (test e1 e2 ...) clause ...)
+         (if test (begin e1 e2 ...) (guard-clauses r clause ...)))))
 
-    ;; Parameters (R7RS 4.2.6). A parameter is a procedure over a value it
-    ;; keeps, which parameterize sets through two tokens no one else can
-    ;; name. parameterize restores the old values however its body ends,
-    ;; by returning or by a raise.
-    (define %parameter-set (list 'set))
+    ;; Parameters (R7RS 4.2.6). A parameter looks itself up in the
+    ;; parameterization, and has its initial value otherwise. Only this
+    ;; library can name the token that asks for its converter.
     (define %parameter-converter (list 'converter))
 
     (define (make-parameter init . converter)
       (let* ((convert (if (pair? converter) (car converter) (lambda (x) x)))
              (value (convert init)))
-        (lambda args
-          (cond ((null? args) value)
-                ((eq? (car args) %parameter-set) (set! value (car (cdr args))))
+        (define (parameter . args)
+          (cond ((null? args)
+                 (let ((binding (assq parameter (%parameterization))))
+                   (if binding (cdr binding) value)))
                 ((eq? (car args) %parameter-converter) convert)
-                (else (error "a parameter takes no arguments" args))))))
+                (else (error "a parameter takes no arguments" args))))
+        parameter))
 
     (define (%parameterize params values body)
-      (let ((new (map (lambda (p v) ((p %parameter-converter) v)) params values))
-            (old (map (lambda (p) (p)) params)))
-        (define (install! vals)
-          (for-each (lambda (p v) (p %parameter-set v)) params vals))
-        (install! new)
-        (let ((result (%catch body
-                              (lambda (condition)
-                                (install! old)
-                                (%raise condition)))))
-          (install! old)
+      (let ((outer (%parameterization)))
+        (%set-parameterization!
+         (append (map (lambda (p v) (cons p ((p %parameter-converter) v)))
+                      params values)
+                 outer))
+        (let ((result (body)))
+          (%set-parameterization! outer)
           result)))
 
     (define-syntax parameterize

@@ -22,6 +22,9 @@ use std::sync::Arc;
 
 use vali_abi::{Header, Tag, TypeCode};
 
+use vali_bytecode::Arity;
+
+use crate::code::NativeFn;
 use crate::cx::{Cx, get, put};
 use crate::handle::Error;
 use crate::rust_objects::RustObject;
@@ -258,4 +261,79 @@ impl<S: Strategy> Cx<S> {
         self.set_below(if sealed.frames > 0 { k } else { sealed.parent });
         Some((sealed.fp, sealed.position))
     }
+}
+
+/// The dynamic state's registers: what `dynamic` holds, by index.
+pub(crate) const WINDERS: usize = 0;
+pub(crate) const HANDLERS: usize = 1;
+pub(crate) const PARAMETERIZATION: usize = 2;
+
+impl<S: Strategy> Cx<S> {
+    /// Sets register `i` of the dynamic state, counting under precise
+    /// counting, which counts what the VM holds.
+    pub(crate) fn set_dynamic(&mut self, i: usize, v: Value) {
+        if S::PRECISE {
+            S::retain(self.heap_mut(), v);
+            let old = self.dynamic[i];
+            S::release(self.heap_mut(), old);
+        }
+        self.dynamic[i] = v;
+    }
+
+    /// Empties the dynamic state, as every host call starts and ends.
+    pub(crate) fn reset_dynamic(&mut self) {
+        for i in 0..self.dynamic.len() {
+            self.set_dynamic(i, Value::EMPTY_LIST);
+        }
+    }
+}
+
+/// The dynamic state's registers as Scheme procedures, for (scheme base):
+/// `(%winders)`, `(%set-winders! list)` and so on.
+pub(crate) fn dynamic_table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
+    fn get<S: Strategy, const I: usize>(cx: &mut Cx<S>, _: &[Value]) -> Result<Value, Error> {
+        Ok(cx.dynamic[I])
+    }
+    fn set<S: Strategy, const I: usize>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+        cx.set_dynamic(I, args[0]);
+        Ok(Value::UNSPECIFIED)
+    }
+    vec![
+        ("%winders", Arity::exactly(0), get::<S, WINDERS>),
+        ("%set-winders!", Arity::exactly(1), set::<S, WINDERS>),
+        ("%handlers", Arity::exactly(0), get::<S, HANDLERS>),
+        ("%set-handlers!", Arity::exactly(1), set::<S, HANDLERS>),
+        (
+            "%parameterization",
+            Arity::exactly(0),
+            get::<S, PARAMETERIZATION>,
+        ),
+        (
+            "%set-parameterization!",
+            Arity::exactly(1),
+            set::<S, PARAMETERIZATION>,
+        ),
+        ("%set-raise-handler!", Arity::exactly(1), set_raise_handler),
+    ]
+}
+
+/// `(%set-raise-handler! raise)`: makes `raise`, a Scheme procedure of one
+/// argument, what an error calls where it happens while a handler is
+/// installed.
+fn set_raise_handler<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let raise = args[0];
+    // SAFETY: a valid value.
+    let ok = matches!(unsafe { cx.procedure_code(raise) }, Ok(code)
+        if matches!(code.kind, crate::code::Kind::Bytecode { .. }) && code.arity.accepts(1));
+    if !ok {
+        return Err(crate::vm::wrong_type(
+            cx,
+            "%set-raise-handler!",
+            "a Scheme procedure of one argument",
+            raise,
+        ));
+    }
+    // SAFETY: as above.
+    cx.raise_hook = Some(unsafe { cx.root(raise) });
+    Ok(Value::UNSPECIFIED)
 }

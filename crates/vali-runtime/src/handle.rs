@@ -53,6 +53,11 @@ pub struct SchemeError {
     /// raise nothing; a handler sees them as error objects with their
     /// message.
     pub raised: Option<Handle>,
+    /// Whether `%raise` raised it: an escape straight to the innermost
+    /// `%catch`. Any other error from Scheme code first calls the raise
+    /// procedure (scheme base) registers, where it happened, while an
+    /// exception handler is installed.
+    pub(crate) escaping: bool,
 }
 
 /// Errors are equal if their messages and backtraces are; what they raised
@@ -72,6 +77,7 @@ impl Error {
             message: message.into(),
             backtrace: Vec::new(),
             raised: None,
+            escaping: false,
         }))
     }
 
@@ -81,7 +87,30 @@ impl Error {
             message: message.into(),
             backtrace: Vec::new(),
             raised: Some(raised),
+            escaping: false,
         }))
+    }
+
+    /// An escape that raises `raised` straight to the innermost `%catch`,
+    /// described by `message`.
+    pub(crate) fn escape(message: impl Into<String>, raised: Handle) -> Error {
+        Error::Scheme(Box::new(SchemeError {
+            message: message.into(),
+            backtrace: Vec::new(),
+            raised: Some(raised),
+            escaping: true,
+        }))
+    }
+
+    /// Whether Scheme exception handlers see this error where it happened,
+    /// through the raise procedure: whether it is neither an escape nor
+    /// the heap running out.
+    pub(crate) fn reaches_handlers(&self) -> bool {
+        match self {
+            Error::Scheme(e) => !e.escaping,
+            Error::OutOfMemory => false,
+            _ => true,
+        }
     }
 }
 

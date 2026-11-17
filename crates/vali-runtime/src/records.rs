@@ -353,9 +353,14 @@ fn raise_value<S: Strategy>(cx: &mut Cx<S>, raised: Value) -> Error {
     }
 }
 
-/// `(%raise obj)`: raises `obj`, which the innermost `%catch` receives.
+/// `(%raise obj)`: raises `obj` straight to the innermost `%catch`,
+/// handlers or not.
 pub(crate) fn raise<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Err(raise_value(cx, args[0]))
+    Err(match cx.describe_raised(args[0]) {
+        // SAFETY: a valid value.
+        Ok(message) => Error::escape(message, unsafe { cx.root(args[0]) }),
+        Err(e) => e,
+    })
 }
 
 /// `(error message irritant ...)`: raises an error object.

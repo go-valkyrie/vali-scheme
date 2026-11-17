@@ -8,6 +8,7 @@
 - **Amended:** 2026-11-17, tier 0's frames are native frame records with named return addresses, and the interpreter links itself into the chain, so native debuggers and profilers unwind and name interpreted frames too
 - **Amended:** 2026-11-17, as built: a three-word frame header, three kinds of marker stub, signal frames where stacks switch, and the measured cost of keeping the chain current
 - **Amended:** 2026-11-17, continuations as built in tier 0: segments shared between the stack and continuations, an underflow flag that copies one frame at a time, and catches that point into sealed frames (item 8)
+- **Amended:** 2026-11-17, the dynamic environment as built: three registers every host call empties, `dynamic-wind` and parameters in Scheme over them, and errors that call `raise` where they happen (item 8)
 - **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit)
 
 ## Context
@@ -55,6 +56,13 @@ How frames are represented decides all of this:
    - **`%catch` records which continuation holds its frame** once the frame is sealed. A continuation keeps a copy of the catches waiting when it was captured, and reinstating restores them. Raising to a catch whose frame is sealed drops the live stack and copies the frame in before calling the handler.
    - **Every assigned local variable is boxed** (ADR 0005 #4), since a frame that a continuation copies twice would otherwise hold two copies of a variable.
    - **Cost:** the return path gains one test of a flag that was tested before. Without collection, fib and tak are unchanged; under precise counting, fib measured about 3% slower, inside the noise of a shared machine.
+
+   **The dynamic environment, as built,** ahead of continuation marks:
+   - **Three registers** in the isolate hold `dynamic-wind`'s winders, the exception handlers and the parameterization, each a list, innermost first. (scheme base) reads and writes them through primitives, and does everything else with them in Scheme. The VM only counts them as roots and empties them at the start and end of every host call. An error that escapes to the host runs no after thunks, so this is what keeps a later call from inheriting a dead extent's handlers or a parameter stuck at an inner value.
+   - **A parameter looks itself up** in the parameterization, an alist, before falling back to its own value; `parameterize` pushes bindings and pops them on return. A winder records the handlers and parameterization of its `dynamic-wind`, which its before and after thunks run in.
+   - **`call/cc` is Scheme over `%call/cc` and `%continue`:** the continuation procedure travels from the current winders to the captured ones, running after and before thunks, then restores the registers and returns to the continuation.
+   - **Handlers run where the raise happens** (R7RS 6.11): `raise` and `raise-continuable` call the innermost handler with the outer ones installed. An error from a Rust procedure or an instruction does the same: while a handler is installed, the VM calls the raise procedure (scheme base) registered, with the condition, in a frame past the failing frame's slots. That frame's position word has `RAISED`, so returning through it is an error. With no handler installed the error unwinds to the host as before, with the same message and backtrace. `%raise` stays the one raw escape, to the innermost `%catch`.
+   - **`guard` captures only when something is raised.** Its handler runs at the raise, captures the continuation there, and escapes with it to the guard's `%catch`. The guard restores its own dynamic environment, running after thunks, and tries its clauses; if none applies, it re-enters the raise and calls `raise-continuable` there with the handlers outside the guard, exactly as R7RS says. Only `guard` uses `%catch` now.
 9. **A task can suspend at any call.** When Scheme calls an async bridge, the task switches back to the thread's stack and its segments stay as they are. The isolate then runs another of its ready tasks, or, if none is ready, its future returns `Pending` (ADR 0008). When the bridge's future completes, the task becomes ready, and the host polls the isolate again, possibly on another thread, which switches the task back in. This is how Wasmtime's fibers work.
 10. **Rust code is never in the middle of a Scheme stack.** A bridge returns a value, asks the runtime to tail-call a Scheme procedure, or returns a future. When Rust really must call Scheme and wait for the answer (a comparison callback inside a Rust sort, say), it starts a nested run behind a continuation barrier. Continuations captured inside the nested run can escape out of it, but cannot re-enter it once it has returned.
 11. **WebAssembly needs a target of its own,** designed in a later ADR. It has no standard stack switching yet, and running Vali's VM inside a WebAssembly engine's own VM is at best a fallback. A real target probably compiles Scheme to WebAssembly directly.
@@ -79,7 +87,7 @@ How frames are represented decides all of this:
 ## Left open
 
 - Segment sizes and growth policy.
-- How exceptions and parameters are built on continuation marks.
+- Moving the dynamic environment's registers to SRFI 226's continuation marks and parameterizations, and giving each task its own (ADR 0008).
 - The stack-switching implementation: Vali's own assembly, or a crate.
 - The WebAssembly target (item 11), for a later ADR.
 - Debugging and profiling, for a later ADR, including:

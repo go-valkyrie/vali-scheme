@@ -1286,6 +1286,215 @@ fn reading_and_writing() {
 }
 
 #[test]
+fn dynamic_wind_and_call_cc() {
+    check(&[
+        (
+            "(let ((log '()))
+               (define (note x) (set! log (cons x log)))
+               (dynamic-wind (lambda () (note 'before))
+                             (lambda () (note 'during))
+                             (lambda () (note 'after)))
+               (reverse log))",
+            "(before during after)",
+        ),
+        // Escaping runs the after thunk.
+        (
+            "(let ((log '()))
+               (define (note x) (set! log (cons x log)))
+               (call/cc (lambda (k)
+                 (dynamic-wind (lambda () (note 'in))
+                               (lambda () (k 'escaped))
+                               (lambda () (note 'out)))))
+               (reverse log))",
+            "(in out)",
+        ),
+        // Re-entering runs the before thunk again (R7RS 6.10).
+        (
+            "(let ((path '()) (c #f))
+               (let ((add (lambda (s) (set! path (cons s path)))))
+                 (dynamic-wind (lambda () (add 'connect))
+                               (lambda () (add (call/cc (lambda (c0) (set! c c0) 'talk1))))
+                               (lambda () (add 'disconnect)))
+                 (if (< (length path) 4) (c 'talk2) (reverse path))))",
+            "(connect talk1 disconnect connect talk2 disconnect)",
+        ),
+        // From one extent to another: out of one, into the other.
+        (
+            "(let ((log '()) (k #f))
+               (define (note x) (set! log (cons x log)))
+               (dynamic-wind (lambda () (note 'a-in))
+                             (lambda () (call/cc (lambda (c) (set! k c))))
+                             (lambda () (note 'a-out)))
+               (if (< (length log) 4)
+                   (dynamic-wind (lambda () (note 'b-in))
+                                 (lambda () (k 'again))
+                                 (lambda () (note 'b-out)))
+                   (reverse log)))",
+            "(a-in a-out b-in b-out a-in a-out)",
+        ),
+        (
+            "(call-with-values (lambda () (call/cc (lambda (k) (k 1 2)))) list)",
+            "(1 2)",
+        ),
+        (
+            "(+ 1 (call-with-current-continuation (lambda (k) (k 2) 10)))",
+            "3",
+        ),
+        // A continuation restores the parameterization and the handlers.
+        (
+            "(define p (make-parameter 'outer))
+             (define k #f)
+             (define n 0)
+             (define seen
+               (parameterize ((p 'inner))
+                 (call/cc (lambda (c) (set! k c) (p)))))
+             (set! n (+ n 1))
+             (if (= n 1) (k (p)) (list seen (p) n))",
+            "(outer outer 2)",
+        ),
+    ]);
+}
+
+#[test]
+fn handlers_run_where_the_raise_happens() {
+    check(&[
+        // A handler sees the raise's parameterization.
+        (
+            "(let ((p (make-parameter 'outer)))
+               (call/cc (lambda (k)
+                 (with-exception-handler
+                   (lambda (e) (k (list e (p))))
+                   (lambda () (parameterize ((p 'inner)) (raise 'oops)))))))",
+            "(oops inner)",
+        ),
+        // So does an error from a Rust procedure.
+        (
+            "(let ((p (make-parameter 'outer)))
+               (call/cc (lambda (k)
+                 (with-exception-handler
+                   (lambda (e) (k (list (error-object? e) (error-object-message e) (p))))
+                   (lambda () (parameterize ((p 'inner)) (+ 1 (car 5))))))))",
+            "(#t \"car: expected a pair, got 5\" inner)",
+        ),
+        // A handler's value is raise-continuable's.
+        (
+            "(with-exception-handler (lambda (e) 42) (lambda () (+ (raise-continuable 'c) 1)))",
+            "43",
+        ),
+        // A handler runs with the outer handlers installed.
+        (
+            "(with-exception-handler
+               (lambda (e) (list 'outer e))
+               (lambda ()
+                 (with-exception-handler
+                   (lambda (e) (raise-continuable (list 'inner e)))
+                   (lambda () (raise-continuable 'x)))))",
+            "(outer (inner x))",
+        ),
+        // Returning from a handler for raise raises again, outside it.
+        (
+            "(guard (e ((error-object? e) (error-object-message e)))
+               (with-exception-handler (lambda (e) 'ignored) (lambda () (raise 'boom))))",
+            "\"an exception handler returned from a non-continuable exception\"",
+        ),
+        // guard unwinds first, running after thunks.
+        (
+            "(let ((log '()))
+               (define (note x) (set! log (cons x log)))
+               (guard (e (#t (note (list 'caught e))))
+                 (dynamic-wind (lambda () (note 'in))
+                               (lambda () (raise 'x))
+                               (lambda () (note 'out))))
+               (reverse log))",
+            "(in out (caught x))",
+        ),
+        // With no clause for it, guard re-enters the raise and calls
+        // raise-continuable there: the outer handler's value comes back.
+        (
+            "(let ((log '()))
+               (define (note x) (set! log (cons x log)))
+               (let ((v (with-exception-handler
+                          (lambda (e) 10)
+                          (lambda ()
+                            (guard (e ((string? e) 'no))
+                              (dynamic-wind (lambda () (note 'in))
+                                            (lambda () (+ 100 (raise-continuable 'sym)))
+                                            (lambda () (note 'out))))))))
+                 (list v (reverse log))))",
+            "(110 (in out in out))",
+        ),
+        // Nested guards: the outer gets what the inner declines.
+        (
+            "(guard (e ((symbol? e) (list 'outer e)))
+               (guard (e ((string? e) 'inner))
+                 (raise 'x)))",
+            "(outer x)",
+        ),
+        (
+            "(guard (e ((error-object? e) (error-object-message e))) (vector-ref (vector 1) 3))",
+            "\"vector-ref: index 3 is out of range for a vector of length 1\"",
+        ),
+        (
+            "(guard (e ((string? e) 'string) (else (list 'else e))) (raise 5))",
+            "(else 5)",
+        ),
+    ]);
+}
+
+#[test]
+fn parameters_are_dynamic() {
+    check(&[(
+        "(define p (make-parameter 1 (lambda (x) (* x 10))))
+         (list (p)
+               (parameterize ((p 2)) (p))
+               (p)
+               (call/cc (lambda (k) (parameterize ((p 3)) (k (p)))))
+               (p)
+               (guard (e (#t (p))) (parameterize ((p 4)) (raise 'x))))",
+        "(10 20 10 30 10 10)",
+    )]);
+}
+
+/// Every host call starts in an empty dynamic environment, however the last
+/// one ended.
+#[test]
+fn host_calls_start_afresh() {
+    fn under<S: Strategy>() {
+        let source = "
+            (define p (make-parameter 'outer))
+            (define log '())
+            (define (bad) (parameterize ((p 'inner)) (car 5)))
+            (define (unwound)
+              (dynamic-wind (lambda () #f) (lambda () (car 5))
+                            (lambda () (set! log (cons 'after log)))))
+            (define (handled)
+              (with-exception-handler (lambda (e) 'handled) (lambda () (car 5))))
+            (define (state) (list (p) log))";
+        let program =
+            vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let call = |cx: &mut Cx<S>, name: &str| {
+            let f = cx.variable(id, name).unwrap();
+            cx.call(&f, &[])
+        };
+        assert!(call(&mut cx, "bad").is_err());
+        assert!(call(&mut cx, "unwound").is_err());
+        // An error with no handler unwinds straight to the host, running
+        // no after thunks, as before.
+        let error = call(&mut cx, "handled").unwrap_err().to_string();
+        assert!(error.contains("an exception handler returned"), "{error}");
+        let state = call(&mut cx, "state").unwrap();
+        assert_eq!(cx.write_string(&state).unwrap(), "(outer ())");
+    }
+    under::<NoCollection>();
+    under::<DeferredHeadered>();
+    under::<PreciseSideCounts>();
+}
+
+#[test]
 fn continuations() {
     let prelude = "(import (scheme base) (only (vali primitive) %call/cc %continue %catch))";
     let cases = [
@@ -1745,6 +1954,12 @@ fn frames_leave_nothing_counted() {
         "(length (deep-k 30000))",
         "(%catch (lambda () (%call/cc (lambda (k) (%continue k (ring))))) (lambda (c) c))",
         "(%catch (lambda () (list (%call/cc (lambda (k) (raise (ring)))))) (lambda (c) c))",
+        // The dynamic environment: escaping a dynamic-wind, guard
+        // re-entering a raise, a handler returning, parameterize.
+        "(call/cc (lambda (k) (dynamic-wind (lambda () #f) (lambda () (k (ring))) (lambda () #f))))",
+        "(with-exception-handler (lambda (e) (ring)) (lambda () (guard (e ((string? e) 'no)) (raise-continuable (ring)))))",
+        "(guard (e (#t e)) (with-exception-handler (lambda (e) (ring)) (lambda () (car 5))))",
+        "(parameterize ((current-output-port (current-output-port))) (ring))",
     ];
     for body in repeated {
         // Each must run, or it would check nothing.

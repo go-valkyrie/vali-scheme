@@ -58,6 +58,11 @@ pub(crate) const UNDERFLOW: u64 = 1 << 61;
 /// Never stored in a frame.
 const CAPTURE: u64 = 1 << 60;
 
+/// Set in the position word of the frame an error calls the raise
+/// procedure in: the raise procedure never returns, so returning through
+/// it is an error.
+const RAISED: u64 = 1 << 59;
+
 /// A `%catch` waiting for its thunk to return: where to call the handler
 /// if something is raised first.
 #[derive(Clone, Copy)]
@@ -370,6 +375,7 @@ impl<S: Strategy> Cx<S> {
             .iter()
             .flat_map(|c| [c.handler, c.record])
             .chain([self.below])
+            .chain(self.dynamic)
     }
 
     /// The value of a loaded module's variable, if it has one.
@@ -800,6 +806,9 @@ impl<S: Strategy> Cx<S> {
         if self.stack.is_empty() {
             self.push_segment(SEGMENT_WORDS)?;
         }
+        // Every host call starts in an empty dynamic environment, however
+        // the last one ended.
+        self.reset_dynamic();
         let segment = &self.stack[0];
         // The entry frame is a pseudo-frame at the top of the segment. The
         // word at its frame pointer will hold the host's stack pointer, for
@@ -839,6 +848,7 @@ impl<S: Strategy> Cx<S> {
             }
         }
         self.set_below(Value::FALSE);
+        self.reset_dynamic();
         // An error can leave segments chained; only the first is kept, and
         // only if it is whole, since the next run starts at its top.
         while self.stack.len() > 1 {
@@ -999,12 +1009,27 @@ impl<S: Strategy> Cx<S> {
                 if position & CATCH != 0 {
                     self.catch_returned();
                 }
+                if position & RAISED != 0 {
+                    return Next::Raise(self.handler_returned());
+                }
                 Next::Underflow {
                     caller,
                     position,
                     value,
                 }
             }
+        }
+    }
+
+    /// The error for returning through a frame the raise procedure was
+    /// called in: an escape, so it is not handed to the raise procedure
+    /// again.
+    fn handler_returned(&mut self) -> Error {
+        let message = "the raise procedure returned";
+        match self.string_raw(message, true) {
+            // SAFETY: just allocated.
+            Ok(s) => Error::escape(message, unsafe { self.root(s) }),
+            Err(e) => e.into(),
         }
     }
 
@@ -1302,6 +1327,59 @@ impl<S: Strategy> Cx<S> {
                         link_to!(fp, stub_of!(*fp.add(2), caller));
                         switch_to!(caller);
                     }
+                    Next::Raise(error)
+                        if fp != top
+                            && self.dynamic[crate::continuations::HANDLERS]
+                                != Value::EMPTY_LIST
+                            && error.reaches_handlers()
+                            && self.raise_hook.is_some() =>
+                    {
+                        // A handler is installed: call the raise procedure
+                        // with the condition where the error happened,
+                        // past the innermost frame's slots, so handlers
+                        // run in its dynamic environment (R7RS 6.11). It
+                        // never returns.
+                        let condition = self.condition(error)?;
+                        let hook = self.get(self.raise_hook.as_ref().expect("checked"))?;
+                        let code = self
+                            .procedure_code(hook)
+                            .expect("the raise procedure is a procedure");
+                        let Kind::Bytecode { slots, .. } = code.kind else {
+                            unreachable!("the raise procedure is a Scheme procedure");
+                        };
+                        let base = if S::PRECISE {
+                            frame_slots
+                        } else {
+                            self.suspended_slots(fp)
+                        };
+                        let needed = usize::from(slots).max(2);
+                        let mut position = position(0, base) | RAISED;
+                        let mut callee_fp = fp.sub(base + 3);
+                        if fits(callee_fp, needed, limit) {
+                            if S::PRECISE {
+                                self.release_slots(fp, base, base + 3);
+                            }
+                        } else {
+                            // Failing to find room ends the run.
+                            let (new_top, new_limit) = self.push_segment(needed + 4)?;
+                            callee_fp = new_top.sub(3);
+                            limit = new_limit;
+                            position |= BOUNDARY;
+                        }
+                        *callee_fp = fp as u64;
+                        *callee_fp.add(1) = current_stub;
+                        *callee_fp.add(2) = position;
+                        self.store(callee_fp, 0, hook);
+                        self.store(callee_fp, 1, condition);
+                        self.enter(code, callee_fp, 1)?;
+                        if S::PRECISE {
+                            frame_slots = needed;
+                        }
+                        fp = callee_fp;
+                        link_to!(fp, stub_of!(position, code));
+                        pc = 0;
+                        switch_to!(code);
+                    }
                     Next::Raise(error) => {
                         // Unwind to the innermost `%catch` and call its
                         // handler with the condition in place of the `%catch`
@@ -1512,7 +1590,15 @@ impl<S: Strategy> Cx<S> {
                                     *callee_fp.add(1) = current_stub;
                                 }
                                 *callee_fp.add(2) = position;
-                                attempt!(self.enter(callee, callee_fp, argc));
+                                if let Err(e) = self.enter(callee, callee_fp, argc) {
+                                    if position != ENTRY && position & BOUNDARY != 0 {
+                                        // The error is raised in the
+                                        // caller: drop the new segment.
+                                        self.release_slots(callee_fp, 0, needed);
+                                        limit = self.pop_segment();
+                                    }
+                                    fail!(e);
+                                }
                                 if S::PRECISE {
                                     frame_slots = needed;
                                 }
@@ -1712,10 +1798,14 @@ impl<S: Strategy> Cx<S> {
                             return Ok(value);
                         }
                         let caller = *fp as *mut u64;
-                        // One test for both rare cases.
-                        if position & (CATCH | UNDERFLOW) != 0 {
+                        // One test for the rare cases.
+                        if position & (CATCH | UNDERFLOW | RAISED) != 0 {
                             if position & CATCH != 0 {
                                 self.catch_returned();
+                            }
+                            if position & RAISED != 0 {
+                                next = Next::Raise(self.handler_returned());
+                                continue;
                             }
                             if position & UNDERFLOW != 0 {
                                 if position & BOUNDARY != 0 {

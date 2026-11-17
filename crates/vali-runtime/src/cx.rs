@@ -72,6 +72,13 @@ pub struct Cx<S: Strategy> {
     pub(crate) expander_data: Option<Box<dyn std::any::Any + Send>>,
     /// The `%catch`es whose thunks are running, innermost last.
     pub(crate) catches: Vec<crate::vm::Catch>,
+    /// The dynamic state (scheme base) keeps: `dynamic-wind`'s winders,
+    /// the exception handlers and the parameterization, each a list. Every
+    /// host call starts with them empty (`continuations`).
+    pub(crate) dynamic: [Value; 3],
+    /// The procedure an error calls where it happens, while a handler is
+    /// installed: (scheme base)'s `raise`.
+    pub(crate) raise_hook: Option<Handle>,
     /// The record type of error objects, made when first needed.
     pub(crate) error_object_type: Option<Value>,
     /// The record type of multiple values, made when first needed.
@@ -152,6 +159,8 @@ impl<S: Strategy> Cx<S> {
             host_data: None,
             expander_data: None,
             catches: Vec::new(),
+            dynamic: [Value::EMPTY_LIST; 3],
+            raise_hook: None,
             error_object_type: None,
             values_type: None,
             console_input: None,
