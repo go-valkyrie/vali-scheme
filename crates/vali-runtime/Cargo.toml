@@ -1,0 +1,14 @@
+[package]
+name = "vali-runtime"
+description = "Vali's runtime: values, memory strategies, objects, tasks and handles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vali-abi.workspace = true
+
+[lints]
+workspace = true

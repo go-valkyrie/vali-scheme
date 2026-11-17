@@ -437,6 +437,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vali-runtime"
+version = "0.0.0"
+dependencies = [
+ "vali-abi",
+]
+
+[[package]]
 name = "vali-syntax"
 version = "0.0.0"
 dependencies = [
