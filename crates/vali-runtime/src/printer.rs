@@ -220,6 +220,14 @@ impl<S: Strategy> Printer<'_, S> {
                             self.out.push_str(&n.to_string_radix(Radix::Decimal));
                         }
                         Some(TypeCode::Box) => self.out.push_str("#<box>"),
+                        Some(TypeCode::Record) => {
+                            let name = self.cx.record_type_name(v).unwrap_or("?");
+                            let _ = write!(self.out, "#<{name}>");
+                        }
+                        Some(TypeCode::RecordType) => {
+                            let name = self.cx.record_type_name(v).unwrap_or("?");
+                            let _ = write!(self.out, "#<record-type {name}>");
+                        }
                         // Without scopes, which would differ between runs
                         // (ADR 0001 #4).
                         Some(TypeCode::Syntax) => match self.cx.syntax_value(v) {

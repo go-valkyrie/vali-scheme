@@ -10,6 +10,7 @@ use vali_bytecode::Arity;
 use crate::code::NativeFn;
 use crate::cx::Cx;
 use crate::handle::Error;
+use crate::records;
 use crate::strategy::Strategy;
 use crate::value::Value;
 use crate::vm::{Arith, Compare, Num, type_error};
@@ -1127,6 +1128,25 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("set-car!", Arity::exactly(2), set_car),
         ("set-cdr!", Arity::exactly(2), set_cdr),
         ("error", at_least(1), error),
+        (
+            "%make-record-type",
+            Arity::exactly(2),
+            records::make_record_type,
+        ),
+        (
+            "%record-field-index",
+            Arity::exactly(2),
+            records::record_field_index,
+        ),
+        (
+            "%record-constructor-indices",
+            Arity::exactly(2),
+            records::record_constructor_indices,
+        ),
+        ("%make-record", at_least(2), records::make_record),
+        ("%record?", Arity::exactly(2), records::is_record),
+        ("%record-ref", Arity::exactly(3), records::record_ref),
+        ("%record-set!", Arity::exactly(4), records::record_set),
     ]
 }
 

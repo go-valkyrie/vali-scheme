@@ -13,6 +13,7 @@
    define-syntax let-syntax letrec-syntax syntax-rules syntax-case syntax
    ;; Derived forms, below.
    and or when unless let* cond case do with-syntax quasiquote
+   define-record-type
    ;; Procedures.
    + * - = < <= > >= quotient remainder modulo abs min max
    number? integer? exact? inexact? zero? positive? negative? odd? even?
@@ -143,6 +144,32 @@
         ((_ (a . b) ds) (cons (qq a ds) (qq b ds)))
         ((_ #(x ...) ds) (list->vector (qq (x ...) ds)))
         ((_ x ds) 'x)))
+
+    ;; define-record-type (R7RS 5.5). Each field's index is looked up once,
+    ;; when the type is defined, so accessors don't search.
+    (define-syntax define-record-type
+      (syntax-rules ()
+        ((_ type (constructor field ...) predicate (fname . accessors) ...)
+         (begin
+           (define type (%make-record-type 'type '(fname ...)))
+           (define constructor
+             (let ((indices (%record-constructor-indices type '(field ...))))
+               (lambda (field ...) (%make-record type indices field ...))))
+           (define (predicate obj) (%record? obj type))
+           (record-field type fname . accessors) ...))))
+
+    (define-syntax record-field
+      (syntax-rules ()
+        ((_ type fname accessor)
+         (define accessor
+           (let ((i (%record-field-index type 'fname)))
+             (lambda (obj) (%record-ref obj type i)))))
+        ((_ type fname accessor modifier)
+         (begin
+           (record-field type fname accessor)
+           (define modifier
+             (let ((i (%record-field-index type 'fname)))
+               (lambda (obj value) (%record-set! obj type i value))))))))
 
     (define-syntax with-syntax
       (syntax-rules ()

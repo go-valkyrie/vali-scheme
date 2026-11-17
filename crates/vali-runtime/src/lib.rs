@@ -17,6 +17,7 @@ mod page;
 mod primitives;
 mod printer;
 mod read;
+mod records;
 mod stack;
 mod strategy;
 mod stubs;

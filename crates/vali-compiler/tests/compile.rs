@@ -718,3 +718,52 @@ fn quasiquote() {
         ),
     ]);
 }
+
+#[test]
+fn records() {
+    let point = "(define-record-type point (make-point x y) point?
+                   (x point-x set-point-x!)
+                   (y point-y))";
+    check(&[
+        (
+            &format!("{point} (let ((p (make-point 1 2))) (set-point-x! p 10) (list (point-x p) (point-y p)))"),
+            "(10 2)",
+        ),
+        (
+            &format!("{point} (list (point? (make-point 1 2)) (point? 5) (point? (vector 1 2)))"),
+            "(#t #f #f)",
+        ),
+        (&format!("{point} (make-point 1 2)"), "#<point>"),
+        (&format!("{point} point"), "#<record-type point>"),
+        // A constructor taking some fields, in another order.
+        (
+            "(define-record-type node (make-node value) node? (value node-value) (next node-next set-node-next!))
+             (let ((n (make-node 5))) (set-node-next! n 'end) (list (node-value n) (node-next n)))",
+            "(5 end)",
+        ),
+        // Records of different types are told apart.
+        (
+            &format!("{point} (define-record-type other (make-other x) other? (x other-x)) (point? (make-other 1))"),
+            "#f",
+        ),
+    ]);
+    let Err(Error::Scheme(e)) = run(&format!("{point} (point-x 5)")) else {
+        panic!("expected a type error");
+    };
+    assert!(
+        e.message.contains("expected a point record, got 5"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_dotted_template_with_a_list_tail_is_a_proper_list() {
+    // (f . args) with args matching a list builds a call, not a dotted
+    // list: the tail continues the list.
+    check(&[(
+        "(define-syntax call (syntax-rules () ((_ f . args) (f . args))))
+         (call + 1 2 3)",
+        "6",
+    )]);
+}

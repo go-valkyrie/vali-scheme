@@ -235,10 +235,24 @@ impl Syntax {
     pub fn to_datum(&self) -> Datum {
         let kind = match &*self.content {
             Content::Identifier(name) => DatumKind::Symbol(name.to_string()),
-            Content::List { items, tail } => DatumKind::List {
-                items: items.iter().map(Syntax::to_datum).collect(),
-                tail: tail.as_ref().map(|t| Box::new(t.to_datum())),
-            },
+            Content::List { items, tail } => {
+                let mut items: Vec<Datum> = items.iter().map(Syntax::to_datum).collect();
+                let mut tail = tail.as_ref();
+                // As in `expose`, a list-shaped tail continues the list.
+                while let Some(t) = tail
+                    && let Content::List {
+                        items: more,
+                        tail: rest,
+                    } = &*t.content
+                {
+                    items.extend(more.iter().map(Syntax::to_datum));
+                    tail = rest.as_ref();
+                }
+                DatumKind::List {
+                    items,
+                    tail: tail.map(|t| Box::new(t.to_datum())),
+                }
+            }
             Content::Vector(items) => {
                 DatumKind::Vector(items.iter().map(Syntax::to_datum).collect())
             }
@@ -289,10 +303,22 @@ impl Syntax {
     /// For a list, how many elements it has before any `.`, and whether
     /// it has a dotted tail, without taking it apart.
     pub fn list_shape(&self) -> Option<(usize, bool)> {
-        match &*self.content {
-            Content::List { items, tail } => Some((items.len(), tail.is_some())),
-            _ => None,
+        let Content::List { items, tail } = &*self.content else {
+            return None;
+        };
+        // A dotted tail that is itself a list continues this one.
+        let mut length = items.len();
+        let mut tail = tail.as_ref();
+        while let Some(t) = tail {
+            match &*t.content {
+                Content::List { items, tail: rest } => {
+                    length += items.len();
+                    tail = rest.as_ref();
+                }
+                _ => return Some((length, true)),
+            }
         }
+        Some((length, false))
     }
 
     /// Takes the syntax object apart one level, giving the children their
@@ -302,10 +328,30 @@ impl Syntax {
         Ok(match &*self.content {
             Content::Identifier(name) => Exposed::Identifier(name),
             Content::Atom(kind) => Exposed::Atom(kind),
-            Content::List { items, tail } => Exposed::List {
-                items: items.iter().map(&mut push).collect::<Result<_, _>>()?,
-                tail: tail.as_ref().map(&mut push).transpose()?,
-            },
+            Content::List { items, tail } => {
+                let mut items: Vec<Syntax> =
+                    items.iter().map(&mut push).collect::<Result<_, _>>()?;
+                let mut tail = tail.as_ref().map(&mut push).transpose()?;
+                // A dotted tail that is itself a list, as a template with
+                // `(a . rest)` builds, continues this one: one list, one
+                // shape, whatever built it.
+                while let Some(t) = tail.take() {
+                    if !t.is_list() {
+                        tail = Some(t);
+                        break;
+                    }
+                    let Exposed::List {
+                        items: more,
+                        tail: rest,
+                    } = t.expose(context)?
+                    else {
+                        unreachable!("a list exposes as one")
+                    };
+                    items.extend(more);
+                    tail = rest;
+                }
+                Exposed::List { items, tail }
+            }
             Content::Vector(items) => {
                 Exposed::Vector(items.iter().map(push).collect::<Result<_, _>>()?)
             }
