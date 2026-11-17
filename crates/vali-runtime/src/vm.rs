@@ -24,7 +24,9 @@ use crate::handle::{Error, Handle, SchemeError};
 use crate::page::OutOfMemory;
 use crate::stack::{SEGMENT_WORDS, Segment};
 use crate::strategy::Strategy;
+use crate::trampoline::{self, Link};
 use crate::value::Value;
+use std::ffi::c_void;
 
 /// The bytecode position stored in the entry frame's header: returning to
 /// it leaves the VM.
@@ -47,11 +49,53 @@ fn fits(fp: *mut u64, words: usize, limit: *mut u64) -> bool {
     (fp as usize).saturating_sub(limit as usize) / 8 >= words
 }
 
-/// The return address of interpreted frames, until each function has a
-/// marker stub of its own (ADR 0004 #6). A real code address, so native
-/// unwinders accept it.
-#[inline(never)]
-extern "C" fn vali_interpreted_frame() {}
+/// What the trampoline passes to [`body`]. `record` must come first: the
+/// trampoline stores its frame record's address there.
+#[repr(C)]
+struct EnterState<S: Strategy> {
+    record: *mut u64,
+    cx: *mut Cx<S>,
+    entry: *mut u64,
+    limit: *mut u64,
+    argc: usize,
+    result: Option<Result<Value, Error>>,
+    panic: Option<Box<dyn std::any::Any + Send>>,
+}
+
+/// Runs the VM from inside the trampoline, and restores the trampoline's
+/// frame record before returning to it, even if the VM panics.
+unsafe extern "C-unwind" fn body<S: Strategy>(state: *mut c_void) {
+    // SAFETY: the trampoline passes the `EnterState` `execute` gave it, with
+    // `record` filled in.
+    let state = unsafe { &mut *(state as *mut EnterState<S>) };
+    let record = state.record;
+    // SAFETY: `record` is the trampoline's frame record, two words.
+    let link = unsafe {
+        Link {
+            record,
+            host_fp: *record,
+            host_return: *record.add(1),
+            host_cfa: record as u64 + 16,
+        }
+    };
+    // SAFETY: `cx` is the context that called `execute`, borrowed for its
+    // duration.
+    let cx = unsafe { &mut *state.cx };
+    let (entry, limit, argc) = (state.entry, state.limit, state.argc);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: `execute` set up the entry frame.
+        unsafe { cx.interpret(&link, entry, limit, argc) }
+    }));
+    // SAFETY: as above; the trampoline pops these when it returns.
+    unsafe {
+        *record = link.host_fp;
+        *record.add(1) = link.host_return;
+    }
+    match outcome {
+        Ok(result) => state.result = Some(result),
+        Err(panic) => state.panic = Some(panic),
+    }
+}
 
 #[inline(always)]
 unsafe fn slot(fp: *mut u64, i: usize) -> Value {
@@ -423,21 +467,37 @@ impl<S: Strategy> Cx<S> {
             self.push_segment(SEGMENT_WORDS)?;
         }
         let segment = &self.stack[0];
-        let (top, limit) = (segment.top(), segment.limit());
-        // The entry frame is a pseudo-frame at the top of the segment: its
-        // slots 0 to 2 hold the callee's header, slot 3 the procedure, and
-        // the arguments follow.
-        // SAFETY: the segment has room for 4 + 255 words.
+        // The entry frame is a pseudo-frame at the top of the segment. The
+        // word at its frame pointer will hold the host's stack pointer, for
+        // unwinders; its slots 0 to 2 hold the callee's header, slot 3 the
+        // procedure, and the arguments follow.
+        // SAFETY: the segment has room for 5 + 255 words.
+        let (entry, limit) = unsafe { (segment.top().sub(1), segment.limit()) };
+        // SAFETY: as above.
         unsafe {
-            set(top, 3, procedure);
+            set(entry, 3, procedure);
             for (i, &arg) in args.iter().enumerate() {
-                set(top, 4 + i, arg);
+                set(entry, 4 + i, arg);
             }
         }
         self.running = true;
-        // SAFETY: the entry frame is set up as `interpret` expects.
-        let result = unsafe { self.interpret(top, limit, args.len()) };
+        let mut state = EnterState {
+            record: std::ptr::null_mut(),
+            cx: self as *mut Cx<S>,
+            entry,
+            limit,
+            argc: args.len(),
+            result: None,
+            panic: None,
+        };
+        // SAFETY: `body` restores the trampoline's record before returning,
+        // and the entry frame is set up as `interpret` expects.
+        unsafe { trampoline::enter(&raw mut state as *mut c_void, body::<S>) };
         self.running = false;
+        if let Some(panic) = state.panic {
+            std::panic::resume_unwind(panic);
+        }
+        let result = state.result.expect("the VM ran");
         // An error can leave segments chained; only the first is kept.
         while self.stack.len() > 1 {
             self.pop_segment();
@@ -588,19 +648,25 @@ impl<S: Strategy> Cx<S> {
         (instance.constants.as_ptr(), instance.variables.as_mut_ptr())
     }
 
-    /// Runs until the entry frame at `top` receives its result.
+    /// Runs until the entry frame at `top` receives its result, keeping the
+    /// trampoline's frame record in `link` pointing at the current frame.
     ///
     /// # Safety
     ///
-    /// `top` must be the top of the stack segment ending at `limit`, with
-    /// the procedure in its slot 3 and `argc` arguments after it.
+    /// `top` must be the entry frame at the top of the stack segment ending
+    /// at `limit`, with the procedure in its slot 3 and `argc` arguments
+    /// after it.
     unsafe fn interpret(
         &mut self,
+        link: &Link,
         top: *mut u64,
         mut limit: *mut u64,
         argc: usize,
     ) -> Result<Value, Error> {
         let mut fp = top;
+        // SAFETY: `top` is the entry frame's frame pointer, inside the
+        // segment.
+        unsafe { *top = link.host_cfa };
         let mut pc: usize;
         let mut code: *const u32 = std::ptr::null();
         let mut constants: *const Value = std::ptr::null();
@@ -611,7 +677,15 @@ impl<S: Strategy> Cx<S> {
             argc,
             resume: ENTRY,
         };
-        let return_address = vali_interpreted_frame as extern "C" fn() as usize as u64;
+        let (resume_address, entry_resume_address, boundary_resume_address) = (
+            trampoline::resume(),
+            trampoline::entry_resume(),
+            trampoline::boundary_resume(),
+        );
+        // The marker stub of the current frame, which frames it calls
+        // return to. The entry pseudo-frame has none: its callee returns to
+        // the host.
+        let mut current_stub = 0u64;
 
         // SAFETY (for the whole loop): the validator checked every slot,
         // constant, variable, function and branch operand; frames are set up
@@ -645,6 +719,30 @@ impl<S: Strategy> Cx<S> {
                         current_module = module as usize;
                         (constants, variables) = self.instance_registers(current_module);
                     }
+                }};
+            }
+            // The marker stub that names a frame with this position word: the
+            // stub for the bottom frame, for the first frame of a chained
+            // segment, or for any other. Frames it calls return to it.
+            macro_rules! stub_of {
+                ($position:expr) => {{
+                    let position = $position;
+                    if position == ENTRY {
+                        entry_resume_address
+                    } else if position & BOUNDARY != 0 {
+                        boundary_resume_address
+                    } else {
+                        resume_address
+                    }
+                }};
+            }
+            // Make the frame at `fp`, whose stub is `stub`, the current one,
+            // and point the trampoline's frame record at it.
+            macro_rules! link_to {
+                ($fp:expr, $stub:expr) => {{
+                    current_stub = $stub;
+                    *link.record = $fp as u64;
+                    *link.record.add(1) = current_stub;
                 }};
             }
             macro_rules! attempt {
@@ -683,8 +781,11 @@ impl<S: Strategy> Cx<S> {
                                 if !fits(callee_fp, needed, limit) {
                                     // Chain a segment, and move the
                                     // procedure and arguments into it.
-                                    let (top, new_limit) = attempt!(self.push_segment(needed + 3));
-                                    let new_fp = top.sub(3);
+                                    let (top, new_limit) = attempt!(self.push_segment(needed + 4));
+                                    // The bottom frame keeps the host's
+                                    // stack pointer in the word above its
+                                    // header.
+                                    let new_fp = top.sub(if position == ENTRY { 4 } else { 3 });
                                     for i in 0..=argc {
                                         set(new_fp, i, slot(callee_fp, i));
                                     }
@@ -694,11 +795,18 @@ impl<S: Strategy> Cx<S> {
                                         position |= BOUNDARY;
                                     }
                                 }
-                                *callee_fp = fp as u64;
-                                *callee_fp.add(1) = return_address;
+                                if position == ENTRY {
+                                    *callee_fp = link.host_fp;
+                                    *callee_fp.add(1) = link.host_return;
+                                    *callee_fp.add(3) = link.host_cfa;
+                                } else {
+                                    *callee_fp = fp as u64;
+                                    *callee_fp.add(1) = current_stub;
+                                }
                                 *callee_fp.add(2) = position;
                                 attempt!(self.enter(callee, callee_fp, argc));
                                 fp = callee_fp;
+                                link_to!(fp, stub_of!(position));
                                 pc = 0;
                                 switch_to!(callee);
                             }
@@ -719,6 +827,7 @@ impl<S: Strategy> Cx<S> {
                                     // was the first in its segment, that
                                     // segment is left empty, so drop it first.
                                     let saved = *fp;
+                                    let return_to = *fp.add(1);
                                     let old = *fp.add(2);
                                     let moved: Vec<Value> =
                                         (0..=argc).map(|i| slot(fp, i)).collect();
@@ -731,15 +840,19 @@ impl<S: Strategy> Cx<S> {
                                         let base = (saved as usize - fp as usize) / 8 - 3;
                                         position(old & 0xFFFF_FFFF, base) | BOUNDARY
                                     };
-                                    let (top, new_limit) = attempt!(self.push_segment(needed + 3));
-                                    fp = top.sub(3);
+                                    let (top, new_limit) = attempt!(self.push_segment(needed + 4));
+                                    fp = top.sub(if position == ENTRY { 4 } else { 3 });
                                     limit = new_limit;
                                     *fp = saved;
-                                    *fp.add(1) = return_address;
+                                    *fp.add(1) = return_to;
                                     *fp.add(2) = position;
+                                    if position == ENTRY {
+                                        *fp.add(3) = link.host_cfa;
+                                    }
                                     for (i, &v) in moved.iter().enumerate() {
                                         set(fp, i, v);
                                     }
+                                    link_to!(fp, stub_of!(position));
                                 }
                                 attempt!(self.enter(callee, fp, argc));
                                 pc = 0;
@@ -759,6 +872,7 @@ impl<S: Strategy> Cx<S> {
                             limit = self.pop_segment();
                         }
                         fp = caller;
+                        link_to!(fp, stub_of!(*fp.add(2)));
                         pc = (position & 0xFFFF_FFFF) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
                         switch_to!(caller);
