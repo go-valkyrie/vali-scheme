@@ -224,6 +224,15 @@ impl<S: Strategy> Cx<S> {
         std::mem::replace(&mut self.host_data, data)
     }
 
+    /// Keeps the expander's data, which the syntax procedures use, apart
+    /// from the host's, returning what was kept before.
+    pub fn set_expander_data(
+        &mut self,
+        data: Option<Box<dyn Any + Send>>,
+    ) -> Option<Box<dyn Any + Send>> {
+        std::mem::replace(&mut self.expander_data, data)
+    }
+
     /// The host's data, if it is a `T`.
     pub fn host_data<T: Any>(&mut self) -> Option<&mut T> {
         let data: &mut dyn Any = self.host_data.as_mut()?.as_mut();

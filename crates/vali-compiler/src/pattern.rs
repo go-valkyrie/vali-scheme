@@ -29,7 +29,7 @@ fn too_many(e: vali_syntax::TooManyScopes) -> CompileError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Pattern {
     /// `_`: matches anything.
     Discard,
@@ -54,7 +54,7 @@ pub(crate) enum Pattern {
 }
 
 /// The part of a list pattern from the ellipsis on.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Repeat {
     each: Box<Pattern>,
     /// The variables `each` binds.
@@ -70,7 +70,7 @@ pub(crate) enum Match {
     Many(Vec<Match>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Template {
     /// A pattern variable, by number.
     Var(usize),

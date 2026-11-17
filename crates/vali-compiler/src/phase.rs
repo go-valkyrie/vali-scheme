@@ -17,7 +17,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use vali_bytecode::Arity;
-use vali_runtime::{Cx, Error, HeapConfig, NoCollection, Value};
+use vali_runtime::{Cx, Error, HeapConfig, NoCollection, Strategy, Value};
 use vali_syntax::{
     BindingTable, Origin, Phase, ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax,
     bound_identifier_eq, free_identifier_eq,
@@ -27,7 +27,7 @@ use crate::expand::Binding;
 use crate::pattern::{self, Builder, Match, Pattern, Template};
 
 /// What phase-1 code compiled to, which its procedures look up by number.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Compiled {
     /// The syntax objects `quote-syntax` forms quote.
     pub(crate) quoted: Vec<Syntax>,
@@ -39,6 +39,7 @@ pub(crate) struct Compiled {
 
 /// What the syntax procedures need from the expander while a transformer
 /// runs.
+#[derive(Clone)]
 pub(crate) struct Shared {
     pub(crate) context: ScopeContext,
     pub(crate) table: BindingTable<String, Binding>,
@@ -69,13 +70,21 @@ pub(crate) const SYNTAX_BUILD: &str = "%syntax-build";
 pub(crate) fn instance() -> Result<Cx<NoCollection>, Error> {
     let mut cx = Cx::new(&HeapConfig::default());
     cx.install_primitives()?;
+    install(&mut cx)?;
+    Ok(cx)
+}
+
+/// Binds the syntax procedures in `cx`. They work while the expander's
+/// data is there: during a transformer's call at phase 1, or at run time
+/// after a program that uses syntax objects is loaded.
+pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
     let exactly = Arity::exactly;
     let at_least = |required| Arity {
         required,
         optional: 0,
         rest: true,
     };
-    let natives: [(&str, Arity, vali_runtime::NativeFn<NoCollection>); 10] = [
+    let natives: [(&str, Arity, vali_runtime::NativeFn<S>); 10] = [
         ("syntax->datum", exactly(1), syntax_to_datum),
         ("datum->syntax", exactly(2), datum_to_syntax),
         ("identifier?", exactly(1), is_identifier),
@@ -90,7 +99,7 @@ pub(crate) fn instance() -> Result<Cx<NoCollection>, Error> {
     for (name, arity, f) in natives {
         cx.define_native(name, arity, f)?;
     }
-    Ok(cx)
+    Ok(())
 }
 
 fn nowhere() -> Span {
@@ -102,18 +111,18 @@ fn nowhere() -> Span {
 
 /// Runs `f` with the expander's state, which is taken out of the host data
 /// while `f` uses the isolate and put back after.
-fn with_shared<T>(
-    cx: &mut Cx<NoCollection>,
+fn with_shared<T, S: Strategy>(
+    cx: &mut Cx<S>,
     name: &str,
-    f: impl FnOnce(&mut Cx<NoCollection>, &mut Shared) -> Result<T, Error>,
+    f: impl FnOnce(&mut Cx<S>, &mut Shared) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let Some(data) = cx.set_host_data(None) else {
+    let Some(data) = cx.set_expander_data(None) else {
         return Err(Error::scheme(format!(
             "{name}: only available while a macro is being expanded"
         )));
     };
     if !(&*data as &dyn Any).is::<Shared>() {
-        cx.set_host_data(Some(data));
+        cx.set_expander_data(Some(data));
         return Err(Error::scheme(format!(
             "{name}: only available while a macro is being expanded"
         )));
@@ -122,19 +131,19 @@ fn with_shared<T>(
         .downcast::<Shared>()
         .expect("checked above");
     let result = f(cx, &mut shared);
-    cx.set_host_data(Some(shared));
+    cx.set_expander_data(Some(shared));
     result
 }
 
 /// `v` as a syntax object, or an error naming `name`.
-fn syntax(cx: &Cx<NoCollection>, v: Value, name: &str) -> Result<Syntax, Error> {
+fn syntax<S: Strategy>(cx: &Cx<S>, v: Value, name: &str) -> Result<Syntax, Error> {
     // SAFETY: arguments are valid values.
     unsafe { cx.value_syntax(v, ScopeSetId::EMPTY, nowhere()) }
         .ok_or_else(|| Error::scheme(format!("{name}: expected syntax")))
 }
 
 /// `v` as an identifier, or an error naming `name`.
-fn identifier(cx: &Cx<NoCollection>, v: Value, name: &str) -> Result<Syntax, Error> {
+fn identifier<S: Strategy>(cx: &Cx<S>, v: Value, name: &str) -> Result<Syntax, Error> {
     // SAFETY: arguments are valid values.
     match unsafe { cx.syntax_value(v) } {
         Some(s) if s.as_identifier().is_some() => Ok(s.clone()),
@@ -142,14 +151,14 @@ fn identifier(cx: &Cx<NoCollection>, v: Value, name: &str) -> Result<Syntax, Err
     }
 }
 
-fn syntax_to_datum(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn syntax_to_datum<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let datum = syntax(cx, args[0], "syntax->datum")?.to_datum();
     cx.datum_raw(&datum)
 }
 
 /// `(datum->syntax context datum)`: `datum` with the scopes, span and
 /// origin of `context`. Syntax objects inside `datum` stay as they are.
-fn datum_to_syntax(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn datum_to_syntax<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     // SAFETY: arguments are valid values.
     let Some(context) = unsafe { cx.syntax_value(args[0]) }.cloned() else {
         return Err(Error::scheme(
@@ -163,7 +172,7 @@ fn datum_to_syntax(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, E
     Ok(cx.syntax_raw(made)?)
 }
 
-fn is_identifier(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn is_identifier<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     // SAFETY: arguments are valid values.
     let syntax = unsafe { cx.syntax_value(args[0]) };
     Ok(Value::boolean(
@@ -171,7 +180,7 @@ fn is_identifier(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Err
     ))
 }
 
-fn bound_identifier(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn bound_identifier<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "bound-identifier=?";
     let (a, b) = (
         identifier(cx, args[0], name)?,
@@ -180,7 +189,7 @@ fn bound_identifier(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, 
     Ok(Value::boolean(bound_identifier_eq(&a, &b)))
 }
 
-fn free_identifier(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn free_identifier<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "free-identifier=?";
     let (a, b) = (
         identifier(cx, args[0], name)?,
@@ -197,7 +206,7 @@ fn free_identifier(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, E
     })
 }
 
-fn quote_syntax(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn quote_syntax<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let index = args[0]
         .as_fixnum()
         .and_then(|n| usize::try_from(n).ok())
@@ -221,7 +230,7 @@ fn number(v: Value, name: &str) -> Result<usize, Error> {
 }
 
 /// What a pattern variable matched, as a value.
-fn match_value(cx: &mut Cx<NoCollection>, m: Match) -> Result<Value, Error> {
+fn match_value<S: Strategy>(cx: &mut Cx<S>, m: Match) -> Result<Value, Error> {
     match m {
         Match::One(syntax) => Ok(cx.syntax_raw(syntax)?),
         Match::Many(matches) => {
@@ -240,7 +249,7 @@ fn match_value(cx: &mut Cx<NoCollection>, m: Match) -> Result<Value, Error> {
 }
 
 /// A value from [`match_value`] back as a match at `depth`.
-fn value_match(cx: &Cx<NoCollection>, v: Value, depth: usize) -> Option<Match> {
+fn value_match<S: Strategy>(cx: &Cx<S>, v: Value, depth: usize) -> Option<Match> {
     if depth == 0 {
         // SAFETY: arguments and their parts are valid values.
         return unsafe { cx.syntax_value(v) }.cloned().map(Match::One);
@@ -258,7 +267,7 @@ fn value_match(cx: &Cx<NoCollection>, v: Value, depth: usize) -> Option<Match> {
 
 /// `(%syntax-match input k)`: what pattern `k`'s variables matched, as a
 /// vector, or `#f` if `input` doesn't match.
-fn syntax_match(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn syntax_match<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "syntax-case";
     let input = syntax(cx, args[0], name)?;
     let k = number(args[1], name)?;
@@ -292,7 +301,7 @@ fn syntax_match(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Erro
 
 /// `(%syntax-build k v ...)`: template `k`, with the matches of the
 /// variables it uses.
-fn syntax_build(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn syntax_build<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "syntax";
     let k = number(args[0], name)?;
     let built = with_shared(cx, name, |cx, shared| {
@@ -323,7 +332,7 @@ fn syntax_build(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Erro
 
 /// `(generate-temporaries list)`: as many fresh identifiers as `list` has
 /// elements, distinct from every other identifier.
-fn generate_temporaries(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn generate_temporaries<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "generate-temporaries";
     let list = syntax(cx, args[0], name)?;
     let ids = with_shared(cx, name, |_, shared| {
@@ -348,7 +357,7 @@ fn generate_temporaries(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Val
 }
 
 /// `(syntax-violation who message form [subform])`: raises an error.
-fn syntax_violation(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+fn syntax_violation<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let describe = |v: Value| {
         // SAFETY: arguments are valid values.
         unsafe { cx.value_syntax(v, ScopeSetId::EMPTY, nowhere()) }

@@ -753,10 +753,10 @@ impl Expander {
                 return Err(failed(e));
             }
         };
-        cx.set_host_data(Some(Box::new(shared)));
+        cx.set_expander_data(Some(Box::new(shared)));
         let result = cx.call(procedure, &[input]);
         let shared = cx
-            .set_host_data(None)
+            .set_expander_data(None)
             .and_then(|data| (data as Box<dyn std::any::Any>).downcast::<Shared>().ok())
             .expect("the expander's state comes back");
         self.context = shared.context;
@@ -1408,7 +1408,6 @@ impl Expander {
                 let [form] = args else {
                     return Err(error(format!("{keyword}: expected one form"), span));
                 };
-                self.phase_only(keyword, span)?;
                 self.compiled.quoted.push(form.clone());
                 let index = number(self.compiled.quoted.len() - 1, span);
                 Ok(Expr::Call(
@@ -1424,16 +1423,15 @@ impl Expander {
 
     // syntax-case.
 
-    /// An error unless the code being expanded is a transformer's: syntax
-    /// objects exist only at phase 1 for now.
-    fn phase_only(&self, keyword: &str, span: Span) -> Result<()> {
-        if self.floors.is_empty() {
-            return Err(error(
-                format!("{keyword}: syntax objects at run time are not supported yet"),
-                span,
-            ));
+    /// The scopes, bindings and compiled syntax so far, for syntax objects
+    /// at run time (ADR 0015 #10).
+    pub(crate) fn syntax_data(&self) -> Shared {
+        Shared {
+            context: self.context.clone(),
+            table: self.table.clone(),
+            compiled: self.compiled.clone(),
+            origin: None,
         }
-        Ok(())
     }
 
     /// A local variable of the current `lambda` that no identifier names.
@@ -1450,7 +1448,6 @@ impl Expander {
     /// `(syntax-case input (literal ...) clause ...)`: the input in a
     /// hidden local, then each clause in turn.
     fn syntax_case(&mut self, keyword: &str, args: &[Syntax], span: Span) -> Result<Expr> {
-        self.phase_only(keyword, span)?;
         let [input, literals, clauses @ ..] = args else {
             return Err(error(
                 format!("{keyword}: expected an input, a list of literals and clauses"),
@@ -1602,7 +1599,6 @@ impl Expander {
     /// identifiers, so a template inside a nested `lambda` still sees its
     /// clause's variables.
     fn syntax_template(&mut self, keyword: &str, args: &[Syntax], span: Span) -> Result<Expr> {
-        self.phase_only(keyword, span)?;
         let [form] = args else {
             return Err(error(format!("{keyword}: expected one template"), span));
         };

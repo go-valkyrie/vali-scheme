@@ -1,7 +1,6 @@
 ;;; requirement: Symbols from syntax->datum are eq?
 ;;; found-in: Steel
 ;;; kind: scheme
-;;; expect: fail, needs syntax objects at run time, for #'x outside a transformer (M1)
 
 ;; In Steel, symbols produced by syntax->datum were not eq? to the same
 ;; symbols written literally, so memq silently failed where member worked.

@@ -563,7 +563,6 @@ fn transformer_errors() {
     );
     assert!(compile_error("(define-syntax bad (lambda (stx) car)) (bad)").contains("not syntax"));
     assert!(compile_error("(define-syntax bad 5) (bad)").contains("bad:"));
-    assert!(compile_error("(quote-syntax x)").contains("not supported yet"));
 }
 
 #[test]
@@ -699,7 +698,6 @@ fn syntax_case_errors() {
         )
         .contains("needs 1 ellipses")
     );
-    assert!(compile_error("(syntax-case 1 () (_ 1))").contains("not supported yet"));
 }
 
 #[test]
@@ -864,4 +862,33 @@ fn exceptions() {
         panic!("expected an error");
     };
     assert_eq!(e.message, "bad thing: x 42");
+}
+
+#[test]
+fn syntax_objects_at_run_time() {
+    check(&[
+        ("(syntax->datum #'(a (b) . c))", "(a (b) . c)"),
+        // The regression: symbols from syntax->datum are eq? to literals.
+        ("(eq? (syntax->datum #'x) 'x)", "#t"),
+        (
+            "(list (identifier? #'x) (identifier? #'(x)) (identifier? 5))",
+            "(#t #f #f)",
+        ),
+        ("#'(a b)", "#<syntax (a b)>"),
+        // syntax-case at run time.
+        ("(syntax-case #'(1 2) () ((a b) (syntax->datum #'b)))", "2"),
+        (
+            "(syntax->datum (syntax-case #'(f x y) () ((_ arg ...) #'(arg ... done))))",
+            "(x y done)",
+        ),
+        // Bindings resolve as where the syntax was written.
+        (
+            "(list (free-identifier=? #'car #'car) (free-identifier=? #'car #'cdr))",
+            "(#t #f)",
+        ),
+        (
+            "(syntax->datum (datum->syntax #'here '(made up)))",
+            "(made up)",
+        ),
+    ]);
 }

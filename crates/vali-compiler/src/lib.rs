@@ -63,6 +63,34 @@ pub struct Program {
     pub libraries: Vec<(Identity, Module)>,
     /// The program's body.
     pub body: Module,
+    /// What syntax objects at run time need, if the program or a library
+    /// uses them: [`load`] gives it to the isolate.
+    pub syntax: Option<SyntaxData>,
+}
+
+/// The scopes, bindings and compiled patterns and templates that syntax
+/// objects at run time need (ADR 0015 #10). Kept in memory for now: an
+/// isolate holds one program's at a time, and loading another replaces it.
+#[derive(Clone)]
+pub struct SyntaxData(phase::Shared);
+
+impl std::fmt::Debug for SyntaxData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SyntaxData")
+    }
+}
+
+/// Whether `module` calls the procedures syntax objects at run time use.
+fn uses_syntax(module: &Module) -> bool {
+    module.variables.iter().any(|v| {
+        v.link == vali_bytecode::Link::Global
+            && [
+                phase::QUOTE_SYNTAX,
+                phase::SYNTAX_MATCH,
+                phase::SYNTAX_BUILD,
+            ]
+            .contains(&&*v.name)
+    })
 }
 
 /// A loader with no libraries.
@@ -103,6 +131,13 @@ pub fn compile(source: &str, name: &str) -> Result<Module, CompileError> {
         vali_bytecode::Link::Imported(library) => Some(library),
         _ => None,
     });
+    if program.syntax.is_some() {
+        return Err(CompileError {
+            message: "the program uses syntax objects at run time: use compile_program and load"
+                .to_owned(),
+            span: None,
+        });
+    }
     if let Some(library) = linked {
         return Err(CompileError {
             message: format!(
@@ -163,7 +198,13 @@ fn build(
         program.implicit,
         &program.body,
     )?;
-    Ok(Program { libraries, body })
+    let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
+        .then(|| SyntaxData(expander.syntax_data()));
+    Ok(Program {
+        libraries,
+        body,
+        syntax,
+    })
 }
 
 /// Loads a compiled program into `cx`: each library not there already is
@@ -173,6 +214,10 @@ pub fn load<S: vali_runtime::Strategy>(
     cx: &mut vali_runtime::Cx<S>,
     program: Program,
 ) -> Result<vali_runtime::ModuleId, vali_runtime::Error> {
+    phase::install(cx)?;
+    if let Some(SyntaxData(shared)) = program.syntax {
+        cx.set_expander_data(Some(Box::new(shared)));
+    }
     for (identity, module) in program.libraries {
         if cx.library(identity.as_str()).is_some() {
             continue;

@@ -62,6 +62,10 @@ pub struct Cx<S: Strategy> {
     pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
     /// Data the host keeps here for its Rust procedures to reach.
     pub(crate) host_data: Option<Box<dyn std::any::Any + Send>>,
+    /// The expander's data, for the syntax procedures: its scopes and
+    /// bindings while a transformer runs, or a program's, for syntax
+    /// objects at run time.
+    pub(crate) expander_data: Option<Box<dyn std::any::Any + Send>>,
     /// The `%catch`es whose thunks are running, innermost last.
     pub(crate) catches: Vec<crate::vm::Catch>,
     /// The record type of error objects, made when first needed.
@@ -132,6 +136,7 @@ impl<S: Strategy> Cx<S> {
             tail_call: None,
             syntaxes: Vec::new(),
             host_data: None,
+            expander_data: None,
             catches: Vec::new(),
             error_object_type: None,
             values_type: None,
