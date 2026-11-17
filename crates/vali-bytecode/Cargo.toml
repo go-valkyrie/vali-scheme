@@ -1,0 +1,11 @@
+[package]
+name = "vali-bytecode"
+description = "Vali's run-format bytecode: instructions, encoding, a builder, the validator and a disassembler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
