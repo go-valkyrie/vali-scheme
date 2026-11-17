@@ -40,7 +40,9 @@ impl Walker<'_> {
             | Expr::Free(_)
             | Expr::Imported(..) => {}
             Expr::Local(v) => self.reference(*v, None, lambda, tail),
-            Expr::SetLocal(_, value) | Expr::SetGlobal(_, value) => self.walk(value, lambda, false),
+            Expr::SetLocal(_, value) | Expr::SetGlobal(_, value) | Expr::SetFree(_, value) => {
+                self.walk(value, lambda, false)
+            }
             Expr::If(c, t, f) => {
                 self.walk(c, lambda, false);
                 self.walk(t, lambda, tail);

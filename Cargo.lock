@@ -501,6 +501,14 @@ name = "vali-bytecode"
 version = "0.0.0"
 
 [[package]]
+name = "vali-cli"
+version = "0.0.0"
+dependencies = [
+ "vali-compiler",
+ "vali-runtime",
+]
+
+[[package]]
 name = "vali-compiler"
 version = "0.0.0"
 dependencies = [

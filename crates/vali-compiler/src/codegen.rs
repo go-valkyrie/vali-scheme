@@ -353,6 +353,12 @@ impl Generator<'_> {
                 f.b.emit(I::SetVariable { src, variable });
                 self.load(f, Constant::Unspecified, target)
             }
+            Expr::SetFree(name, value) => {
+                let src = self.value(f, value)?;
+                let variable = self.module.variable(name);
+                f.b.emit(I::SetVariable { src, variable });
+                self.load(f, Constant::Unspecified, target)
+            }
             Expr::If(c, t, e) => self.if_(f, c, t, e, target),
             Expr::Begin(es) => {
                 let (last, init) = es.split_last().expect("a non-empty begin");
@@ -732,7 +738,9 @@ impl Generator<'_> {
                     .or_else(|| find(b, v, lambdas))
                     .or_else(|| find(c, v, lambdas)),
                 Expr::Begin(es) => es.iter().find_map(|e| find(e, v, lambdas)),
-                Expr::SetLocal(_, e) | Expr::SetGlobal(_, e) => find(e, v, lambdas),
+                Expr::SetLocal(_, e) | Expr::SetGlobal(_, e) | Expr::SetFree(_, e) => {
+                    find(e, v, lambdas)
+                }
                 Expr::Call(c, args, _) => {
                     find(c, v, lambdas).or_else(|| args.iter().find_map(|a| find(a, v, lambdas)))
                 }

@@ -1,0 +1,19 @@
+[package]
+name = "vali-cli"
+description = "The vali command: Vali's REPL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vali"
+path = "src/main.rs"
+
+[dependencies]
+vali-compiler.workspace = true
+vali-runtime.workspace = true
+
+[lints]
+workspace = true

@@ -110,6 +110,9 @@ pub(crate) enum Binding {
     Primitive(String),
     /// A macro, by number.
     Macro(usize),
+    /// A REPL's top-level variable: the isolate's global of that name,
+    /// bound late, and never inlined.
+    Global(String),
     /// A `syntax-case` pattern variable: the hidden local holding what it
     /// matched, and its depth.
     PatternVar(VarId, usize),
@@ -141,6 +144,9 @@ enum Item {
     Global(String, Option<Syntax>),
     /// `(define id value)` in a body: a local variable.
     Local(VarId, Option<Syntax>),
+    /// `(define id value)` at a REPL's top level: an isolate global, by its
+    /// global name.
+    Repl(String, Option<Syntax>),
     Expr(Syntax),
 }
 
@@ -177,8 +183,19 @@ struct Unit {
     module: Option<Module>,
     /// Whether an unbound identifier is an error. It is in a library and
     /// in a program with imports; a program with none refers to the
-    /// isolate's globals by name, as a script or a REPL does.
+    /// isolate's globals by name, as a script does.
     strict: bool,
+    /// Whether it is a REPL's input, compiled in the interaction
+    /// environment: its top-level definitions are REPL globals, and an
+    /// unbound identifier names one.
+    repl: bool,
+}
+
+/// The isolate global a REPL's top-level `name` is. REPL globals have
+/// names of their own, so redefining `car` at the REPL cannot change the
+/// `car` libraries link to, which is the isolate's global `car`.
+pub(crate) fn repl_global(name: &str) -> String {
+    format!("repl:{name}")
 }
 
 pub(crate) struct Expander {
@@ -215,6 +232,11 @@ pub(crate) struct Expander {
     /// The native libraries the program imports, which the phase-1
     /// isolate registers, so their expansion-safe functions run there.
     natives: Vec<(String, std::sync::Arc<vali_runtime::NativeLibrary>)>,
+    /// The interaction environment's scope sets, once it is used: where
+    /// its imports are bound, and where its own definitions are, inside
+    /// those. Every REPL input uses the same ones, so what one defines the
+    /// next sees.
+    repl: Option<(ScopeSetId, ScopeSetId)>,
     /// The files bodies include, fetched with the import graph.
     includes: crate::loader::Includes,
 }
@@ -262,6 +284,7 @@ impl Expander {
             floors: Vec::new(),
             natives: Vec::new(),
             includes: crate::loader::Includes::new(),
+            repl: None,
         };
         Ok(expander)
     }
@@ -380,6 +403,7 @@ impl Expander {
             &form.body,
             &form.exports,
             form.span,
+            false,
         )
     }
 
@@ -407,10 +431,69 @@ impl Expander {
             let around = self.scope(ScopeKind::Library)?;
             let imported = self.context.intern(&[around]).map_err(too_many)?;
             let top = self.context.intern(&[around, scope]).map_err(too_many)?;
-            return self.unit(identity, imports, imported, top, body, &[], span);
+            return self.unit(identity, imports, imported, top, body, &[], span, false);
         }
         let top = self.context.intern(&[scope]).map_err(too_many)?;
-        self.unit(identity, imports, top, top, body, &[], span)
+        self.unit(identity, imports, top, top, body, &[], span, false)
+    }
+
+    /// Expands and compiles a REPL's input in the interaction environment
+    /// (R7RS 6.12's `interaction-environment`): `imports` bound around the
+    /// REPL's own definitions, which persist from one input to the next.
+    pub(crate) fn interaction(
+        &mut self,
+        identity: &str,
+        imports: &[ImportSet],
+        body: &[vali_syntax::Datum],
+    ) -> Result<Module> {
+        let span = body.first().map_or(
+            Span {
+                source: SourceId(0),
+                range: Default::default(),
+            },
+            |d| d.span,
+        );
+        let (imported, top) = match self.repl {
+            Some(scopes) => scopes,
+            None => {
+                let around = self.scope(ScopeKind::Library)?;
+                let scope = self.scope(ScopeKind::Library)?;
+                let imported = self.context.intern(&[around]).map_err(too_many)?;
+                let top = self.context.intern(&[around, scope]).map_err(too_many)?;
+                self.repl = Some((imported, top));
+                (imported, top)
+            }
+        };
+        // Imports bound before are bound again, which is a no-op.
+        self.unit(identity, imports, imported, top, body, &[], span, true)
+    }
+
+    /// Whether the unit being compiled is a REPL's input.
+    fn in_repl(&self) -> bool {
+        self.units.last().is_some_and(|u| u.repl)
+    }
+
+    /// `(define id ...)` at a REPL's top level: binds `id` to a REPL
+    /// global, replacing whatever it was bound to there, and returns the
+    /// global's name.
+    fn define_repl(&mut self, id: &Syntax) -> Result<String> {
+        let name = id
+            .as_identifier()
+            .ok_or_else(|| error("define: expected a name", id.span()))?;
+        let global = if id.scopes() == self.top {
+            repl_global(name)
+        } else {
+            self.fresh += 1;
+            repl_global(&format!("{name}~{}", self.fresh))
+        };
+        self.table.rebind(
+            &self.context,
+            name.to_owned(),
+            id.scopes(),
+            Phases::All,
+            Binding::Global(global.clone()),
+        );
+        Ok(global)
     }
 
     /// Expands `body` as a new unit whose forms carry `top`, with
@@ -429,6 +512,7 @@ impl Expander {
         body: &[vali_syntax::Datum],
         exports: &[ExportSpec],
         span: Span,
+        repl: bool,
     ) -> Result<Module> {
         let index = self.units.len();
         let imported_at = imported;
@@ -444,6 +528,7 @@ impl Expander {
             imports: imported,
             module: None,
             strict: imported_at == top,
+            repl,
         });
         self.top = top;
         for set in imports {
@@ -1206,7 +1291,18 @@ impl Expander {
                         .ok_or_else(|| error("define-syntax: expected a name", id.span()))?
                         .to_owned();
                     let m = self.transformer(spec, &name)?;
-                    self.bind(&id, Binding::Macro(m), "define-syntax")?;
+                    if top && self.in_repl() {
+                        // A REPL may define a name again, as anything.
+                        self.table.rebind(
+                            &self.context,
+                            name,
+                            id.scopes(),
+                            Phases::All,
+                            Binding::Macro(m),
+                        );
+                    } else {
+                        self.bind(&id, Binding::Macro(m), "define-syntax")?;
+                    }
                 }
                 Some((Binding::Core(Core::Define), parts)) => {
                     if definitions_end {
@@ -1217,7 +1313,9 @@ impl Expander {
                     }
                     let (id, value) = self.definition(&form, &parts)?;
                     let id = self.strip(&id, &use_sites)?;
-                    items.push(if top {
+                    items.push(if top && self.in_repl() {
+                        Item::Repl(self.define_repl(&id)?, value)
+                    } else if top {
                         Item::Global(self.define_global(&id)?, value)
                     } else {
                         Item::Local(self.bind_local(&id, "define")?, value)
@@ -1236,6 +1334,14 @@ impl Expander {
                             None => Expr::Unspecified,
                         };
                         Expr::SetGlobal(name, Box::new(value))
+                    }
+                    Item::Repl(global, value) => {
+                        let name = global.strip_prefix("repl:").unwrap_or(&global).to_owned();
+                        let value = match value {
+                            Some(v) => self.named(&v, &name)?,
+                            None => Expr::Unspecified,
+                        };
+                        Expr::SetFree(global, Box::new(value))
                     }
                     Item::Expr(e) => self.expr(&e)?,
                     Item::Local(..) => unreachable!("top-level definitions are global"),
@@ -1259,7 +1365,7 @@ impl Expander {
                     bindings.push((v, value));
                 }
                 Item::Expr(e) => exprs.push(e),
-                Item::Global(..) => unreachable!("body definitions are local"),
+                Item::Global(..) | Item::Repl(..) => unreachable!("body definitions are local"),
             }
         }
         if exprs.is_empty() {
@@ -1396,7 +1502,8 @@ impl Expander {
                     self.global_in_context(owner, &global, stx)?;
                     Ok(self.variable(owner, global))
                 }
-                Some(Binding::Primitive(name)) => Ok(Expr::Free(name)),
+                Some(Binding::Primitive(name) | Binding::Global(name)) => Ok(Expr::Free(name)),
+                None if self.in_repl() => Ok(Expr::Free(repl_global(name))),
                 None if self.units.last().is_some_and(|u| u.strict) => Err(error(
                     format!("{name} is not bound: is it imported?"),
                     stx.span(),
@@ -1531,6 +1638,14 @@ impl Expander {
                         }
                         let value = self.expr(value)?;
                         Ok(Expr::SetGlobal(global, Box::new(value)))
+                    }
+                    Some(Binding::Global(global)) => {
+                        let value = self.expr(value)?;
+                        Ok(Expr::SetFree(global, Box::new(value)))
+                    }
+                    None if self.in_repl() => {
+                        let value = self.expr(value)?;
+                        Ok(Expr::SetFree(repl_global(&name), Box::new(value)))
                     }
                     Some(Binding::Primitive(_)) => Err(error(
                         format!("{keyword}: {name} is imported, and cannot be assigned"),

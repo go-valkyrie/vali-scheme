@@ -22,9 +22,11 @@ mod library;
 mod loader;
 mod pattern;
 mod phase;
+mod repl;
 
 pub use library::{LibraryName, NamePart};
 pub use loader::{AsyncLoader, Identity, LoadError, Loader, Source};
+pub use repl::Repl;
 
 use std::fmt;
 

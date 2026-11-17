@@ -146,6 +146,31 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         Ok(())
     }
 
+    /// Binds `symbol` with `scopes` to `binding` at `phases`, replacing
+    /// whatever was bound with the same set at a phase in common: a REPL's
+    /// redefinitions.
+    pub fn rebind(
+        &mut self,
+        context: &ScopeContext,
+        symbol: S,
+        scopes: ScopeSetId,
+        phases: Phases,
+        binding: B,
+    ) {
+        let entries = self
+            .entries
+            .entry(symbol)
+            .or_default()
+            .entry(key(context, scopes))
+            .or_default();
+        entries.retain(|e| !(e.scopes == scopes && e.phases.overlaps(&phases)));
+        entries.push(Entry {
+            scopes,
+            phases,
+            binding,
+        });
+    }
+
     /// What `symbol` with `scopes` refers to at `phase`.
     pub fn resolve<Q>(
         &self,

@@ -272,6 +272,7 @@ const STANDARD: &[(&[&str], &str)] = &[
         include_str!("../lib/scheme/process-context.sld"),
     ),
     (&["scheme", "read"], include_str!("../lib/scheme/read.sld")),
+    (&["scheme", "repl"], include_str!("../lib/scheme/repl.sld")),
     (&["scheme", "time"], include_str!("../lib/scheme/time.sld")),
     (&["vali", "exit"], include_str!("../lib/vali/exit.sld")),
     (

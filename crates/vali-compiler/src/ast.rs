@@ -51,6 +51,8 @@ pub(crate) enum Expr {
     Imported(String, String),
     SetLocal(VarId, Box<Expr>),
     SetGlobal(String, Box<Expr>),
+    /// Sets the isolate's global of that name: a REPL's variable.
+    SetFree(String, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     /// At least one expression.
     Begin(Vec<Expr>),

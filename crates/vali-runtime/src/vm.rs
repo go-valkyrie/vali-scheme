@@ -1924,6 +1924,8 @@ impl<S: Strategy> Cx<S> {
                                 };
                                 let loaded: &Loaded<S> = &*module;
                                 let name = &loaded.module.variables[index].name;
+                                // A REPL global is named by its REPL name.
+                                let name = name.strip_prefix("repl:").unwrap_or(name);
                                 fail!(Error::scheme(format!("unbound variable: {name}")));
                             }
                             self.store(fp, a, value);
