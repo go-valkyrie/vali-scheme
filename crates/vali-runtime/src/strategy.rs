@@ -53,8 +53,21 @@ pub unsafe trait Allocate: Sized + Send + Sync + 'static {
     ) -> Result<NonNull<u64>, OutOfMemory>;
 }
 
+/// References the runtime holds on objects outside the heap, such as a
+/// task's root slots for Rust handles (ADR 0003). A counting strategy counts
+/// them; the defaults do nothing.
+pub trait References: Allocate {
+    /// The runtime now holds one more reference to `v`, a heap object.
+    #[inline(always)]
+    fn retain(_mutator: &mut Self::Mutator, _v: crate::Value) {}
+
+    /// The runtime has dropped one reference to `v`, a heap object.
+    #[inline(always)]
+    fn release(_mutator: &mut Self::Mutator, _v: crate::Value) {}
+}
+
 /// A memory strategy: every capability trait together.
-pub trait Strategy: Allocate {
+pub trait Strategy: Allocate + References {
     /// The strategy's name, as `vali build -m` spells it.
     const NAME: &'static str;
 }

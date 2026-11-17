@@ -7,7 +7,7 @@ use std::ptr::NonNull;
 use vali_abi::StrategyLayout;
 
 use crate::page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PageSource};
-use crate::strategy::{Allocate, Space, Strategy};
+use crate::strategy::{Allocate, References, Space, Strategy};
 
 /// Allocate, never reclaim.
 #[derive(Clone, Copy, Debug, Default)]
@@ -55,6 +55,8 @@ unsafe impl Allocate for NoCollection {
         buffer.allocate(heap, bytes)
     }
 }
+
+impl References for NoCollection {}
 
 impl Strategy for NoCollection {
     const NAME: &'static str = "none";

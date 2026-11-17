@@ -38,6 +38,8 @@ unsafe impl Allocate for Headered {
     }
 }
 
+impl vali_runtime::References for Headered {}
+
 impl Strategy for Headered {
     const NAME: &'static str = "test-headered";
 }
@@ -50,7 +52,7 @@ fn lists_and_pairs<S: Strategy>() {
     let mut task = task::<S>();
     let mut list = Value::EMPTY_LIST;
     for i in 0..100_000 {
-        list = unsafe { task.cons(Value::fixnum(i).unwrap(), list) }.unwrap();
+        list = unsafe { task.cons_raw(Value::fixnum(i).unwrap(), list) }.unwrap();
         assert_eq!(list.tag(), Tag::Pair);
     }
     let mut expected = 100_000;
@@ -64,7 +66,7 @@ fn lists_and_pairs<S: Strategy>() {
     }
     assert_eq!(sum, (0..100_000).sum::<i64>());
 
-    let pair = unsafe { task.cons(Value::TRUE, Value::FALSE) }.unwrap();
+    let pair = unsafe { task.cons_raw(Value::TRUE, Value::FALSE) }.unwrap();
     unsafe {
         task.set_car(pair, Value::character('x'));
         task.set_cdr(pair, Value::EMPTY_LIST);
@@ -91,27 +93,27 @@ fn lists_with_pair_headers() {
 #[test]
 fn pairs_fill_pages_densely() {
     let mut task = task::<NoCollection>();
-    let first = unsafe { task.cons(Value::TRUE, Value::TRUE) }.unwrap();
-    let second = unsafe { task.cons(Value::TRUE, Value::TRUE) }.unwrap();
+    let first = unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
+    let second = unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     assert_eq!(second.address() - first.address(), 16, "two words per pair");
     assert_eq!(first.address() % PAGE_BYTES as u64, 0, "a fresh page");
     let used = task.heap().state().bytes_used();
     for _ in 0..(PAGE_BYTES / 16) {
-        unsafe { task.cons(Value::TRUE, Value::TRUE) }.unwrap();
+        unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     }
     assert_eq!(task.heap().state().bytes_used(), used + PAGE_BYTES);
 }
 
 fn flonums_and_vectors<S: Strategy>() {
     let mut task = task::<S>();
-    let x = task.flonum(-0.0).unwrap();
+    let x = task.flonum_raw(-0.0).unwrap();
     assert_eq!(x.tag(), Tag::Flonum);
     assert!(unsafe { task.flonum_value(x) }.to_bits() == (-0.0f64).to_bits());
-    let nan = task.flonum(f64::NAN).unwrap();
+    let nan = task.flonum_raw(f64::NAN).unwrap();
     assert!(unsafe { task.flonum_value(nan) }.is_nan());
 
     for len in [0, 1, 7, 10_000] {
-        let v = unsafe { task.make_vector(len, Value::UNSPECIFIED) }.unwrap();
+        let v = unsafe { task.make_vector_raw(len, Value::UNSPECIFIED) }.unwrap();
         assert_eq!(v.tag(), Tag::Other);
         unsafe {
             assert_eq!(task.vector_length(v), len);
@@ -142,7 +144,7 @@ fn flonums_and_vectors_headered() {
 fn strings_are_utf8() {
     let mut task = task::<NoCollection>();
     for (text, ascii) in [("", true), ("hello", true), ("héllo, λ 🦀", false)] {
-        let s = task.string(text, false).unwrap();
+        let s = task.string_raw(text, false).unwrap();
         assert_eq!(s.tag(), Tag::String);
         unsafe {
             assert_eq!(task.string_str(s), text);
@@ -152,11 +154,11 @@ fn strings_are_utf8() {
             assert_eq!(header.data() & data::IMMUTABLE, 0);
         }
     }
-    let literal = task.string("x", true).unwrap();
+    let literal = task.string_raw("x", true).unwrap();
     let header = unsafe { task.header(literal, TypeCode::String) }.unwrap();
     assert_ne!(header.data() & data::IMMUTABLE, 0);
 
-    let bytes = task.bytevector(&[1, 2, 3, 255]).unwrap();
+    let bytes = task.bytevector_raw(&[1, 2, 3, 255]).unwrap();
     assert_eq!(unsafe { task.bytevector_bytes(bytes) }, &[1, 2, 3, 255]);
 }
 
@@ -167,13 +169,13 @@ fn the_heap_limit_is_enforced() {
     });
     let mut task = Task::new(heap);
     let mut pairs = 0;
-    while unsafe { task.cons(Value::TRUE, Value::TRUE) }.is_ok() {
+    while unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.is_ok() {
         pairs += 1;
     }
     assert_eq!(pairs, 2 * PAGE_BYTES / 16);
     // Large objects count against the same limit.
     assert_eq!(
-        unsafe { task.make_vector(10_000, Value::TRUE) }.unwrap_err(),
+        unsafe { task.make_vector_raw(10_000, Value::TRUE) }.unwrap_err(),
         OutOfMemory
     );
 }
