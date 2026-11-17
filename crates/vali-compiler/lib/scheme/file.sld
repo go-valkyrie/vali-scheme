@@ -1,7 +1,9 @@
 ;;; (scheme file): files (R7RS 6.13). Files are not ambient authority
 ;;; (ADR 0009 #5 and #6): importing this library always succeeds, but each
-;;; procedure needs the file capability, which no evaluation is given yet,
-;;; so it raises a condition saying so.
+;;; procedure needs the file capability, which Vali's own version of this
+;;; library is never given, so it raises a condition saying so. A host that
+;;; grants it serves its own (scheme file) through its loader, which Vali
+;;; consults first for this library.
 
 (define-library (scheme file)
   (import (scheme base))

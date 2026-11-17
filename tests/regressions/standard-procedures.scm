@@ -1,7 +1,6 @@
 ;;; requirement: Standard procedures present
 ;;; found-in: Steel, scheme-rs
 ;;; kind: scheme
-;;; expect: fail, needs the standard library (M2)
 
 ;; Between them, Steel and scheme-rs lacked list-sort, command-line, string
 ;; output ports, keyword? and get-environment-variable. The test host grants

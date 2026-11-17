@@ -271,6 +271,8 @@ const STANDARD: &[(&[&str], &str)] = &[
         include_str!("../lib/scheme/process-context.sld"),
     ),
     (&["scheme", "read"], include_str!("../lib/scheme/read.sld")),
+    (&["scheme", "time"], include_str!("../lib/scheme/time.sld")),
+    (&["vali", "exit"], include_str!("../lib/vali/exit.sld")),
     (
         &["scheme", "write"],
         include_str!("../lib/scheme/write.sld"),
@@ -280,8 +282,6 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["srfi", "132"], include_str!("../lib/srfi/132.sld")),
 ];
 
-/// The source of the standard library `name`, if it is one: Scheme
-/// source, or one of Vali's own native libraries.
 /// Whether `name` is one of Vali's own libraries.
 pub(crate) fn is_standard(name: &LibraryName) -> bool {
     library::is_builtin(name)
@@ -291,6 +291,25 @@ pub(crate) fn is_standard(name: &LibraryName) -> bool {
             .any(|(parts, _)| *name == LibraryName::new(parts.iter().copied()))
 }
 
+/// The libraries that reach outside the program, which a host serves
+/// itself to grant what they need: a host's loader is asked for these
+/// first, and Vali's own versions, which have nothing, serve otherwise
+/// (ADR 0009 #6).
+const HOST_SERVED: &[&[&str]] = &[
+    &["scheme", "file"],
+    &["scheme", "process-context"],
+    &["scheme", "time"],
+];
+
+/// Whether a host's loader may serve `name` in place of Vali's own.
+fn is_host_served(name: &LibraryName) -> bool {
+    HOST_SERVED
+        .iter()
+        .any(|parts| *name == LibraryName::new(parts.iter().copied()))
+}
+
+/// The source of the standard library `name`, if it is one: Scheme
+/// source, or one of Vali's own native libraries.
 fn standard(name: &LibraryName) -> Option<Source> {
     if *name == LibraryName::new(["vali", "ports"]) {
         return Some(Source::native(
@@ -696,7 +715,8 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
         if by_name.contains_key(&name) || library::is_builtin(&name) {
             continue;
         }
-        // Standard libraries come first, so no loader can replace them.
+        // Standard libraries come first, so no loader can replace them,
+        // except those a host serves to grant what they need.
         let (library_identity, form, native) = match local.get(&name) {
             Some(form) => (
                 Identity::new(&format!("{identity}#{name}")),
@@ -704,13 +724,15 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
                 None,
             ),
             None => {
-                let source = match standard(&name) {
-                    Some(source) => Some(source),
-                    None => loader
+                let fetched = if is_host_served(&name) || standard(&name).is_none() {
+                    loader
                         .fetch(&name, importer.as_ref())
                         .await
-                        .map_err(|e| error(format!("{name}: {e}"), None))?,
+                        .map_err(|e| error(format!("{name}: {e}"), None))?
+                } else {
+                    None
                 };
+                let source = fetched.or_else(|| standard(&name));
                 let source = source.ok_or_else(|| {
                     let by = importer
                         .as_ref()

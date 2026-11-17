@@ -36,6 +36,10 @@ pub enum Error {
     },
     /// An index is out of range.
     OutOfRange,
+    /// Scheme code called `exit` or `emergency-exit`: the run ended, with
+    /// this exit code, which the host may pass on or not. Scheme code
+    /// cannot catch it.
+    Exit(i32),
     /// Scheme code raised an error. Until Scheme has conditions, errors
     /// unwind to the host with a backtrace.
     Scheme(Box<SchemeError>),
@@ -108,7 +112,7 @@ impl Error {
     pub(crate) fn reaches_handlers(&self) -> bool {
         match self {
             Error::Scheme(e) => !e.escaping,
-            Error::OutOfMemory => false,
+            Error::OutOfMemory | Error::Exit(_) => false,
             _ => true,
         }
     }
@@ -123,6 +127,7 @@ impl fmt::Display for Error {
             ),
             Error::WrongType { expected } => write!(f, "expected {expected}"),
             Error::OutOfRange => f.write_str("index out of range"),
+            Error::Exit(code) => write!(f, "the program exited with code {code}"),
             Error::Scheme(e) => {
                 f.write_str(&e.message)?;
                 for name in &e.backtrace {

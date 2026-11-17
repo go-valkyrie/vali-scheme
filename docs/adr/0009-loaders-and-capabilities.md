@@ -7,6 +7,7 @@
 - **Amended:** 2026-11-16, loaders may serve distribution artifacts instead of source (ADR 0012)
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
 - **Amended:** 2026-11-17, the synchronous and asynchronous loader traits, and fetching the import graph before expansion (item 1)
+- **Amended:** 2026-11-17, until the capability API exists, a host grants what a library that reaches outside needs by serving that library itself; `include` reads through the loader; `exit` ends the run (items 6 and 8)
 - **Related:** 0001 (cache validity), 0003 (memory limit), 0005 (untrusted bytecode), 0006 (native code), 0008 (isolates)
 
 ## Context
@@ -38,11 +39,17 @@ In each of these, a read nobody registered leaves a stale cache, with no error.
 
 5. **File, network, environment, clock and randomness access are objects the host grants** to an evaluation. Code that wasn't given one can't reach it. Nothing in Vali has ambient authority.
 6. **Standard libraries that reach outside the program are instantiated with the evaluation's capabilities.** These are `(scheme file)`, `(scheme process-context)`, `(scheme time)` and `(scheme load)`. Importing them always succeeds. An operation without the capability it needs raises a condition that names the missing capability.
+
+   **Until the capability API exists (M2), hosts serve these libraries.** For `(scheme file)`, `(scheme process-context)` and `(scheme time)`, compiling asks the host's loader first; Vali's own versions serve otherwise, and every operation in them raises a condition naming the capability it lacks. A host grants a capability by serving the library over a native library of its own (ADR 0016), as the test harness does for process-context. No other standard library can be replaced this way. `(jiffies-per-second)` is a constant, so it reads no clock and needs nothing.
+
+   **Ending a run needs no capability:** it reaches nothing outside the program. `exit` runs every outstanding after thunk and then ends the current host call with `Error::Exit(code)`; `emergency-exit` does not run them. Neither ends the process, which is the host's to decide, and no handler or `guard` can stop either. They come from `(vali exit)`, which Vali's `(scheme process-context)` re-exports and a host's can too.
 7. **Capabilities can be narrowed:** file access to some directories or to reading only, environment access to some variable names.
 
 ### Expansion time
 
 8. **Expansion-time access uses the same mechanism,** with its own set of capabilities, separate from run time. A loader can attach a capability to each library it serves, such as read access to that library's own directory or package, so `include` works without granting more.
+
+   **As built, `include` reads through the loader:** `Loader::include(path, from)` returns the text of a file the library or program `from` includes, or `None` if `from` may not read it, which is the default. The host decides what each identity may read. `include`, `include-ci` and `include-library-declarations` declarations are resolved while the import graph is fetched, and the files bodies include literally, nested includes too, are fetched then as well, so the expander never awaits and reads each file once (item 13). An `include` only a macro writes is not fetched, and is an error.
 9. **Expansion-time access is read-only.** A file written during expansion would not be written again when the cached artifact is reused. Generating files is a build tool's job.
 10. **Every expansion-time read is recorded** in the fingerprint of the library being expanded (ADR 0001), whichever library's macro made the read. Three kinds of access count as reads:
     - the contents of a file;
@@ -97,7 +104,8 @@ In each of these, a read nobody registered leaves a stale cache, with no error.
 
 ## Left open
 
-- The exact Rust signatures of the loader and capability traits, as part of milestone M2.
+- The capability API, as part of milestone M2, replacing hosts serving their own versions of the standard libraries.
+- Recording expansion-time reads in fingerprints (item 10), once artifacts are cached.
 - Whether, and how, Scheme code can hold and pass capabilities explicitly in object-capability style, beyond those the standard libraries use.
 - Signing and verifying artifacts that come from remote sources.
 - How the bridge API spells the expansion-safe marking and an explicit version (for example `#[bridge(expansion_safe, version = "2")]`). This belongs with the rest of the bridge API in milestone M2.

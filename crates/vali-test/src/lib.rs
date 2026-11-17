@@ -91,7 +91,8 @@ impl Backend for Evaluate {
             return Outcome::Unsupported(format!("cannot run {:?} tests yet", header.kind));
         }
         let identity = vali_compiler::Identity::new(&file.name);
-        let program = match vali_compiler::compile_program(&file.source, &identity, &NoLibraries) {
+        let host = TestHost::new(&file.name);
+        let program = match vali_compiler::compile_program(&file.source, &identity, &host) {
             Ok(program) => program,
             Err(e) => return Outcome::Failed(format!("compiling: {e}")),
         };
@@ -107,16 +108,67 @@ impl Backend for Evaluate {
     }
 }
 
-/// Test files import only the standard libraries.
-struct NoLibraries;
+/// The host tests run in: besides the standard libraries, it grants the
+/// process-context capability, by serving its own (scheme process-context)
+/// over (vali-test process), a native library reading the process (ADR
+/// 0009 #6). The command line is `vali-test` and the test's name.
+struct TestHost {
+    process: Arc<vali_runtime::NativeLibrary>,
+}
 
-impl vali_compiler::Loader for NoLibraries {
+/// The test host's (scheme process-context).
+const PROCESS_CONTEXT: &str = "
+(define-library (scheme process-context)
+  (import (scheme base) (vali exit) (prefix (vali-test process) %))
+  (export command-line get-environment-variable get-environment-variables
+          exit emergency-exit)
+  (begin
+    (define (command-line) (%command-line))
+    (define (get-environment-variable name) (%get-environment-variable name))
+    (define (get-environment-variables)
+      (map (lambda (p) (cons (car p) (cadr p))) (%get-environment-variables)))))";
+
+impl TestHost {
+    fn new(test: &str) -> TestHost {
+        let command_line = vec!["vali-test".to_owned(), test.to_owned()];
+        let process = vali_runtime::NativeLibrary::new(&["vali-test", "process"])
+            .function("command-line", move || command_line.clone())
+            .function("get-environment-variable", |name: String| {
+                std::env::var(name).ok()
+            })
+            .function("get-environment-variables", || {
+                std::env::vars()
+                    .map(|(name, value)| vec![name, value])
+                    .collect::<Vec<_>>()
+            });
+        TestHost {
+            process: Arc::new(process),
+        }
+    }
+}
+
+impl vali_compiler::Loader for TestHost {
     fn load(
         &self,
-        _name: &vali_compiler::LibraryName,
+        name: &vali_compiler::LibraryName,
         _importer: Option<&vali_compiler::Identity>,
     ) -> Result<Option<vali_compiler::Source>, vali_compiler::LoadError> {
-        Ok(None)
+        use vali_compiler::{Identity, LibraryName, Source};
+        Ok(
+            if *name == LibraryName::new(["scheme", "process-context"]) {
+                Some(Source::scheme(
+                    Identity::new("vali-test:scheme/process-context"),
+                    PROCESS_CONTEXT,
+                ))
+            } else if *name == LibraryName::new(["vali-test", "process"]) {
+                Some(Source::native(
+                    Identity::new("vali-test:process"),
+                    Arc::clone(&self.process),
+                ))
+            } else {
+                None
+            },
+        )
     }
 }
 

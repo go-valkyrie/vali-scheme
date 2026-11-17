@@ -1384,8 +1384,13 @@ impl<S: Strategy> Cx<S> {
                     Next::Raise(error) => {
                         // Unwind to the innermost `%catch` and call its
                         // handler with the condition in place of the `%catch`
-                        // call; with none, return the error to the host.
-                        let Some(catch) = self.catches.pop() else {
+                        // call; with none, or for an exit, return the error
+                        // to the host.
+                        let catch = match error {
+                            Error::Exit(_) => None,
+                            _ => self.catches.pop(),
+                        };
+                        let Some(catch) = catch else {
                             if fp == top {
                                 self.release_slots(top, 3, 3 + frame_slots);
                                 return Err(error);

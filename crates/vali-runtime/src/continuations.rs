@@ -314,7 +314,24 @@ pub(crate) fn dynamic_table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn
             set::<S, PARAMETERIZATION>,
         ),
         ("%set-raise-handler!", Arity::exactly(1), set_raise_handler),
+        ("%exit", Arity::exactly(1), exit),
     ]
+}
+
+/// `(%exit obj)`: ends the run, which no `%catch` stops, with the exit code
+/// `obj` stands for (R7RS 6.14): 0 for `#t`, 1 for `#f` or anything else
+/// that is not a small exact integer. (vali exit) runs the after thunks
+/// first.
+fn exit<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let code = match args[0].as_boolean() {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => args[0]
+            .as_fixnum()
+            .and_then(|n| i32::try_from(n).ok())
+            .unwrap_or(1),
+    };
+    Err(Error::Exit(code))
 }
 
 /// `(%set-raise-handler! raise)`: makes `raise`, a Scheme procedure of one

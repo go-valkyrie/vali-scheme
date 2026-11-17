@@ -1801,6 +1801,151 @@ fn including_files() {
     assert!(error.contains("may not read defs.scm"), "{error}");
 }
 
+/// Serves its own (scheme time), as a host granting the clock would, and a
+/// (scheme base) that must be ignored.
+struct Clock;
+
+impl Loader for Clock {
+    fn load(
+        &self,
+        name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        Ok(if *name == LibraryName::new(["scheme", "time"]) {
+            Some(Source::scheme(
+                Identity::new("host:time"),
+                "(define-library (scheme time)
+                   (import (scheme base))
+                   (export current-second current-jiffy jiffies-per-second)
+                   (begin
+                     (define (current-second) 1.5)
+                     (define (current-jiffy) 7)
+                     (define (jiffies-per-second) 1000)))",
+            ))
+        } else if *name == LibraryName::new(["scheme", "base"]) {
+            Some(Source::scheme(
+                Identity::new("host:base"),
+                "(define-library (scheme base) (export) (begin))",
+            ))
+        } else {
+            None
+        })
+    }
+}
+
+/// Runs `source` with `loader` under every strategy, which must agree.
+fn run_loaded(source: &str, loader: &impl Loader) -> Result<String, Error> {
+    fn under<S: Strategy>(source: &str, loader: &impl Loader) -> Result<String, Error> {
+        let program = vali_compiler::compile_program(source, &Identity::new("test"), loader)
+            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        cx.install_primitives()?;
+        let id = vali_compiler::load(&mut cx, program)?;
+        let result = cx.run(id)?;
+        cx.write_string(&result)
+    }
+    let result = under::<NoCollection>(source, loader);
+    assert_eq!(
+        under::<DeferredHeadered>(source, loader),
+        result,
+        "{source}"
+    );
+    assert_eq!(
+        under::<PreciseSideCounts>(source, loader),
+        result,
+        "{source}"
+    );
+    result
+}
+
+#[test]
+fn exiting() {
+    let prelude = "(import (scheme base) (scheme process-context))";
+    let cases = [
+        ("(exit)", 0),
+        ("(exit #t)", 0),
+        ("(exit #f)", 1),
+        ("(exit 7)", 7),
+        ("(exit 'other)", 1),
+        // No handler or guard stops it.
+        ("(guard (e (#t 'caught)) (exit 4))", 4),
+        (
+            "(with-exception-handler (lambda (e) 'handled) (lambda () (exit 5)))",
+            5,
+        ),
+        ("(emergency-exit 6)", 6),
+    ];
+    for (source, code) in cases {
+        let source = format!("{prelude}{source}");
+        assert_eq!(
+            run_loaded(&source, &NoLibraries),
+            Err(Error::Exit(code)),
+            "{source}"
+        );
+    }
+    // exit runs the after thunks, innermost first; emergency-exit does not.
+    let log = |exit: &str| {
+        let source = format!(
+            "{prelude}
+             (define log '())
+             (define (note x) (set! log (cons x log)))
+             (define (run)
+               (dynamic-wind (lambda () #f)
+                             (lambda ()
+                               (dynamic-wind (lambda () #f)
+                                             (lambda () ({exit} 0))
+                                             (lambda () (note 'inner))))
+                             (lambda () (note 'outer))))"
+        );
+        let program =
+            vali_compiler::compile_program(&source, &Identity::new("test"), &NoLibraries).unwrap();
+        let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let run = cx.variable(id, "run").unwrap();
+        assert_eq!(cx.call(&run, &[]).err(), Some(Error::Exit(0)));
+        let log = cx.variable(id, "log").unwrap();
+        cx.write_string(&log).unwrap()
+    };
+    assert_eq!(log("exit"), "(outer inner)");
+    assert_eq!(log("emergency-exit"), "()");
+}
+
+#[test]
+fn libraries_that_reach_outside() {
+    // Vali's own versions have no capability.
+    let error = |source: &str| match run_loaded(source, &NoLibraries) {
+        Ok(result) => panic!("{source}: expected an error, got {result}"),
+        Err(e) => e.to_string(),
+    };
+    let message = error("(import (scheme base) (scheme process-context)) (command-line)");
+    assert!(
+        message.contains("command-line: needs the process-context capability"),
+        "{message}"
+    );
+    let message = error("(import (scheme base) (scheme time)) (current-second)");
+    assert!(
+        message.contains("current-second: needs the clock capability"),
+        "{message}"
+    );
+    assert_eq!(
+        run_loaded(
+            "(import (scheme base) (scheme time)) (jiffies-per-second)",
+            &NoLibraries
+        ),
+        Ok("1000000".to_owned())
+    );
+    // A host serves its own, which wins; it cannot replace (scheme base).
+    assert_eq!(
+        run_loaded(
+            "(import (scheme base) (scheme time)) (list (current-second) (current-jiffy) (+ 1 2))",
+            &Clock
+        ),
+        Ok("(1.5 7 3)".to_owned())
+    );
+}
+
 #[test]
 fn console_ports() {
     let program = vali_compiler::compile_program(
