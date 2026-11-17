@@ -2,7 +2,8 @@
 
 use vali_compiler::{Identity, LibraryName, LoadError, Loader, Source, compile};
 use vali_runtime::{
-    Cx, DeferredHeadered, DeferredSideCounts, Error, HeapConfig, NoCollection, Strategy,
+    Cx, DeferredHeadered, DeferredHeap, DeferredSideCounts, Error, HeapConfig, NoCollection,
+    Strategy,
 };
 
 /// Only the standard libraries.
@@ -19,7 +20,8 @@ impl Loader for NoLibraries {
 }
 
 /// Compiles and runs `source` under strategy `S`, returning its value as
-/// `write` prints it.
+/// `write` prints it. A collection runs before it is printed, so whatever
+/// only the result's handle keeps, cycles included, must survive it.
 fn run_under<S: Strategy>(source: &str) -> Result<String, Error> {
     let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
         .unwrap_or_else(|e| panic!("{source}\n{e}"));
@@ -27,6 +29,7 @@ fn run_under<S: Strategy>(source: &str) -> Result<String, Error> {
     cx.install_primitives()?;
     let id = vali_compiler::load(&mut cx, program)?;
     let result = cx.run(id)?;
+    cx.collect_garbage();
     cx.write_string(&result)
 }
 
@@ -943,6 +946,65 @@ fn bytes_after<S: Strategy>(source: &str) -> usize {
     let id = vali_compiler::load(&mut cx, program).unwrap();
     cx.run(id).unwrap();
     cx.bytes_used()
+}
+
+/// Makes garbage cycles of every kind, 50,000 times: pairs through
+/// `set-cdr!`, a vector and a closure that refer to each other, and
+/// procedures that call each other. One cycle lives in a variable and
+/// another only in a frame, through cycle collections.
+const CYCLES: &str = "
+    (define (ring)
+      (let ((p (list 1 2 3)))
+        (set-cdr! (cdr (cdr p)) p)
+        p))
+    (define (knot)
+      (let ((v (make-vector 1 #f)))
+        (vector-set! v 0 (lambda () v))
+        v))
+    (define (parity)
+      (letrec ((ev? (lambda (n) (if (= n 0) #t (od? (- n 1)))))
+               (od? (lambda (n) (if (= n 0) #f (ev? (- n 1))))))
+        ev?))
+    (define keep (ring))
+    (define (churn n)
+      (let ((held (knot)))
+        (let loop ((i 0) (total 0))
+          (if (= i n)
+              (list total (eq? ((vector-ref held 0)) held))
+              (let ((r (ring)) (k (knot)) (e (parity)))
+                (loop (+ i 1)
+                      (+ total (car r)
+                         (if (eq? ((vector-ref k 0)) k) 1 0)
+                         (if (e 4) 1 0))))))))
+    (list (churn 50000) (car keep) (car (cdr (cdr (cdr keep)))))";
+
+#[test]
+fn cycles_are_collected() {
+    check(&[(CYCLES, "((150000 #t) 1 1)")]);
+    fn live_after<S: Strategy<Heap = DeferredHeap>>(source: &str) -> (usize, usize) {
+        let program =
+            vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let before = cx.heap().bytes_live();
+        cx.collect_garbage();
+        (before, cx.heap().bytes_live())
+    }
+    for (name, (before, after)) in [
+        ("deferred", live_after::<DeferredHeadered>(CYCLES)),
+        ("deferred-side", live_after::<DeferredSideCounts>(CYCLES)),
+    ] {
+        // Collections mid-program keep the heap near their 4 MiB
+        // threshold, and a last one leaves only what the program's
+        // variables and the runtime keep: about 2 KiB.
+        assert!(
+            before < 8 << 20,
+            "{name}: {before} bytes live before the last collection"
+        );
+        assert!(after < 64 << 10, "{name}: {after} bytes live after it");
+    }
 }
 
 #[test]

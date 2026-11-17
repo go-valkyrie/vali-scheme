@@ -5,14 +5,26 @@
 //! the next epoch, which counts the stack's references in, frees what is
 //! still at zero, and counts them out again.
 //!
+//! Cycles of garbage are found by trial deletion (`cycles`), inside an
+//! epoch while the stack's references are counted in, once the isolate has
+//! allocated as much as was live after the last collection. Its candidates
+//! are the objects whose count dropped but not to zero, including when an
+//! epoch counts the stack's references out, and the objects that leave the
+//! zero-count table still referred to. A new object starts out referred to
+//! only by the stack, so if it is then closed into a cycle and dropped
+//! between epochs, nothing ever counts it down.
+//!
 //! An object's count lives in the strategy's half of its header word (ADR
-//! 0002 #7). With side counts, a pair has no header: its count is a byte in
-//! its page's side table, sticky at 255, and its flags another byte.
+//! 0002 #7), with its colour and flags. With side counts, a pair has no
+//! header: its count is a byte in its page's side table, sticky at 255, and
+//! its colour and flags another byte. An object with a sticky count is never
+//! freed.
 
 use std::ptr::NonNull;
 
 use vali_abi::StrategyLayout;
 
+use crate::cycles::{Colour, Counted, Cycles, Describe};
 use crate::page::{HeapConfig, OutOfMemory, PageSource};
 use crate::page_heap::PageHeap;
 use crate::strategy::{Allocate, References, Space, Strategy};
@@ -32,6 +44,9 @@ pub type DeferredSideCounts = Deferred<true>;
 /// How much an isolate allocates between epochs.
 const EPOCH_BYTES: usize = 1 << 20;
 
+/// How much an isolate allocates between cycle collections, at least.
+const CYCLE_BYTES: usize = 4 << 20;
+
 /// A heap under deferred counting.
 #[derive(Debug)]
 pub struct DeferredHeap {
@@ -41,6 +56,15 @@ pub struct DeferredHeap {
     zct: Vec<Value>,
     /// Bytes allocated since the last epoch.
     since: usize,
+    /// The cycle collector's candidates and work lists.
+    cycles: Cycles,
+    /// Bytes allocated before this epoch since the last cycle collection.
+    cycle_bytes: usize,
+    /// How many bytes allocated make a cycle collection due: what was live
+    /// after the last.
+    cycle_threshold: usize,
+    /// How many candidates the last epoch left, which it swept.
+    swept: usize,
 }
 
 impl DeferredHeap {
@@ -49,16 +73,29 @@ impl DeferredHeap {
     pub fn bytes_live(&self) -> usize {
         self.pages.bytes_live()
     }
+
+    /// How many cycle candidates wait for the next collection.
+    pub fn cycle_candidates(&self) -> usize {
+        self.cycles.candidates()
+    }
 }
 
-/// In the header's strategy half: the count, and the zero-count table's
-/// flag.
+/// In the header's strategy half: the count, the colour, the cycle
+/// buffer's flag and the zero-count table's flag.
 const COUNT: u32 = (1 << 28) - 1;
+const COLOUR_SHIFT: u32 = 28;
+const BUFFERED: u32 = 1 << 30;
 const IN_ZCT: u32 = 1 << 31;
 
-/// In a side table: a pair's count, sticky at this, and its flags.
+/// In a side table: a pair's count, sticky at this, and its flags byte:
+/// the zero-count table's flag, the colour and the cycle buffer's flag.
 const STICKY: u8 = u8::MAX;
 const SIDE_IN_ZCT: u8 = 1;
+const SIDE_COLOUR_SHIFT: u8 = 1;
+const SIDE_BUFFERED: u8 = 1 << 3;
+
+/// What `count_down` returns for a sticky count.
+const STUCK: usize = usize::MAX;
 
 impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
     fn side(v: Value) -> bool {
@@ -112,18 +149,24 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
     }
 
     fn set_in_zct(v: Value, on: bool) {
+        Self::set_flag(v, IN_ZCT, SIDE_IN_ZCT, on);
+    }
+
+    /// Sets or clears a flag: `flag` in a header, `side_flag` in a side
+    /// table.
+    fn set_flag(v: Value, flag: u32, side_flag: u8, on: bool) {
         // SAFETY: as above.
         unsafe {
             if Self::side(v) {
                 let flags = Self::side_bytes(v).1;
                 *flags = if on {
-                    *flags | SIDE_IN_ZCT
+                    *flags | side_flag
                 } else {
-                    *flags & !SIDE_IN_ZCT
+                    *flags & !side_flag
                 };
             } else {
                 let half = Self::half(v);
-                *half = if on { *half | IN_ZCT } else { *half & !IN_ZCT };
+                *half = if on { *half | flag } else { *half & !flag };
             }
         }
     }
@@ -145,22 +188,24 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
         }
     }
 
-    /// Counts `v` down, returning whether its count is now zero. A sticky
-    /// side count stays.
-    fn decrement(v: Value) -> bool {
+    /// Counts `v` down, returning its new count, or `STUCK` for a sticky
+    /// side count, which stays.
+    fn count_down(v: Value) -> usize {
         // SAFETY: as above.
         unsafe {
             if Self::side(v) {
                 let count = Self::side_bytes(v).0;
                 if *count == STICKY {
-                    return false;
+                    return STUCK;
                 }
+                debug_assert!(*count > 0, "counting down a count of zero");
                 *count -= 1;
-                *count == 0
+                usize::from(*count)
             } else {
                 let half = Self::half(v);
+                debug_assert!(*half & COUNT > 0, "counting down a count of zero");
                 *half -= 1;
-                *half & COUNT == 0
+                (*half & COUNT) as usize
             }
         }
     }
@@ -170,6 +215,89 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
             Self::set_in_zct(v, true);
             heap.zct.push(v);
         }
+    }
+
+    /// The cycle buffer still refers to `v`, which nothing else does: the
+    /// next collection frees it, finding it black with a count of zero.
+    #[cold]
+    #[inline(never)]
+    fn free_buffered(v: Value) {
+        Self::set_colour(v, Colour::Black);
+    }
+
+    /// `v` lost a reference, or left the zero-count table, and is still
+    /// referred to, its count `count`: it may be all that keeps a cycle
+    /// alive.
+    ///
+    /// An object waiting in the zero-count table is not buffered: it is
+    /// looked at again as it leaves the table. So freeing a vector that
+    /// holds a new pair twice does not buffer the pair on the way to zero.
+    #[inline]
+    fn survived(heap: &mut DeferredHeap, v: Value, count: usize) {
+        if count != STUCK && !(Self::side(v) && count == usize::from(STICKY)) && !Self::in_zct(v) {
+            heap.cycles.possible_root::<Self>(v);
+        }
+    }
+}
+
+impl<const SIDE_COUNTS: bool> Counted for Deferred<SIDE_COUNTS> {
+    type Heap = PageHeap;
+
+    fn count(v: Value) -> usize {
+        Self::count_of(v)
+    }
+
+    fn increment(v: Value) {
+        Self::increment(v);
+    }
+
+    fn decrement(v: Value) {
+        Self::count_down(v);
+    }
+
+    fn colour(v: Value) -> Colour {
+        // SAFETY: counted values are live objects.
+        unsafe {
+            if Self::side(v) {
+                Colour::from_bits(u32::from(*Self::side_bytes(v).1 >> SIDE_COLOUR_SHIFT))
+            } else {
+                Colour::from_bits(*Self::half(v) >> COLOUR_SHIFT)
+            }
+        }
+    }
+
+    fn set_colour(v: Value, colour: Colour) {
+        // SAFETY: as above.
+        unsafe {
+            if Self::side(v) {
+                let flags = Self::side_bytes(v).1;
+                *flags = (*flags & !(3 << SIDE_COLOUR_SHIFT)) | (colour as u8) << SIDE_COLOUR_SHIFT;
+            } else {
+                let half = Self::half(v);
+                *half = (*half & !(3 << COLOUR_SHIFT)) | (colour as u32) << COLOUR_SHIFT;
+            }
+        }
+    }
+
+    fn buffered(v: Value) -> bool {
+        // SAFETY: as above.
+        unsafe {
+            if Self::side(v) {
+                *Self::side_bytes(v).1 & SIDE_BUFFERED != 0
+            } else {
+                *Self::half(v) & BUFFERED != 0
+            }
+        }
+    }
+
+    fn set_buffered(v: Value, on: bool) {
+        Self::set_flag(v, BUFFERED, SIDE_BUFFERED, on);
+    }
+
+    unsafe fn reclaim(pages: &mut PageHeap, v: Value, words: usize) {
+        let block = NonNull::new(v.address() as *mut u64).expect("an object's address");
+        // SAFETY: passed on to the caller.
+        unsafe { pages.free(block, words) };
     }
 }
 
@@ -188,6 +316,10 @@ unsafe impl<const SIDE_COUNTS: bool> Allocate for Deferred<SIDE_COUNTS> {
             pages: PageHeap::new(PageSource::new(config), if SIDE_COUNTS { 2 } else { 0 }),
             zct: Vec::new(),
             since: 0,
+            cycles: Cycles::default(),
+            cycle_bytes: 0,
+            cycle_threshold: CYCLE_BYTES,
+            swept: 0,
         }
     }
 
@@ -216,8 +348,11 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
 
     #[inline]
     fn release(heap: &mut DeferredHeap, v: Value) {
-        if v.is_pointer() && Self::decrement(v) {
-            Self::to_zct(heap, v);
+        if v.is_pointer() {
+            match Self::count_down(v) {
+                0 => Self::to_zct(heap, v),
+                count => Self::survived(heap, v, count),
+            }
         }
     }
 
@@ -259,25 +394,54 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
         Self::in_zct(v)
     }
 
-    fn leave_zct(_heap: &mut DeferredHeap, v: Value) {
+    fn leave_zct(heap: &mut DeferredHeap, v: Value) -> bool {
         Self::set_in_zct(v, false);
+        match Self::count_of(v) {
+            0 => true,
+            count => {
+                Self::survived(heap, v, count);
+                false
+            }
+        }
     }
 
-    fn count(_heap: &DeferredHeap, v: Value) -> usize {
-        Self::count_of(v)
+    fn release_child(heap: &mut DeferredHeap, v: Value) -> bool {
+        match Self::count_down(v) {
+            0 => !Self::in_zct(v),
+            count => {
+                Self::survived(heap, v, count);
+                false
+            }
+        }
     }
 
-    fn decrement(_heap: &mut DeferredHeap, v: Value) -> bool {
-        Self::decrement(v)
-    }
-
+    #[inline]
     unsafe fn free(heap: &mut DeferredHeap, v: Value, words: usize) {
-        let block = NonNull::new(v.address() as *mut u64).expect("an object's address");
+        if Self::buffered(v) {
+            Self::free_buffered(v);
+            return;
+        }
         // SAFETY: passed on to the caller.
-        unsafe { heap.pages.free(block, words) };
+        unsafe { Self::reclaim(&mut heap.pages, v, words) };
+    }
+
+    unsafe fn collect_cycles(heap: &mut DeferredHeap, describe: Describe, force: bool) {
+        let DeferredHeap { pages, cycles, .. } = heap;
+        if force || heap.cycle_bytes + heap.since >= heap.cycle_threshold {
+            // SAFETY: passed on to the caller: the stack's references are
+            // counted in, so every count is exact.
+            unsafe { cycles.collect::<Self>(pages, describe) };
+            heap.cycle_bytes = 0;
+            heap.cycle_threshold = CYCLE_BYTES.max(heap.pages.bytes_live());
+        } else {
+            // SAFETY: what counting freed, nothing refers to.
+            unsafe { cycles.sweep::<Self>(pages, heap.swept, describe) };
+        }
+        heap.swept = heap.cycles.candidates();
     }
 
     fn epoch_done(heap: &mut DeferredHeap) {
+        heap.cycle_bytes += heap.since;
         heap.since = 0;
     }
 }

@@ -100,17 +100,16 @@ pub trait References: Allocate {
         false
     }
 
-    /// `v`, taken from the zero-count table, no longer waits there.
-    fn leave_zct(_heap: &mut Self::Heap, _v: crate::Value) {}
-
-    /// `v`'s count.
-    fn count(_heap: &Self::Heap, _v: crate::Value) -> usize {
-        1
+    /// `v`, taken from the zero-count table, no longer waits there. Returns
+    /// whether nothing refers to it, so it is to be freed.
+    fn leave_zct(_heap: &mut Self::Heap, _v: crate::Value) -> bool {
+        false
     }
 
-    /// Counts `v` down as a reference from an object being freed goes,
-    /// returning whether its count reached zero.
-    fn decrement(_heap: &mut Self::Heap, _v: crate::Value) -> bool {
+    /// Counts `v` down as a reference from an object being freed goes.
+    /// Returns whether it is to be freed now: nothing refers to it, and it
+    /// does not wait in the zero-count table.
+    fn release_child(_heap: &mut Self::Heap, _v: crate::Value) -> bool {
         false
     }
 
@@ -120,6 +119,20 @@ pub trait References: Allocate {
     ///
     /// Nothing may refer to `v`, and nothing may use it afterwards.
     unsafe fn free(_heap: &mut Self::Heap, _v: crate::Value, _words: usize) {}
+
+    /// Frees cycles of garbage if a collection is due, or if `force`.
+    ///
+    /// # Safety
+    ///
+    /// Called in an epoch, with the stack's references counted in and the
+    /// zero-count table emptied, so every count is exact. `describe` must
+    /// describe the runtime's objects.
+    unsafe fn collect_cycles(
+        _heap: &mut Self::Heap,
+        _describe: crate::cycles::Describe,
+        _force: bool,
+    ) {
+    }
 
     /// An epoch has finished.
     fn epoch_done(_heap: &mut Self::Heap) {}

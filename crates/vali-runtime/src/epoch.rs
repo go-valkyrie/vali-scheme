@@ -65,6 +65,21 @@ impl<S: Strategy> Cx<S> {
 
     /// Runs an epoch, with `roots` the values the stack holds.
     pub(crate) fn epoch(&mut self, roots: &[Value]) {
+        self.run_epoch(roots, false);
+    }
+
+    /// Frees all the garbage there is now, cycles included, under a
+    /// counting strategy: an epoch with a cycle collection, which otherwise
+    /// runs once the isolate has allocated as much as was live after the
+    /// last. Does nothing while Scheme code runs, as when a Rust procedure
+    /// calls it.
+    pub fn collect_garbage(&mut self) {
+        if !self.running {
+            self.run_epoch(&[], true);
+        }
+    }
+
+    fn run_epoch(&mut self, roots: &[Value], force_cycles: bool) {
         if !S::COUNTS {
             return;
         }
@@ -73,13 +88,21 @@ impl<S: Strategy> Cx<S> {
             S::retain(self.heap_mut(), v);
         }
         let mut work = Vec::new();
-        for v in S::take_zct(self.heap_mut()) {
-            S::leave_zct(self.heap_mut(), v);
-            if S::count(self.heap(), v) == 0 {
+        // Newest first: a new structure's parents are newer than their
+        // children, so each child is freed when its turn comes, instead of
+        // leaving the table referred to, a cycle candidate. (Oldest first
+        // runs churning code about 10% faster without cycle collection, but
+        // buffers each child of a new structure before its parent frees it.)
+        let mut zct = S::take_zct(self.heap_mut());
+        while let Some(v) = zct.pop() {
+            if S::leave_zct(self.heap_mut(), v) {
                 work.push(v);
                 self.free_all(&mut work);
             }
         }
+        // SAFETY: the stack's references are counted in, and the table is
+        // empty.
+        unsafe { S::collect_cycles(self.heap_mut(), Self::describe, force_cycles) };
         for &v in roots {
             S::release(self.heap_mut(), v);
         }
@@ -94,16 +117,9 @@ impl<S: Strategy> Cx<S> {
             // SAFETY: `v` is a live object nothing refers to: its count is
             // zero and no frame holds it.
             unsafe {
-                let t = self.object_type(v).expect("a counted object");
-                let words = self.object_words(v, t);
-                children.clear();
-                self.for_each_child(v, t, |c| {
-                    if c.is_pointer() {
-                        children.push(c);
-                    }
-                });
-                for &c in &children {
-                    if S::decrement(self.heap_mut(), c) && !S::in_zct(self.heap(), c) {
+                let words = Self::describe(v, &mut children);
+                for c in children.drain(..) {
+                    if S::release_child(self.heap_mut(), c) {
                         work.push(c);
                     }
                 }

@@ -9,7 +9,8 @@
 - **Amended:** 2026-11-17, one kind of Rust handle: a root slot with a Rust-side count, used through the task context and released through a queue; local and shared handles are gone
 - **Amended:** 2026-11-17, the strategy owns half of the header word (ADR 0002), chooses whether pairs and flonums carry a header, and may keep side metadata on pair pages; M1 measures both pair layouts under counting
 - **Amended:** 2026-11-17, single-threaded heaps (ADR 0008): the share operation, the shared mark, atomic stores into shared objects and concurrent cycle collection are gone; handles belong to an isolate
-- **Amended:** 2026-11-18, how M1 builds and measures the counting strategies: both now, precise counting first without inference; epochs by allocation volume; trial deletion; a per-page allocator
+- **Amended:** 2026-11-17, how M1 builds and measures the counting strategies: both now, precise counting first without inference; epochs by allocation volume; trial deletion; a per-page allocator
+- **Amended:** 2026-11-17, how deferred counting finds cycle candidates, when trial deletion runs, and that sticky side counts are never recovered by it
 - **Related:** 0002 (values), 0004 (frames), 0006 (ABI version), 0008 (threads), 0009 (resource limits), 0012 (distribution format)
 
 ## Context
@@ -80,7 +81,7 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 
 ## Plan for deciding
 
-1. **Milestone M1:** no collection, plus both counting strategies, measured against that baseline on the benchmark set. The faster counting strategy becomes the default. Each counting strategy is measured with both pair layouts: a header word per pair, and count bytes on pair pages whose counts stick at 255 and are recovered by the cycle collector. The faster layout is kept.
+1. **Milestone M1:** no collection, plus both counting strategies, measured against that baseline on the benchmark set. The faster counting strategy becomes the default. Each counting strategy is measured with both pair layouts: a header word per pair, and count bytes on pair pages whose counts stick at 255. The faster layout is kept. Trial deletion cannot recover a sticky count, which never returns to zero, so under M1 such a pair is never freed; a backup trace would recover them, and whether the side layout needs one depends on how many pairs stick.
 2. **Later, when a host needs it:** an MMTk binding for tracing, and either concurrent strategy.
 
 ### How M1 builds them
@@ -88,6 +89,11 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 - **Both counting strategies are built in M1, on the baseline compiler.** Precise counting starts without ownership inference: every reference from a frame slot is counted too, which is its worst case. The inference passes (owned and borrowed parameters, decrements at last use, drop-reuse) come with the CPS compiler, and precise counting is measured again then.
 - **A deferred-counting epoch runs at a safepoint once a set volume has been allocated since the last, and whenever Scheme returns to the host.** Safepoints are calls, returns and a loop's backward jumps. Triggering by allocation volume keeps expansion deterministic (ADR 0001 #4), and returning to the host bounds how long garbage waits after a call. An epoch scans the stacks of every task of the isolate, frees what has a zero count and no reference from a stack, and decrements what those objects referred to.
 - **Cycles are collected by trial deletion** (Bacon and Rajan, synchronous): an object whose count drops without reaching zero becomes a candidate root, and at an epoch the collector trial-deletes the candidates' internal references to find garbage cycles. It touches only the candidates' subgraphs, never the whole heap.
+  - **Under deferred counting, candidates also come from the stack.** A stack reference is never counted down, so an object can become cyclic garbage without a decrement. Two more cases make candidates: an object that leaves the zero-count table still referred to, such as a new pair closed into a loop by `set-cdr!` and then dropped; and an object whose count drops when the epoch counts the stack's references out again. An object still waiting in the zero-count table is not buffered, because it is looked at as it leaves.
+  - **The zero-count table is processed newest first.** A new structure's parents are newer than their children, so each child reaches zero before its turn instead of leaving the table referred to and becoming a candidate. Oldest first runs the `churn` benchmark about 10% faster without cycle collection, but buffers each child of a new structure before its parent frees it.
+  - **Only types that can form cycles are candidates:** pairs, closures, vectors, records, record types and boxes. Strings, symbols, numbers and bytevectors refer only to bytes.
+  - **A collection runs inside an epoch, while the stack's references are counted in,** so every count is exact. It runs once the isolate has allocated as much as was live after the last collection, and at least 4 MiB, which keeps its cost proportional to allocation. A host can force one (`collect_garbage`). Between collections, an object that counting frees while buffered keeps its memory until its candidate entry is dropped; each epoch sweeps the entries made since the last, so that garbage waits one epoch, not a collection.
+  - **Colours and the buffered flag live beside the count:** in the strategy's half of the header, or in a side-counted pair's flags byte.
 - **The allocator keeps a free list per page,** as mimalloc does. Pages are aligned, so an object's page header is its address masked. Each page holds one size class, and allocation drains the current page of a class before taking the next page with free blocks. Freed objects go back on their own page's list, and a page whose objects are all free can take another size class. The side-count pair layout keeps its count bytes in the pair page's header, which this layout already has.
 - **Objects describe their pointers to the strategy** by type: which fields hold values. Freeing an object, cycle collection and, later, tracing all walk the same description.
 
@@ -95,7 +101,7 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 
 - Is the contract worth committing to as a whole now, including the load hook and the relaxed-atomics rule, which matter only to concurrent collectors?
 - Which strategies are kept and maintained long-term, since each one kept must pass the whole test suite.
-- How often a deferred-counting epoch runs, and what triggers it.
+- How often a deferred-counting epoch and a cycle collection run, and what triggers them. M1 starts with an epoch per MiB allocated and a collection whenever allocation since the last matches what was live after it.
 - How objects explicitly created as shared (ADR 0008) are allocated and reclaimed: outside every isolate heap, probably with atomic counts of their own.
 - For an MMTk binding: one MMTk instance for all isolates or one per isolate, and how its collector threads fit into the host's async runtime.
 

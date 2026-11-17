@@ -28,6 +28,14 @@ const SOURCE: &str = "
           (loop (+ i 1)
                 (if (= 0 (remainder i 1000)) (cons (thunk) keep) keep))))))
 
+(define (rings n)
+  (let loop ((i 0))
+    (if (= i n)
+        n
+        (let ((p (list i i i)))
+          (set-cdr! (cdr (cdr p)) p)
+          (loop (+ i 1))))))
+
 (define (iota n acc) (if (= n 0) acc (iota (- n 1) (cons n acc))))
 (define (sum xs acc) (if (null? xs) acc (sum (cdr xs) (+ acc (car xs)))))
 ";
@@ -87,8 +95,8 @@ fn bench<S: Strategy>(module: vali_bytecode::Module) {
     let id = cx.load(module).unwrap();
     cx.run(id).unwrap();
     let n = |n: i64| Handle::fixnum(n).unwrap();
-    let [fib, tak, churn, iota, sum] =
-        ["fib", "tak", "churn", "iota", "sum"].map(|name| cx.variable(id, name).unwrap());
+    let [fib, tak, churn, rings, iota, sum] =
+        ["fib", "tak", "churn", "rings", "iota", "sum"].map(|name| cx.variable(id, name).unwrap());
 
     time(&mut cx, "fib 30", 832_040, |cx| {
         cx.call(&fib, &[n(30)]).unwrap().as_fixnum()
@@ -98,6 +106,10 @@ fn bench<S: Strategy>(module: vali_bytecode::Module) {
     });
     time(&mut cx, "churn 1,000,000", 1000, |cx| {
         cx.call(&churn, &[n(1_000_000)]).unwrap().as_fixnum()
+    });
+    // Garbage cycles: only a cycle collection frees them.
+    time(&mut cx, "rings 1,000,000", 1_000_000, |cx| {
+        cx.call(&rings, &[n(1_000_000)]).unwrap().as_fixnum()
     });
     let list = cx
         .call(&iota, &[n(1_000_000), Handle::empty_list()])

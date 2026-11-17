@@ -11,6 +11,7 @@
 
 mod code;
 mod cx;
+mod cycles;
 mod deferred;
 mod epoch;
 mod handle;
