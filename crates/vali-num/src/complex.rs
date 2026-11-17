@@ -9,10 +9,10 @@ use crate::{Number, Radix, flonum_eqv, print};
 /// An exact complex number always has a non-zero imaginary part. An inexact
 /// one may have a zero imaginary part, and is still not real.
 #[derive(Clone, Debug)]
-pub struct Complex(Repr);
+pub struct Complex(pub(crate) Repr);
 
 #[derive(Clone, Debug)]
-enum Repr {
+pub(crate) enum Repr {
     Exact { re: RBig, im: RBig },
     Inexact { re: f64, im: f64 },
 }
