@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, reworked: an isolate's tasks share its heap and run in parallel; objects are local to a task until shared
+- **Amended:** 2026-11-17, a Rust handle no longer shares its object by existing; using it from another task does (ADR 0003)
 - **Related:** 0002 (values), 0003 (what sharing costs), 0004 (continuations, async), 0006 (shared code), 0009 (sandboxing, limits)
 
 ## Context
@@ -38,7 +39,7 @@ Two known ways to limit atomic counting:
    - it is passed to a spawned task, or captured by the closure a task runs;
    - it is sent through a cross-task primitive, such as a channel;
    - it is stored into an object that is already shared, including library variables, which every task of the isolate can see;
-   - Rust code holds it through a shared (`Send`) handle.
+   - Rust code hands a handle to it to another task, and the owner marks it shared so that task can use it (ADR 0003). A Rust handle alone shares nothing: handles are `Send` and survive `.await`, but only their owning task can use them until then.
 
    Sharing is transitive: everything reachable from a shared object is shared. What sharing costs depends on the memory-management strategy (ADR 0003). Under counting strategies, shared objects take atomic count updates; under tracing strategies, sharing costs nothing.
 4. **Races never break memory safety.** Word-sized fields of pairs, vectors, records and variables are read and written with plain (relaxed atomic) loads and stores, never under a lock. Unsynchronised racing writes from Scheme leave one of the written values, unspecified which, as in Java. Programs that need ordering use synchronisation primitives.

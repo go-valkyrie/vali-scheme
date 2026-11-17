@@ -35,7 +35,7 @@ Hosts depend on the `vali` crate, which re-exports what they need:
 | Path | Contents |
 |---|---|
 | `vali::{Runtime, Isolate}` | `Runtime<S: Strategy = Default>`, isolates, spawning tasks (ADRs 0003 and 0008) |
-| `vali::{Value, Handle, SharedHandle}` | Raw values, and local (`!Send`) and shared (`Send`) handles (ADR 0003) |
+| `vali::{Value, Handle}` | Raw values, for the runtime's own code, and handles: `Send`, `'static` roots used through a task's context (ADR 0003) |
 | `vali::num`, also re-exported at the top level | `Number`, `Integer`, `Rational`, `Complex` (ADR 0007) |
 | `vali::bridge` | `#[bridge]`, `FromScheme`, `IntoScheme` |
 | `vali::load` | `Loader`, `AsyncLoader`, `LibraryName`, `Identity` (ADR 0009) |

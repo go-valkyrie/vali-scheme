@@ -6,6 +6,7 @@
 - **Amended:** 2026-11-16, the strategy is a type parameter of the runtime and a target of the code generator
 - **Amended:** 2026-11-16, objects shared between tasks: the share operation, atomic stores, handle kinds, concurrent cycle collection (semantics in ADR 0008)
 - **Amended:** 2026-11-16, the frame-return hook becomes a return barrier, now that compiled frames are native (ADR 0004)
+- **Amended:** 2026-11-17, one kind of Rust handle: a root slot with a Rust-side count, used through the task context and released through a queue; local and shared handles are gone
 - **Amended:** 2026-11-17, the strategy owns half of the header word (ADR 0002), chooses whether pairs and flonums carry a header, and may keep side metadata on pair pages; M1 measures both pair layouts under counting
 - **Related:** 0002 (values), 0004 (frames), 0006 (ABI version), 0008 (threads), 0009 (resource limits), 0012 (distribution format)
 
@@ -41,8 +42,9 @@ Designed for the most demanding strategy under evaluation, which is concurrent c
 
 | Contract item | Needed by | Cost to strategies that don't need it |
 |---|---|---|
-| **Raw `Value`s in Rust are valid only until the next allocation;** anything kept longer is a handle, `Clone` and `Drop` like an `Rc` | Moving collectors | None at run time. The API never promises more, even where a strategy would allow it |
-| **Two kinds of handle:** a *local* handle (`!Send`), which never shares its object, and a *shared* handle (`Send`), which shares its object when created | Counting strategies, which must know before another thread can touch a count | None: Rust code that never crosses tasks uses local handles and pays nothing |
+| **Raw `Value`s in Rust are valid only until the next allocation;** anything kept longer is a handle. Raw values are for the runtime's own code; reading the heap through one is `unsafe` | Moving collectors | None at run time. The API never promises more, even where a strategy would allow it |
+| **A handle is a Rust object with Rust ownership: `Send`, `Sync`, `Clone` and `'static`.** It points to a *root slot* in its owning task's root table. The slot has its own atomic count, changed only when Rust clones or drops handles; the object has one ordinary Scheme reference, from the table, which the owning task adds and removes. Using a handle takes the owning task's context (`&mut`), which proves nothing else is touching that task's objects. Dropping a handle takes no context: when the slot's count reaches zero, the slot goes onto the owner's lock-free release queue, which the owner empties at its next allocation or safepoint. PyO3's `Py<T>`, `Python<'py>` token and reference pool work the same way | Counting strategies, whose counts on local objects are not atomic; moving collectors, which treat the root table as roots | Atomic updates only on handle clones and drops, at the rate Rust crosses the boundary; never on Scheme's own counts. A dropped handle's object lives until the owner's next safepoint |
+| **A handle used with a task that does not own it is an error,** naming the remedy: the owner marks the object shared first (ADR 0008), after which any task of the isolate may use the handle. A convenience may ask the owner to do this at its next safepoint and await it. When the owning task has ended, its live root slots pass to the isolate, and the first task to use one takes ownership | Counting strategies, where only the owner can mark an object shared without racing its own non-atomic updates | None for the common case: one task using its own handles, across `.await`s and threads |
 | **A pinning API** for Rust code that needs a stable address, such as a bytevector passed to I/O | Moving collectors | Small |
 | **Bridged Rust objects hold handles, not Scheme values the collector must trace** | Concurrent collectors, whose tracing would otherwise run Rust code concurrently with its owner | None |
 | **The upper 32 bits of every header word belong to the strategy** (ADR 0002 #7): a count, mark bits, age, the identity hash's state, plus the *shared* mark (Lean 4 keeps it in the sign of the count). A moving strategy may replace the whole header with a forwarding pointer | All | None |
@@ -101,3 +103,5 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 - Christine H. Flood, Roman Kennke, Andrew Dinn, Andrew Haley and Roland Westrelin, *Shenandoah: An Open-Source Concurrent Compacting Garbage Collector for OpenJDK*, PPPJ 2016.
 - JEP 363, *Remove the Concurrent Mark Sweep (CMS) Garbage Collector*.
 - The Swift and Clang documentation on automatic reference counting; the MMTk project.
+- The PyO3 user guide: `Py<T>`, the `Python<'py>` token, and dropping references without the GIL.
+- Wasmtime's API for garbage-collected references: roots kept in the store, used through `&mut Store`.
