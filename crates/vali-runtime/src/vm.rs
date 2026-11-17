@@ -480,6 +480,12 @@ impl<S: Strategy> Cx<S> {
         self.stack.last().expect("the first segment stays").limit()
     }
 
+    /// How many Scheme procedures have been entered so far: the fuel used
+    /// (ADR 0009).
+    pub fn fuel_used(&self) -> u64 {
+        self.fuel_used
+    }
+
     /// Sets the most memory the stack may take, in bytes. Deep recursion
     /// beyond it is an error.
     pub fn set_max_stack_bytes(&mut self, bytes: usize) {
@@ -535,6 +541,44 @@ impl<S: Strategy> Cx<S> {
         self.fuel_used += 1;
         code.calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Calls a Rust procedure with the `argc` arguments in slots `first`
+    /// and up of the frame at `fp`. Up to eight arguments are passed from a
+    /// buffer on the Rust stack, without allocating.
+    ///
+    /// # Safety
+    ///
+    /// The slots must be inside the frame.
+    unsafe fn call_native(
+        &mut self,
+        code: &Code<S>,
+        f: NativeFn<S>,
+        fp: *mut u64,
+        first: usize,
+        argc: usize,
+    ) -> Result<Value, Error> {
+        if !code.arity.accepts(argc) {
+            return Err(Error::scheme(format!(
+                "{}: wrong number of arguments: got {argc}",
+                code.name
+            )));
+        }
+        let mut small = [Value::UNSPECIFIED; 8];
+        let large: Vec<Value>;
+        // SAFETY: passed on to the caller.
+        let args: &[Value] = unsafe {
+            if argc <= small.len() {
+                for (i, arg) in small.iter_mut().take(argc).enumerate() {
+                    *arg = slot(fp, first + i);
+                }
+                &small[..argc]
+            } else {
+                large = (0..argc).map(|i| slot(fp, first + i)).collect();
+                &large
+            }
+        };
+        f(self, args)
     }
 
     /// The constants and variables of the loaded module at `module`.
@@ -620,15 +664,8 @@ impl<S: Strategy> Cx<S> {
                         let callee = attempt!(self.procedure_code(procedure));
                         match callee.kind {
                             Kind::Native(f) => {
-                                let args: Vec<Value> =
-                                    (0..argc).map(|i| slot(fp, base + 4 + i)).collect();
-                                if !callee.arity.accepts(argc) {
-                                    fail!(Error::scheme(format!(
-                                        "{}: wrong number of arguments: got {argc}",
-                                        callee.name
-                                    )));
-                                }
-                                let result = attempt!(f(self, &args));
+                                let result =
+                                    attempt!(self.call_native(callee, f, fp, base + 4, argc));
                                 if resume == ENTRY {
                                     return Ok(result);
                                 }
@@ -671,14 +708,7 @@ impl<S: Strategy> Cx<S> {
                         let callee = attempt!(self.procedure_code(slot(fp, 0)));
                         match callee.kind {
                             Kind::Native(f) => {
-                                let args: Vec<Value> = (0..argc).map(|i| slot(fp, 1 + i)).collect();
-                                if !callee.arity.accepts(argc) {
-                                    fail!(Error::scheme(format!(
-                                        "{}: wrong number of arguments: got {argc}",
-                                        callee.name
-                                    )));
-                                }
-                                let result = attempt!(f(self, &args));
+                                let result = attempt!(self.call_native(callee, f, fp, 1, argc));
                                 next = Next::Return(result);
                                 continue;
                             }
