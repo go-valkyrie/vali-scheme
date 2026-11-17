@@ -1316,6 +1316,244 @@ fn keywords() {
     }
 }
 
+/// Checks many expressions after one prelude, compiling once per strategy:
+/// each expression becomes a thunk the host calls, so each is checked on
+/// its own and every strategy must agree, as `run` does, at a fraction of
+/// the compiling.
+fn check_each(prelude: &str, cases: &[(&str, &str)]) {
+    fn under<S: Strategy>(source: &str, count: usize) -> Vec<Result<String, String>> {
+        let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
+            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        (0..count)
+            .map(|i| {
+                let thunk = cx.variable(id, &format!("%case{i}")).unwrap();
+                let result = cx.call(&thunk, &[]).map_err(|e| e.to_string())?;
+                cx.collect_garbage();
+                cx.write_string(&result).map_err(|e| e.to_string())
+            })
+            .collect()
+    }
+    let mut source = prelude.to_owned();
+    for (i, (expr, _)) in cases.iter().enumerate() {
+        source.push_str(&format!("\n(define (%case{i}) {expr})"));
+    }
+    let results = under::<NoCollection>(&source, cases.len());
+    for (name, other) in [
+        ("deferred", under::<DeferredHeadered>(&source, cases.len())),
+        (
+            "deferred-side",
+            under::<DeferredSideCounts>(&source, cases.len()),
+        ),
+        ("precise", under::<PreciseHeadered>(&source, cases.len())),
+        (
+            "precise-side",
+            under::<PreciseSideCounts>(&source, cases.len()),
+        ),
+    ] {
+        for ((expr, _), (a, b)) in cases.iter().zip(results.iter().zip(&other)) {
+            assert_eq!(b, a, "{expr}\nunder {name}");
+        }
+    }
+    for ((expr, expected), result) in cases.iter().zip(results) {
+        match result {
+            Ok(result) => assert_eq!(&result, expected, "{expr}"),
+            Err(e) => panic!("{expr}\n{e}"),
+        }
+    }
+}
+
+/// SRFI 1, mostly the SRFI's own examples, beside (scheme base).
+#[test]
+fn list_library() {
+    let prelude = "(import (scheme base) (srfi 1))";
+    let cases = [
+        // Constructors.
+        ("(xcons '(b c) 'a)", "(a b c)"),
+        ("(list (cons* 1 2 3 4) (cons* 1))", "((1 2 3 . 4) 1)"),
+        ("(list-tabulate 4 (lambda (i) (* i i)))", "(0 1 4 9)"),
+        (
+            "(list (iota 5) (iota 5 0 -1) (iota 3 1/2))",
+            "((0 1 2 3 4) (0 -1 -2 -3 -4) (1/2 3/2 5/2))",
+        ),
+        (
+            "(let ((c (circular-list 'z 'q))) (list (take c 5) (circular-list? c) (length+ c)))",
+            "((z q z q z) #t #f)",
+        ),
+        // Predicates.
+        (
+            "(list (proper-list? '(1 2)) (proper-list? '(1 . 2)) (dotted-list? '(1 . 2))
+                   (dotted-list? 3) (circular-list? '(1 2)) (not-pair? 5) (null-list? '()))",
+            "(#t #f #t #t #f #t #t)",
+        ),
+        (
+            "(list (list= eq?) (list= eq? '(a)) (list= = '(1 2) '(1 2) '(1 2)) (list= = '(1 2) '(1 3)))",
+            "(#t #t #t #f)",
+        ),
+        // Selectors.
+        (
+            "(list (first '(a b c)) (third '(a b c)) (tenth (iota 10)))",
+            "(a c 9)",
+        ),
+        (
+            "(call-with-values (lambda () (car+cdr '(1 . 2))) list)",
+            "(1 2)",
+        ),
+        (
+            "(list (take '(a b c d e) 2) (drop '(a b c d e) 2)
+                   (take-right '(a b c d e) 2) (drop-right '(a b c d e) 2))",
+            "((a b) (c d e) (d e) (a b c))",
+        ),
+        (
+            "(list (take-right '(1 2 3 . d) 2) (take-right '(1 2 3 . d) 0))",
+            "((2 3 . d) d)",
+        ),
+        (
+            "(call-with-values (lambda () (split-at '(a b c d e f g h) 3)) list)",
+            "((a b c) (d e f g h))",
+        ),
+        ("(list (last '(1 2 3)) (last-pair '(a b c)))", "(3 (c))"),
+        // Miscellaneous.
+        (
+            "(list (length+ '(1 2 3)) (concatenate '((1) (2 3) () (4))) (append-reverse '(3 2 1) '(4 5)))",
+            "(3 (1 2 3 4) (1 2 3 4 5))",
+        ),
+        (
+            "(zip '(one two three) '(1 2 3) '(odd even odd even))",
+            "((one 1 odd) (two 2 even) (three 3 odd))",
+        ),
+        (
+            "(call-with-values (lambda () (unzip2 '((1 one) (2 two) (3 three)))) list)",
+            "((1 2 3) (one two three))",
+        ),
+        (
+            "(list (count even? '(3 1 4 1 5 9 2 5 6))
+                   (count < '(1 2 4 8) '(2 4 6 8 10 12 14 16))
+                   (count < '(3 1 4 1) (circular-list 1 10)))",
+            "(3 3 2)",
+        ),
+        // Folding, unfolding and mapping.
+        (
+            "(list (fold + 0 '(1 2 3)) (fold cons '() '(a b c)) (fold cons* '() '(a b c) '(1 2 3 4 5)))",
+            "(6 (c b a) (c 3 b 2 a 1))",
+        ),
+        (
+            "(list (fold-right cons '() '(a b c)) (fold-right cons* '() '(a b c) '(1 2 3 4 5)))",
+            "((a b c) (a 1 b 2 c 3))",
+        ),
+        (
+            "(list (pair-fold cons '() '(a b c)) (pair-fold-right cons '() '(a b c)))",
+            "(((c) (b c) (a b c)) ((a b c) (b c) (c)))",
+        ),
+        (
+            "(list (reduce + 0 '(1 2 3)) (reduce max 0 '()) (reduce-right append '() '((1 2) (3) (4 5))))",
+            "(6 0 (1 2 3 4 5))",
+        ),
+        (
+            "(list (unfold (lambda (x) (> x 5)) (lambda (x) (* x x)) (lambda (x) (+ x 1)) 1)
+                   (unfold null-list? car cdr '(1 2 3) (lambda (x) 'end))
+                   (unfold-right zero? (lambda (x) (* x x)) (lambda (x) (- x 1)) 5))",
+            "((1 4 9 16 25) (1 2 3 . end) (1 4 9 16 25))",
+        ),
+        (
+            "(append-map (lambda (x) (list x (- x))) '(1 3 8))",
+            "(1 -1 3 -3 8 -8)",
+        ),
+        (
+            "(let ((acc '())) (pair-for-each (lambda (p) (set! acc (cons (length p) acc))) '(a b c)) acc)",
+            "(1 2 3)",
+        ),
+        (
+            "(filter-map (lambda (x) (and (number? x) (* x x))) '(a 1 b 3 c 7))",
+            "(1 9 49)",
+        ),
+        // Filtering.
+        ("(filter even? '(0 7 8 8 43 -4))", "(0 8 8 -4)"),
+        (
+            "(call-with-values (lambda () (partition symbol? '(one 2 3 four five 6))) list)",
+            "((one four five) (2 3 6))",
+        ),
+        ("(remove even? '(0 7 8 8 43 -4))", "(7 43)"),
+        // Searching.
+        (
+            "(list (find even? '(3 1 4 1 5 9)) (find-tail even? '(3 1 37 -8 -5 0 0)) (find even? '(1 3)))",
+            "(4 (-8 -5 0 0) #f)",
+        ),
+        (
+            "(list (any integer? '(a 3 b 2.7)) (any < '(3 1 4 1 5) '(2 7 1 8 2)) (any even? '())
+                   (every integer? '()) (every (lambda (x) (and (> x 0) x)) '(1 2 3)))",
+            "(#t #t #f #t 3)",
+        ),
+        (
+            "(list (list-index even? '(3 1 4 1 5 9))
+                   (list-index < '(3 1 4 1 5 9 2 5 6) '(2 7 1 8 2))
+                   (list-index = '(3 1 4 1 5 9 2 5 6) '(2 7 1 8 2)))",
+            "(2 1 #f)",
+        ),
+        (
+            "(list (take-while even? '(2 18 3 10 22 9)) (drop-while even? '(2 18 3 10 22 9)))",
+            "((2 18) (3 10 22 9))",
+        ),
+        (
+            "(list (call-with-values (lambda () (span even? '(2 18 3 10 22 9))) list)
+                   (call-with-values (lambda () (break even? '(3 1 4 1 5 9 2 6))) list))",
+            "(((2 18) (3 10 22 9)) ((3 1) (4 1 5 9 2 6)))",
+        ),
+        // Deleting.
+        (
+            "(list (delete 3 '(1 3 2 3)) (delete 5 '(0 3 7 8 9) <) (delete-duplicates '(a b a c a b c z)))",
+            "((1 2) (0 3) (a b c z))",
+        ),
+        (
+            "(delete-duplicates '((a . 3) (b . 7) (a . 9) (c . 1)) (lambda (x y) (eq? (car x) (car y))))",
+            "((a . 3) (b . 7) (c . 1))",
+        ),
+        // Association lists.
+        (
+            "(list (alist-cons 'a 1 '((b . 2)))
+                   (alist-delete 'a '((a . 1) (b . 2) (a . 3)))
+                   (let* ((a (list (cons 1 2))) (b (alist-copy a)))
+                     (list (equal? a b) (eq? (car a) (car b)))))",
+            "(((a . 1) (b . 2)) ((b . 2)) (#t #f))",
+        ),
+        // Sets as lists.
+        (
+            "(list (lset<= eq? '(a) '(a b a) '(a b c c)) (lset= eq? '(b e a) '(a e b) '(e e b a))
+                   (lset-adjoin eq? '(a b c d c e) 'a 'e 'i 'o 'u))",
+            "(#t #t (u o i a b c d c e))",
+        ),
+        (
+            "(lset-union eq? '(a b c d e) '(a e i o u))",
+            "(u o i a b c d e)",
+        ),
+        (
+            "(list (lset-intersection eq? '(a b c d e) '(a e i o u))
+                   (lset-difference eq? '(a b c d e) '(a e i o u))
+                   (lset= eq? (lset-xor eq? '(a b c d e) '(a e i o u)) '(d c b i o u)))",
+            "((a e) (b c d) #t)",
+        ),
+        (
+            "(call-with-values (lambda () (lset-diff+intersection eq? '(a b c d e) '(a e i o u))) list)",
+            "((b c d) (a e))",
+        ),
+        // Beside (scheme base): the same map and member, which stop at the
+        // shortest list, a circular one included.
+        (
+            "(list (map + '(1 2 3) '(10 20)) (member 2.0 '(1 2 3) =) (map + '(3 1 4 1) (circular-list 1 0)))",
+            "((11 22) (2 3) (4 1 5 1))",
+        ),
+        // Long lists deepen no stack.
+        (
+            "(list (length (fold-right cons '() (iota 100000))) (fold + 0 (iota 100000)))",
+            "(100000 4999950000)",
+        ),
+    ];
+    check_each(prelude, &cases);
+}
+
 #[test]
 fn sorting() {
     let prelude = "(import (scheme base) (srfi 132))";
