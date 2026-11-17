@@ -132,7 +132,7 @@ enum Next {
 
 /// Numbers the generic arithmetic understands. Rationals and complex
 /// numbers come next.
-enum Num {
+pub(crate) enum Num {
     Fixnum(i64),
     Integer(Integer),
     Flonum(f64),
@@ -140,7 +140,7 @@ enum Num {
 
 impl Num {
     /// The exact integer, if this is one.
-    fn exact(&self) -> Option<Integer> {
+    pub(crate) fn exact(&self) -> Option<Integer> {
         match self {
             Num::Fixnum(n) => Some(Integer::from(*n)),
             Num::Integer(n) => Some(n.clone()),
@@ -148,7 +148,7 @@ impl Num {
         }
     }
 
-    fn to_f64(&self) -> f64 {
+    pub(crate) fn to_f64(&self) -> f64 {
         match self {
             Num::Fixnum(n) => *n as f64,
             Num::Integer(n) => n.to_f64(),
@@ -158,20 +158,20 @@ impl Num {
 }
 
 #[derive(Clone, Copy)]
-enum Arith {
+pub(crate) enum Arith {
     Add,
     Sub,
     Mul,
 }
 
 #[derive(Clone, Copy)]
-enum Compare {
+pub(crate) enum Compare {
     Lt,
     Le,
     Eq,
 }
 
-fn type_error(operation: &str, expected: &str, got: Value) -> Error {
+pub(crate) fn type_error(operation: &str, expected: &str, got: Value) -> Error {
     Error::scheme(format!("{operation}: expected {expected}, got {got:?}"))
 }
 
@@ -238,6 +238,13 @@ impl<S: Strategy> Cx<S> {
         let value = self.get(value)?;
         self.globals.insert(name.into(), value);
         Ok(())
+    }
+
+    /// The value bound to the global `name`, if there is one.
+    pub fn global(&mut self, name: &str) -> Option<Handle> {
+        let value = *self.globals.get(name)?;
+        // SAFETY: globals hold valid values.
+        Some(unsafe { self.root(value) })
     }
 
     /// A procedure implemented in Rust, bound to the global `name`.
@@ -376,7 +383,7 @@ impl<S: Strategy> Cx<S> {
         v.tag() == Tag::Other && unsafe { self.header(v, t) }.and_then(Header::type_code) == Some(t)
     }
 
-    fn number(&self, v: Value) -> Option<Num> {
+    pub(crate) fn number(&self, v: Value) -> Option<Num> {
         if let Some(n) = v.as_fixnum() {
             return Some(Num::Fixnum(n));
         }
@@ -432,7 +439,7 @@ impl<S: Strategy> Cx<S> {
     /// Generic arithmetic: the slow path behind the fixnum fast paths. Exact
     /// integers of any size stay exact; a flonum operand makes the result a
     /// flonum.
-    fn arith(&mut self, op: Arith, a: Value, b: Value) -> Result<Value, Error> {
+    pub(crate) fn arith(&mut self, op: Arith, a: Value, b: Value) -> Result<Value, Error> {
         let name = match op {
             Arith::Add => "+",
             Arith::Sub => "-",
@@ -475,7 +482,7 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// Generic comparison.
-    fn compare(&self, op: Compare, a: Value, b: Value) -> Result<bool, Error> {
+    pub(crate) fn compare(&self, op: Compare, a: Value, b: Value) -> Result<bool, Error> {
         let name = match op {
             Compare::Lt => "<",
             Compare::Le => "<=",

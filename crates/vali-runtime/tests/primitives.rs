@@ -1,0 +1,124 @@
+//! The standard procedures implemented in Rust.
+
+use vali_runtime::{Cx, Error, HeapConfig, NoCollection};
+
+fn cx() -> Cx<NoCollection> {
+    let mut cx = Cx::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    cx
+}
+
+/// Calls the global `name` with the datums in `args`, and writes the result.
+fn call(cx: &mut Cx<NoCollection>, name: &str, args: &str) -> Result<String, Error> {
+    let procedure = cx.global(name).unwrap_or_else(|| panic!("no {name}"));
+    let args = cx.read(args).unwrap();
+    let result = cx.call(&procedure, &args)?;
+    cx.write_string(&result)
+}
+
+fn ok(cx: &mut Cx<NoCollection>, name: &str, args: &str) -> String {
+    call(cx, name, args).unwrap_or_else(|e| panic!("({name} {args}): {e}"))
+}
+
+#[test]
+fn arithmetic_and_comparison() {
+    let mut cx = cx();
+    let cases = [
+        ("+", "", "0"),
+        ("+", "1 2 3", "6"),
+        ("*", "2 3 4", "24"),
+        ("-", "10", "-10"),
+        ("-", "10 1 2", "7"),
+        ("+", "1152921504606846975 1", "1152921504606846976"),
+        ("*", "1.5 2", "3.0"),
+        ("<", "1 2 3", "#t"),
+        ("<", "1 3 2", "#f"),
+        (">", "3 2 1", "#t"),
+        (">=", "3 3 1", "#t"),
+        ("=", "2 2.0", "#t"),
+        ("quotient", "-7 2", "-3"),
+        ("remainder", "-7 2", "-1"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+}
+
+#[test]
+fn lists() {
+    let mut cx = cx();
+    let cases = [
+        ("cons", "1 2", "(1 . 2)"),
+        ("car", "(a b)", "a"),
+        ("cdr", "(a b)", "(b)"),
+        ("list", "1 \"two\" #\\3", "(1 \"two\" #\\3)"),
+        ("length", "(1 2 3)", "3"),
+        ("reverse", "(1 2 3)", "(3 2 1)"),
+        ("append", "(1 2) (3) 4", "(1 2 3 . 4)"),
+        ("append", "", "()"),
+        ("null?", "()", "#t"),
+        ("pair?", "()", "#f"),
+        ("not", "#f", "#t"),
+        ("not", "()", "#f"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+}
+
+#[test]
+fn equivalence() {
+    let mut cx = cx();
+    let cases = [
+        ("eq?", "a a", "#t"),
+        ("eq?", "(a) (a)", "#f"),
+        ("eqv?", "2.0 2.0", "#t"),
+        ("eqv?", "0.0 -0.0", "#f"),
+        ("eqv?", "+nan.0 +nan.0", "#t"),
+        ("eqv?", "2 2.0", "#f"),
+        (
+            "eqv?",
+            "123456789012345678901234567890 123456789012345678901234567890",
+            "#t",
+        ),
+        (
+            "equal?",
+            "(1 #(2 \"x\") #u8(3)) (1 #(2 \"x\") #u8(3))",
+            "#t",
+        ),
+        ("equal?", "(1 #(2 \"x\")) (1 #(2 \"y\"))", "#f"),
+        ("equal?", "#0=(a b . #0#) #1=(a b . #1#)", "#t"),
+        ("equal?", "#0=(a b . #0#) #1=(a c . #1#)", "#f"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+}
+
+#[test]
+fn vectors() {
+    let mut cx = cx();
+    assert_eq!(ok(&mut cx, "vector", "1 a"), "#(1 a)");
+    assert_eq!(ok(&mut cx, "make-vector", "2 x"), "#(x x)");
+    assert_eq!(ok(&mut cx, "make-vector", "2"), "#(#f #f)");
+    assert_eq!(ok(&mut cx, "vector-ref", "#(a b c) 1"), "b");
+    assert_eq!(ok(&mut cx, "vector-length", "#(a b c)"), "3");
+}
+
+#[test]
+fn errors() {
+    let mut cx = cx();
+    let message = |cx: &mut Cx<NoCollection>, name: &str, args: &str| match call(cx, name, args) {
+        Err(Error::Scheme(e)) => e.message,
+        other => panic!("({name} {args}) gave {other:?}"),
+    };
+    assert_eq!(message(&mut cx, "car", "1"), "car: expected a pair, got 1");
+    assert!(message(&mut cx, "vector-ref", "#(a) 9").contains("out of range"));
+    assert!(message(&mut cx, "length", "(1 . 2)").contains("a proper list"));
+    assert_eq!(
+        message(&mut cx, "quotient", "1 0"),
+        "quotient: division by zero"
+    );
+    assert!(message(&mut cx, "+", "1 a").contains("expected a number"));
+    assert!(message(&mut cx, "cons", "1").contains("wrong number of arguments"));
+}
