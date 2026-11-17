@@ -4,6 +4,7 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, the Scheme-level control API is SRFI 226 (ADR 0007)
 - **Amended:** 2026-11-16, reworked: each task runs on its own stack of runtime-owned segments, with native frames for compiled code, so native debuggers and profilers can unwind it
+- **Amended:** 2026-11-17, a suspended task lets its isolate run another task; the isolate, not the task, is the host's future (ADR 0008)
 - **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit)
 
 ## Context
@@ -32,7 +33,7 @@ How frames are represented decides all of this:
    - capturing a continuation seals the current segment and continues in a fresh one, copying nothing;
    - reinstating one copies frames back lazily, a chunk at a time, as they are returned through;
    - one-shot uses (async suspension, generators, exceptions) only switch stacks.
-9. **A task can suspend at any call.** When Scheme calls an async bridge, the task switches back to the thread's stack and its future returns `Pending`. Its segments stay as they are. When the future completes, the host polls the task again, possibly on another thread, and it switches back in. This is how Wasmtime's fibers work.
+9. **A task can suspend at any call.** When Scheme calls an async bridge, the task switches back to the thread's stack and its segments stay as they are. The isolate then runs another of its ready tasks, or, if none is ready, its future returns `Pending` (ADR 0008). When the bridge's future completes, the task becomes ready, and the host polls the isolate again, possibly on another thread, which switches the task back in. This is how Wasmtime's fibers work.
 10. **Rust code is never in the middle of a Scheme stack.** A bridge returns a value, asks the runtime to tail-call a Scheme procedure, or returns a future. When Rust really must call Scheme and wait for the answer (a comparison callback inside a Rust sort, say), it starts a nested run behind a continuation barrier. Continuations captured inside the nested run can escape out of it, but cannot re-enter it once it has returned.
 11. **WebAssembly needs a target of its own,** designed in a later ADR. It has no standard stack switching yet, and running Vali's VM inside a WebAssembly engine's own VM is at best a fallback. A real target probably compiles Scheme to WebAssembly directly.
 

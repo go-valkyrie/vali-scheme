@@ -65,7 +65,7 @@ Evaluating Steel and scheme-rs turned up standard procedures that real programs 
 ### Out of scope until a later ADR
 
 - The rest of the R6RS standard library.
-- The Scheme API for tasks and synchronisation (ADR 0008).
+- The Scheme API for parallelism: isolates, channels and shared memory (ADR 0008). SRFI 18 threads are green threads within an isolate.
 
 ## Consequences
 

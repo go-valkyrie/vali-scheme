@@ -34,8 +34,8 @@ Hosts depend on the `vali` crate, which re-exports what they need:
 
 | Path | Contents |
 |---|---|
-| `vali::{Runtime, Isolate}` | `Runtime<S: Strategy = Default>`, isolates, spawning tasks (ADRs 0003 and 0008) |
-| `vali::{Value, Handle}` | Raw values, for the runtime's own code, and handles: `Send`, `'static` roots used through a task's context (ADR 0003) |
+| `vali::{Isolate, Cx}` | `Isolate<S: Strategy = Default>`: a heap and its library instances, used by one thread at a time, entered through `call` and `with`; `Cx`, the context a host or bridge holds while inside it (ADRs 0003 and 0008) |
+| `vali::{Value, Handle}` | Raw values, for the runtime's own code, and handles: `Send`, `'static` roots used through their isolate's context (ADR 0003) |
 | `vali::num`, also re-exported at the top level | `Number`, `Integer`, `Rational`, `Complex` (ADR 0007) |
 | `vali::bridge` | `#[bridge]`, `FromScheme`, `IntoScheme` |
 | `vali::load` | `Loader`, `AsyncLoader`, `LibraryName`, `Identity` (ADR 0009) |

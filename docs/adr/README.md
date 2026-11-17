@@ -23,7 +23,7 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0005](0005-bytecode-format.md) | Bytecode format | Accepted |
 | [0006](0006-relocatable-code-and-abi-versioning.md) | Relocatable code and ABI versioning | Accepted |
 | [0007](0007-language-scope.md) | Language scope | Accepted |
-| [0008](0008-threading-model.md) | Threading model | Proposed |
+| [0008](0008-threading-model.md) | Threading model | Accepted |
 | [0009](0009-loaders-and-capabilities.md) | Loaders and capabilities | Accepted |
 | [0010](0010-declarative-contracts.md) | Declarative contracts | Accepted |
 | [0011](0011-licence-and-contribution-policy.md) | Licence and contribution policy | Accepted |
@@ -32,4 +32,4 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0014](0014-reader-and-source-representation.md) | Reader and source representation | Accepted |
 | [0015](0015-scopes-and-syntax-objects.md) | Scopes and syntax objects | Accepted |
 
-Milestone M0 ends when 0002, 0003, 0004 and 0005 are accepted: they gate the runtime code. 0008 shapes every runtime type too, so it should be settled alongside them.
+Milestone M0 ended with 0002, 0004, 0005 and 0008 accepted. 0003 stays a proposal until M1's measurements choose a memory strategy.
