@@ -171,14 +171,14 @@ fn decoding_errors() {
 }
 
 /// `(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))`, by
-/// hand: each call reserves two slots for the callee's frame record, then
+/// hand: each call reserves three slots for the callee's frame header, then
 /// the procedure, then the argument.
 fn fib_module() -> Module {
     let mut m = ModuleBuilder::new("fib");
     let fib_var = m.variable("fib");
     let fib = m.declare();
 
-    let mut f = FunctionBuilder::new(Some("fib"), Arity::exactly(1), 9, 0);
+    let mut f = FunctionBuilder::new(Some("fib"), Arity::exactly(1), 11, 0);
     let recur = f.label();
     f.branch(
         I::IfLtImm {
@@ -191,26 +191,26 @@ fn fib_module() -> Module {
     f.emit(I::Return { src: 1 });
     f.bind(recur);
     f.emit(I::GetVariable {
-        dst: 4,
+        dst: 5,
         variable: fib_var,
     })
     .emit(I::SubImm {
-        dst: 5,
+        dst: 6,
         a: 1,
         imm: 1,
     })
     .emit(I::Call { base: 2, argc: 1 })
     .emit(I::GetVariable {
-        dst: 7,
+        dst: 9,
         variable: fib_var,
     })
     .emit(I::SubImm {
-        dst: 8,
+        dst: 10,
         a: 1,
         imm: 2,
     })
-    .emit(I::Call { base: 5, argc: 1 })
-    .emit(I::Add { dst: 1, a: 4, b: 7 })
+    .emit(I::Call { base: 6, argc: 1 })
+    .emit(I::Add { dst: 1, a: 5, b: 9 })
     .emit(I::Return { src: 1 });
     m.define(fib, f.finish().unwrap());
 
@@ -240,16 +240,16 @@ fn fib_builds_validates_and_disassembles() {
     validate(&module).unwrap();
     let listing = disassemble(&module.functions[0]);
     let expected = "\
-fib: arity 1, 9 slots, 0 free
+fib: arity 1, 11 slots, 0 free
   0000  if-lt-imm r1, 2, +1  ; -> 0003
   0002  return r1
-  0003  get-variable r4, v0
-  0004  sub-imm r5, r1, 1
+  0003  get-variable r5, v0
+  0004  sub-imm r6, r1, 1
   0005  call r2, 1
-  0006  get-variable r7, v0
-  0007  sub-imm r8, r1, 2
-  0008  call r5, 1
-  0009  add r1, r4, r7
+  0006  get-variable r9, v0
+  0007  sub-imm r10, r1, 2
+  0008  call r6, 1
+  0009  add r1, r5, r9
   0010  return r1
 ";
     assert_eq!(listing, expected);

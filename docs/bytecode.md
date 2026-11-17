@@ -17,13 +17,13 @@ A **function** has a name, an arity, a frame size in slots, a count of free vari
 
 ## Frames
 
-Frames live on a task's stack segments, which grow downward like native stacks (ADR 0004). Each frame starts with a native frame record, the saved frame pointer and the return address, where the platform's ABI puts them. Below it are the frame's slots, which are the VM's registers:
+Frames live on a task's stack segments, which grow downward like native stacks (ADR 0004). Each frame starts with a three-word header: a native frame record, meaning the saved frame pointer and the return address where the platform's ABI puts them, and above it the caller's bytecode position, which unwinders ignore. Below the header are the frame's slots, which are the VM's registers:
 
 - slot 0 holds the running closure;
 - the arguments follow, in slots 1 and up: required, then optional (the default object when omitted), then the rest list if there is one;
 - the remaining slots are locals and temporaries.
 
-**Calls** put the callee's frame inside the caller's. `call base, argc` uses slots `base` and `base + 1` for the callee's frame record, `base + 2` for the procedure, and the next `argc` slots for the arguments, which become the callee's slots 0 to `argc` without being copied. The result arrives in slot `base + 2`. The compiler must leave those slots free, and the validator checks that they lie inside the frame.
+**Calls** put the callee's frame inside the caller's. `call base, argc` uses slots `base` to `base + 2` for the callee's frame header, `base + 3` for the procedure, and the next `argc` slots for the arguments, which become the callee's slots 0 to `argc` without being copied. The result arrives in slot `base + 3`. The compiler must leave those slots free, and the validator checks that they lie inside the frame.
 
 **Tail calls** move the procedure and arguments to slots 0 and up, and reuse the frame.
 
@@ -131,7 +131,7 @@ The loader rejects a module unless:
 - its body exists, and takes no arguments and no free variables;
 - every function has at most 256 slots, and enough for slot 0 and its parameters;
 - every function's code decodes, and its last instruction is `jump`, `tail-call` or `return`, so execution cannot run off the end;
-- every slot operand lies inside the frame, including the record, procedure and arguments of every `call`;
+- every slot operand lies inside the frame, including the header, procedure and arguments of every `call`;
 - every constant, variable, function and free-variable index exists, and every `closure` captures as many slots as its function has free variables;
 - every branch lands on the start of an instruction.
 

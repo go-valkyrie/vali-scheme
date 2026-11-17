@@ -165,7 +165,7 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
                 | Instruction::IfLt { a, b, .. }
                 | Instruction::IfLe { a, b, .. }
                 | Instruction::IfNumEq { a, b, .. } => slot(*a) && slot(*b),
-                Instruction::Call { base, argc } => span(*base, 2 + usize::from(*argc)),
+                Instruction::Call { base, argc } => span(*base, 3 + usize::from(*argc)),
                 Instruction::TailCall { proc, argc } => span(*proc, usize::from(*argc)),
                 Instruction::Return { src } => slot(*src),
                 Instruction::Add { dst, a, b }

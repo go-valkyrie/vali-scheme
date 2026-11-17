@@ -142,9 +142,9 @@ pub enum Instruction {
     IfNull { a: Slot, offset: i32 },
     /// Continue if `a` is a pair; otherwise jump.
     IfPair { a: Slot, offset: i32 },
-    /// Call. Slots `base` and `base + 1` hold the callee's frame record,
-    /// `base + 2` the procedure, and the `argc` slots after it the
-    /// arguments. The result arrives in `base + 2`.
+    /// Call. Slots `base` to `base + 2` hold the callee's frame header,
+    /// `base + 3` the procedure, and the `argc` slots after it the
+    /// arguments. The result arrives in `base + 3`.
     Call { base: Slot, argc: u8 },
     /// Tail call the procedure in `proc` with the `argc` arguments after it,
     /// reusing this frame.
