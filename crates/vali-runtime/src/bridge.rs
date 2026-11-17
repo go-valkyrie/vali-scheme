@@ -681,6 +681,129 @@ impl<S: Strategy> Cx<S> {
     }
 }
 
+/// What `#[vali::bridge]`'s generated code calls: not for use by hand.
+#[doc(hidden)]
+pub mod __private {
+    use super::*;
+
+    pub use std::any::TypeId;
+
+    /// A function's arity, from its parameters' kinds.
+    pub fn arity(kinds: &[ParamKind]) -> Arity {
+        arity_of(kinds)
+    }
+
+    /// Takes the next parameter.
+    ///
+    /// # Safety
+    ///
+    /// `args` must be the values the bridge was called with.
+    pub unsafe fn take<P: Param>(
+        cx: &mut dyn Isolate,
+        args: &[Value],
+        next: &mut usize,
+    ) -> Result<P, Error> {
+        // SAFETY: passed on to the caller.
+        unsafe { P::take(cx, args, next) }.map_err(|bad| bad_arg(cx, bad))
+    }
+
+    /// Takes the next argument as a string, to lend as `&str`.
+    ///
+    /// # Safety
+    ///
+    /// As `take`.
+    pub unsafe fn text(
+        cx: &mut dyn Isolate,
+        args: &[Value],
+        next: &mut usize,
+    ) -> Result<String, Error> {
+        // SAFETY: passed on to the caller.
+        unsafe { take::<String>(cx, args, next) }
+    }
+
+    /// Takes the next argument as a bytevector, to lend as `&[u8]`.
+    ///
+    /// # Safety
+    ///
+    /// As `take`.
+    pub unsafe fn bytes(
+        cx: &mut dyn Isolate,
+        args: &[Value],
+        next: &mut usize,
+    ) -> Result<Vec<u8>, Error> {
+        // SAFETY: passed on to the caller.
+        unsafe { take::<Bytes>(cx, args, next) }.map(|b| b.0)
+    }
+
+    /// Borrows the next argument, a Rust object of type `T`, until
+    /// `release`; the value is returned to release it with.
+    ///
+    /// # Safety
+    ///
+    /// As `take`; the pointer is valid until the borrow is released, and
+    /// only as `&mut` if `exclusive`.
+    pub unsafe fn borrow<T: RustObject>(
+        cx: &mut dyn Isolate,
+        args: &[Value],
+        next: &mut usize,
+        exclusive: bool,
+    ) -> Result<(NonNull<T>, Value), Error> {
+        let v = args[*next];
+        *next += 1;
+        // SAFETY: passed on to the caller.
+        let mut object = unsafe {
+            cx.borrow_object(v, TypeId::of::<T>(), exclusive)
+                .map_err(|e| match e {
+                    BorrowError::WrongType => bad_arg(
+                        cx,
+                        BadArg {
+                            position: *next,
+                            expected: T::NAME,
+                            got: v,
+                        },
+                    ),
+                    BorrowError::Borrowed => {
+                        Error::scheme(format!("{} is already borrowed", T::NAME))
+                    }
+                })?
+        };
+        // SAFETY: the borrow just taken makes the pointer valid.
+        let target = unsafe { object.as_mut() }
+            .as_any_mut()
+            .downcast_mut::<T>()
+            .expect("the type was checked");
+        Ok((NonNull::from(target), v))
+    }
+
+    /// Releases borrows taken with `borrow`.
+    ///
+    /// # Safety
+    ///
+    /// Each value must hold a borrow.
+    pub unsafe fn release(cx: &mut dyn Isolate, values: &[Value]) {
+        for &v in values {
+            // SAFETY: passed on to the caller.
+            unsafe { cx.release_object(v) };
+        }
+    }
+
+    /// Converts a result.
+    pub fn finish<R: IntoScheme>(cx: &mut dyn Isolate, r: R) -> Result<Value, Error> {
+        r.into_scheme(cx)
+    }
+
+    /// Catches a panic in a bridged function, to release its borrows
+    /// before it goes on.
+    pub fn guarded<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+        catch_unwind(AssertUnwindSafe(f))
+    }
+
+    /// Goes on with a panic caught by `guarded`.
+    pub fn resume(panic: Box<dyn std::any::Any + Send>) -> ! {
+        std::panic::resume_unwind(panic)
+    }
+}
+
 // Functions and methods.
 
 type Call = dyn Fn(&mut dyn Isolate, &[Value]) -> Result<Value, Error> + Send + Sync;
@@ -690,6 +813,8 @@ pub struct NativeFunction {
     pub(crate) name: Box<str>,
     pub(crate) arity: Arity,
     call: Box<Call>,
+    /// Its version, if its author marked it expansion-safe (ADR 0009 #15).
+    expansion_safe: Option<u32>,
 }
 
 impl fmt::Debug for NativeFunction {
@@ -710,6 +835,12 @@ impl NativeFunction {
     /// The arguments it takes.
     pub fn arity(&self) -> Arity {
         self.arity
+    }
+
+    /// Its version, if it is marked expansion-safe: deterministic in what
+    /// Vali can see, so it may run at expansion time (ADR 0009 #16).
+    pub fn expansion_safe(&self) -> Option<u32> {
+        self.expansion_safe
     }
 
     /// Calls it with `args`, which the VM has checked against its arity.
@@ -923,15 +1054,25 @@ pub(crate) fn native_procedure<S: Strategy>(
     let (Some(identity), Some(name)) = (identity, name) else {
         return Err(Error::scheme("%native-procedure: expected two strings"));
     };
-    let function = match cx.native_libraries.get(&*identity) {
-        Some(library) => library
-            .functions()
-            .iter()
-            .find(|f| *f.name == *name)
-            .cloned()
-            .ok_or_else(|| Error::scheme(format!("{identity} has no function {name}")))?,
-        None => {
-            let message = format!("{name}: cannot be called at expansion time");
+    let found = match cx.native_libraries.get(&*identity) {
+        Some(library) => Some(
+            library
+                .functions()
+                .iter()
+                .find(|f| *f.name == *name)
+                .cloned()
+                .ok_or_else(|| Error::scheme(format!("{identity} has no function {name}")))?,
+        ),
+        None => None,
+    };
+    let function = match found {
+        Some(f) if !cx.expanding || f.expansion_safe.is_some() => f,
+        _ => {
+            let message = if cx.expanding {
+                format!("{name}: cannot be called at expansion time")
+            } else {
+                format!("{name}: the native library {identity} is not registered")
+            };
             Arc::new(NativeFunction {
                 name: name.into(),
                 arity: Arity {
@@ -940,6 +1081,7 @@ pub(crate) fn native_procedure<S: Strategy>(
                     rest: true,
                 },
                 call: Box::new(move |_, _| Err(Error::scheme(message.clone()))),
+                expansion_safe: None,
             })
         }
     };
@@ -978,7 +1120,42 @@ impl NativeLibrary {
             name: name.into(),
             arity,
             call,
+            expansion_safe: None,
         }));
+        self
+    }
+
+    /// Adds a function whose conversions are written out, as
+    /// `#[vali::bridge]` writes them.
+    #[doc(hidden)]
+    pub fn raw(
+        self,
+        name: &str,
+        arity: Arity,
+        call: impl Fn(&mut dyn Isolate, &[Value]) -> Result<Value, Error> + Send + Sync + 'static,
+    ) -> NativeLibrary {
+        self.add(name, arity, Box::new(call))
+    }
+
+    /// Marks the function added last expansion-safe, at `version`: it is
+    /// deterministic in what Vali can see, so macros may call it (ADR 0009
+    /// #15 and #16). Raise the version when its results change.
+    pub fn expansion_safe(mut self, version: u32) -> NativeLibrary {
+        if let Some(last) = self.functions.last_mut() {
+            Arc::get_mut(last)
+                .expect("a library being built is not shared yet")
+                .expansion_safe = Some(version);
+        }
+        self
+    }
+
+    /// Marks every function added so far expansion-safe, at `version`.
+    pub fn all_expansion_safe(mut self, version: u32) -> NativeLibrary {
+        for f in &mut self.functions {
+            Arc::get_mut(f)
+                .expect("a library being built is not shared yet")
+                .expansion_safe = Some(version);
+        }
         self
     }
 

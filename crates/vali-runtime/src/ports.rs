@@ -350,7 +350,9 @@ pub fn library() -> Arc<NativeLibrary> {
                 .method("write-string", Port::write_string)
                 .method("write-u8", Port::write_u8)
                 .method("write-bytevector", Port::write_bytevector)
-                .method("flush-output-port", Port::flush),
+                .method("flush-output-port", Port::flush)
+                // String ports do nothing outside the program.
+                .all_expansion_safe(1),
         )
     }))
 }

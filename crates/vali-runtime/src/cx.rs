@@ -81,6 +81,9 @@ pub struct Cx<S: Strategy> {
     /// The native libraries loaded programs brought, by identity, which
     /// `%native-procedure` finds functions in.
     pub(crate) native_libraries: HashMap<Box<str>, Arc<crate::bridge::NativeLibrary>>,
+    /// Whether this is an expander's isolate, where only expansion-safe
+    /// native functions run (ADR 0009 #17).
+    pub(crate) expanding: bool,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -151,7 +154,14 @@ impl<S: Strategy> Cx<S> {
             console_error: None,
             objects: Default::default(),
             native_libraries: HashMap::new(),
+            expanding: false,
         }
+    }
+
+    /// Makes this an expander's isolate: a native function not marked
+    /// expansion-safe is a stub that fails when called (ADR 0009 #17).
+    pub fn set_expanding(&mut self, expanding: bool) {
+        self.expanding = expanding;
     }
 
     /// The strategy's state.

@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 vali-abi.workspace = true
 vali-bytecode.workspace = true
+vali-macros.workspace = true
 vali-num.workspace = true
 vali-syntax.workspace = true
 

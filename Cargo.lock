@@ -513,6 +513,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vali-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "vali-num"
 version = "0.0.0"
 dependencies = [
@@ -528,6 +537,7 @@ dependencies = [
  "libc",
  "vali-abi",
  "vali-bytecode",
+ "vali-macros",
  "vali-num",
  "vali-syntax",
 ]

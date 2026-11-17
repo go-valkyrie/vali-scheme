@@ -188,11 +188,14 @@ fn build(
         names[i].push(name);
     }
     let mut libraries = Vec::new();
-    let natives = graph
+    let natives: Vec<_> = graph
         .libraries
         .iter()
         .filter_map(|l| Some((l.identity.clone(), l.native.clone()?)))
         .collect();
+    for (identity, library) in &natives {
+        expander.add_native(identity.as_str(), std::sync::Arc::clone(library));
+    }
     for (library, names) in graph.libraries.iter().zip(names) {
         for name in names {
             expander.name_next(name);

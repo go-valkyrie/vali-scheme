@@ -69,6 +69,7 @@ pub(crate) const SYNTAX_BUILD: &str = "%syntax-build";
 /// procedures.
 pub(crate) fn instance() -> Result<Cx<NoCollection>, Error> {
     let mut cx = Cx::new(&HeapConfig::default());
+    cx.set_expanding(true);
     cx.install_primitives()?;
     install(&mut cx)?;
     Ok(cx)

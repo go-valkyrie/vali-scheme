@@ -219,3 +219,144 @@ fn native_libraries_come_through_the_loader() {
         "{error}"
     );
 }
+
+/// A Rust object and its bridge, written with the macros.
+#[vali_runtime::object]
+struct Greeter {
+    greeting: String,
+}
+
+#[vali_runtime::bridge]
+impl Greeter {
+    #[scheme(name = "make-greeter")]
+    fn new(greeting: &str) -> Greeter {
+        Greeter {
+            greeting: greeting.to_owned(),
+        }
+    }
+
+    fn greet(&self, name: &str) -> String {
+        format!("{}, {name}", self.greeting)
+    }
+
+    #[scheme(name = "greeter-set!")]
+    fn set(&mut self, greeting: &str) {
+        self.greeting = greeting.to_owned();
+    }
+
+    fn byte_sum(bytes: &[u8]) -> u64 {
+        bytes.iter().map(|&b| u64::from(b)).sum()
+    }
+
+    #[scheme(name = "same-greeting?")]
+    fn same(&self, other: &Greeter) -> bool {
+        self.greeting == other.greeting
+    }
+
+    #[scheme(name = "copy-greeting!")]
+    fn copy_from(&mut self, other: &Greeter) {
+        self.greeting = other.greeting.clone();
+    }
+
+    #[scheme(expansion_safe, version = 2)]
+    fn shout(text: &str) -> String {
+        text.to_uppercase()
+    }
+
+    #[scheme(skip)]
+    #[allow(dead_code)]
+    fn helper(&self) -> usize {
+        self.greeting.len()
+    }
+}
+
+fn greeters() -> NativeLibrary {
+    Greeter::bridge(NativeLibrary::new(&["test", "greeters"]))
+}
+
+#[test]
+fn the_macros_write_the_bridges() {
+    let run = |source: &str| -> Result<String, String> {
+        let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
+            .map_err(|e| e.message)?;
+        let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().map_err(|e| e.to_string())?;
+        cx.define_globals(&greeters()).map_err(|e| e.to_string())?;
+        let id = vali_compiler::load(&mut cx, program).map_err(|e| e.to_string())?;
+        let result = cx.run(id).map_err(|e| e.to_string())?;
+        cx.write_string(&result).map_err(|e| e.to_string())
+    };
+    assert_eq!(
+        run("(define g (make-greeter \"hello\"))
+             (define h (make-greeter \"hi\"))
+             (greeter-set! g \"hi\")
+             (list (greet g \"you\") (byte-sum (bytevector 1 2 3)) (same-greeting? g h)
+                   (same-greeting? g g) (shout \"abc\") g)")
+        .as_deref(),
+        Ok("(\"hi, you\" 6 #t #t \"ABC\" #<greeter>)")
+    );
+    // Lending `g` as `&mut` and as `&` at once is refused, not undefined.
+    let error = run("(define g (make-greeter \"x\")) (copy-greeting! g g)").unwrap_err();
+    assert!(error.contains("greeter is already borrowed"), "{error}");
+    let error = run("(greet 5 \"x\")").unwrap_err();
+    assert!(
+        error.contains("greet: argument 1: expected greeter, got 5"),
+        "{error}"
+    );
+    let error = run("(greet (make-greeter \"x\") 'y)").unwrap_err();
+    assert!(
+        error.contains("greet: argument 2: expected a string, got y"),
+        "{error}"
+    );
+    let error = run("(define g (make-greeter \"x\")) (helper g)").unwrap_err();
+    assert!(error.contains("helper"), "{error}");
+}
+
+/// Serves `(test greeters)` as a native library.
+struct Greeters;
+
+impl Loader for Greeters {
+    fn load(
+        &self,
+        name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        Ok((name.to_string() == "(test greeters)").then(|| {
+            Source::native(
+                Identity::new("native:test/greeters"),
+                std::sync::Arc::new(greeters()),
+            )
+        }))
+    }
+}
+
+#[test]
+fn expansion_safe_functions_run_at_expansion_time() {
+    let compile = |source: &str| {
+        vali_compiler::compile_program(source, &Identity::new("main"), &Greeters)
+            .map_err(|e| e.message)
+    };
+    let program = compile(
+        "(import (scheme base) (test greeters))
+         (define-syntax m
+           (lambda (stx)
+             (syntax-case stx () ((k) (datum->syntax (syntax k) (shout \"made at expansion\"))))))
+         (m)",
+    )
+    .unwrap();
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    let id = vali_compiler::load(&mut cx, program).unwrap();
+    let result = cx.run(id).unwrap();
+    assert_eq!(cx.write_string(&result).unwrap(), "\"MADE AT EXPANSION\"");
+    let error = compile(
+        "(import (scheme base) (test greeters))
+         (define-syntax m (lambda (stx) (greet (make-greeter \"x\") \"y\") (syntax 1)))
+         (m)",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("make-greeter: cannot be called at expansion time"),
+        "{error}"
+    );
+}

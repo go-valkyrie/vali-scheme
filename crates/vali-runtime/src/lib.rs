@@ -49,6 +49,7 @@ pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, Pa
 pub use primitives::primitive_names;
 pub use rust_objects::RustObject;
 pub use strategy::{Allocate, References, Space, Strategy};
+pub use vali_macros::{bridge, object};
 pub use value::Value;
 
 /// The strategy used when none is named, until M1's measurements choose one.

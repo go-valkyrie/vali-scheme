@@ -206,6 +206,9 @@ pub(crate) struct Expander {
     /// For each transformer being expanded, one inside another, where its
     /// `lambda` sits in `stack`. Code above the innermost runs at phase 1.
     floors: Vec<usize>,
+    /// The native libraries the program imports, which the phase-1
+    /// isolate registers, so their expansion-safe functions run there.
+    natives: Vec<(String, std::sync::Arc<vali_runtime::NativeLibrary>)>,
 }
 
 impl Expander {
@@ -243,8 +246,22 @@ impl Expander {
             phase1: None,
             compiled: Compiled::default(),
             floors: Vec::new(),
+            natives: Vec::new(),
         };
         Ok(expander)
+    }
+
+    /// Notes a native library the program imports, for the phase-1
+    /// isolate to register.
+    pub(crate) fn add_native(
+        &mut self,
+        identity: &str,
+        library: std::sync::Arc<vali_runtime::NativeLibrary>,
+    ) {
+        if let Some(cx) = self.phase1.as_mut() {
+            cx.register_native_library(identity, std::sync::Arc::clone(&library));
+        }
+        self.natives.push((identity.to_owned(), library));
     }
 
     /// Notes that `name` is a library's name for the next unit compiled.
@@ -712,10 +729,13 @@ impl Expander {
     /// The phase-1 isolate, made on first use.
     fn phase1(&mut self) -> Result<&mut Cx<NoCollection>> {
         if self.phase1.is_none() {
-            let cx = phase::instance().map_err(|e| CompileError {
+            let mut cx = phase::instance().map_err(|e| CompileError {
                 message: format!("the expander's isolate: {e}"),
                 span: None,
             })?;
+            for (identity, library) in &self.natives {
+                cx.register_native_library(identity, std::sync::Arc::clone(library));
+            }
             self.phase1 = Some(cx);
         }
         Ok(self.phase1.as_mut().expect("just made"))
