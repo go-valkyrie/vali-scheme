@@ -20,13 +20,15 @@ mod imp {
 
     /// Bytes per stub.
     const STUB: usize = 16;
-    /// `push rbp; mov rbp, rsp; nop; ud2`, padded with `int3`.
+    /// `push rbp; mov rbp, rsp; nop` four times, `ud2`, padded with `int3`.
     const CODE: [u8; STUB] = [
-        0x55, 0x48, 0x89, 0xe5, 0x90, 0x0f, 0x0b, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        0x55, 0x48, 0x89, 0xe5, 0x90, 0x90, 0x90, 0x90, 0x0f, 0x0b, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
         0xcc,
     ];
-    /// Where a frame's return address points: just after the `nop`.
-    const RESUME: usize = 5;
+    /// Where a frame's return address points: just after the `nop`s, 8-byte
+    /// aligned, so a return address left in a frame's slots reads as a
+    /// fixnum to an epoch.
+    const RESUME: usize = 8;
 
     #[repr(C)]
     struct JitCodeEntry {

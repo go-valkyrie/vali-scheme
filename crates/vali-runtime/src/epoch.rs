@@ -4,8 +4,10 @@
 //! An epoch runs only at a safepoint: a call, a loop's backward jump, or a
 //! return to the host. There, every frame slot holds a valid value, so the
 //! stack is scanned exactly: each frame's slots up to the call it is making,
-//! and the innermost frame's every slot. Raw values in Rust stay valid
-//! because no epoch runs inside a Rust procedure.
+//! and the innermost frame's every slot. A header a returned callee left in
+//! its caller's slots reads as fixnums: an aligned frame pointer, an aligned
+//! return address and a position word whose low bits are zero. Raw values in
+//! Rust stay valid because no epoch runs inside a Rust procedure.
 
 use crate::code::Kind;
 use crate::cx::Cx;
@@ -38,7 +40,7 @@ impl<S: Strategy> Cx<S> {
                 }
                 // The caller's slots from the call's base on hold this
                 // frame's header and its own slots.
-                limit = ((position >> 32) & 0xFFFF) as usize;
+                limit = crate::vm::position_base(position);
                 fp = *fp as *mut u64;
             }
         }

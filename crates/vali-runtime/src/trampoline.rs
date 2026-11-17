@@ -77,6 +77,8 @@ mod imp {
         "mov rbp, rsp",
         ".cfi_def_cfa_register rbp",
         "nop",
+        // Return addresses are 8-byte aligned, so they read as fixnums.
+        ".p2align 3, 0x90",
         ".globl vali_interpreted_resume",
         "vali_interpreted_resume:",
         "ud2",
@@ -97,6 +99,7 @@ mod imp {
         "mov rbp, rsp",
         ".cfi_def_cfa_register rbp",
         "nop",
+        ".p2align 3, 0x90",
         ".globl vali_interpreted_boundary_resume",
         "vali_interpreted_boundary_resume:",
         "ud2",
@@ -116,6 +119,7 @@ mod imp {
         // DW_CFA_expression return address (16): DW_OP_breg6 8
         ".cfi_escape 0x10, 0x10, 0x02, 0x76, 0x08",
         "nop",
+        ".p2align 3, 0x90",
         ".globl vali_interpreted_entry_resume",
         "vali_interpreted_entry_resume:",
         "ud2",

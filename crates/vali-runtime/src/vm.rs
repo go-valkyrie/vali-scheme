@@ -66,9 +66,23 @@ unsafe impl Send for Catch {}
 
 /// A frame's position word: where the caller resumes, and the caller's
 /// `base`, so the result can be stored even when the frame was moved to a
-/// new segment.
+/// new segment, with the flags `resume` carries. The low three bits stay
+/// zero, so the word reads as a fixnum: a header left in a caller's slots
+/// after its callee returns is never mistaken for a pointer when an epoch
+/// scans them, as the saved frame pointer and the 8-aligned return address
+/// beside it aren't either.
 fn position(resume: u64, base: usize) -> u64 {
-    resume | (base as u64) << 32
+    ((resume & 0xFFFF_FFFF) << 3) | (base as u64) << 35 | (resume & (CATCH | BOUNDARY))
+}
+
+/// The `base` a position word records.
+pub(crate) fn position_base(position: u64) -> usize {
+    ((position >> 35) & 0xFFFF) as usize
+}
+
+/// Where the caller resumes, from a position word.
+fn position_resume(position: u64) -> u64 {
+    (position >> 3) & 0xFFFF_FFFF
 }
 
 /// Whether a frame of `words` slots fits below `fp` without crossing
@@ -1154,8 +1168,8 @@ impl<S: Strategy> Cx<S> {
                                 };
                                 self.catches.push(Catch {
                                     fp: *fp as *mut u64,
-                                    base: ((position >> 32) & 0xFFFF) as usize,
-                                    resume: position & 0xFFFF_FFFF,
+                                    base: position_base(position),
+                                    resume: position_resume(position),
                                     segments,
                                     handler: slot(fp, 2),
                                 });
@@ -1200,7 +1214,9 @@ impl<S: Strategy> Cx<S> {
                                         old
                                     } else {
                                         let base = (saved as usize - fp as usize) / 8 - 3;
-                                        position(old & 0xFFFF_FFFF, base) | BOUNDARY | (old & CATCH)
+                                        position(position_resume(old), base)
+                                            | BOUNDARY
+                                            | (old & CATCH)
                                     };
                                     let (top, new_limit) = attempt!(self.push_segment(needed + 4));
                                     fp = top.sub(if position == ENTRY { 4 } else { 3 });
@@ -1233,20 +1249,13 @@ impl<S: Strategy> Cx<S> {
                             self.catch_returned();
                         }
                         let caller = *fp as *mut u64;
-                        let base = ((position >> 32) & 0xFFFF) as usize;
+                        let base = position_base(position);
                         set(caller, base + 3, value);
-                        if S::COUNTS {
-                            // The callee's header, in the caller's slots,
-                            // is not values: an epoch scans those slots.
-                            set(caller, base, Value::UNSPECIFIED);
-                            set(caller, base + 1, Value::UNSPECIFIED);
-                            set(caller, base + 2, Value::UNSPECIFIED);
-                        }
                         if position & BOUNDARY != 0 {
                             limit = self.pop_segment();
                         }
                         fp = caller;
-                        pc = (position & 0xFFFF_FFFF) as usize;
+                        pc = position_resume(position) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
                         link_to!(fp, stub_of!(*fp.add(2), caller));
                         switch_to!(caller);
