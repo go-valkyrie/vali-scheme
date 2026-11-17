@@ -154,3 +154,55 @@ fn gdb_backtrace() {
     // f 3, f 2, f 1 and f 0: four interpreted frames, the last the bottom.
     assert_eq!(interpreted, 4, "{}", frames.join("\n"));
 }
+
+#[test]
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn lldb_backtrace() {
+    if Command::new("lldb").arg("--version").output().is_err() {
+        eprintln!("lldb is not installed; skipping");
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let output = Command::new("lldb")
+        .args([
+            "--batch",
+            "-o",
+            "breakpoint set -n vali_test_breakpoint",
+            "-o",
+            "process launch -- --exact debugger_child --test-threads=1",
+            "-o",
+            "bt",
+        ])
+        .arg(&exe)
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    // The stop report repeats frame 0; the backtrace follows it.
+    let frames: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("frame #"))
+        .skip(1)
+        .collect();
+    let position = |name: &str| {
+        frames
+            .iter()
+            .position(|f| f.contains(name))
+            .unwrap_or_else(|| panic!("no {name} frame in:\n{}", frames.join("\n")))
+    };
+    let breakpoint = position("vali_test_breakpoint");
+    let trampoline = position("vali_vm_enter");
+    let bottom = position("vali_interpreted_entry");
+    let host = position("debugger_child");
+    let interpreted = frames
+        .iter()
+        .filter(|f| f.contains("vali_interpreted"))
+        .count();
+    assert!(breakpoint < trampoline, "{}", frames.join("\n"));
+    assert!(
+        trampoline < bottom && bottom < host,
+        "{}",
+        frames.join("\n")
+    );
+    assert_eq!(interpreted, 4, "{}", frames.join("\n"));
+}
