@@ -276,3 +276,42 @@ fn apply_from_bytecode() {
         .unwrap();
     assert_eq!(result.as_fixnum(), Some(110));
 }
+
+#[test]
+fn number_and_type_predicates() {
+    let mut cx = cx();
+    let cases = [
+        ("number?", "1.5", "#t"),
+        ("number?", "a", "#f"),
+        ("integer?", "2.0", "#t"),
+        ("integer?", "2.5", "#f"),
+        ("exact?", "123456789012345678901234567890", "#t"),
+        ("inexact?", "1.0", "#t"),
+        ("zero?", "-0.0", "#t"),
+        ("positive?", "123456789012345678901234567890", "#t"),
+        ("negative?", "-1", "#t"),
+        ("odd?", "7", "#t"),
+        ("even?", "123456789012345678901234567890", "#t"),
+        ("abs", "-5", "5"),
+        ("abs", "-1152921504606846976", "1152921504606846976"),
+        ("min", "3 1 2", "1"),
+        ("max", "1 2.0", "2.0"),
+        ("exact->inexact", "3", "3.0"),
+        ("inexact->exact", "4.0", "4"),
+        ("inexact->exact", "1e30", "1000000000000000019884624838656"),
+        ("inexact->exact", "-3.0", "-3"),
+        ("boolean?", "#f", "#t"),
+        ("vector?", "#(1)", "#t"),
+        ("list?", "(1 2)", "#t"),
+        ("list?", "(1 . 2)", "#f"),
+        ("list?", "#0=(1 . #0#)", "#f"),
+        ("symbol=?", "a a a", "#t"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+    let car = cx.global("car").unwrap();
+    let procedure = cx.global("procedure?").unwrap();
+    let yes = cx.call(&procedure, &[car]).unwrap();
+    assert_eq!(yes.as_boolean(), Some(true));
+}

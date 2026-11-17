@@ -614,6 +614,224 @@ fn list_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error>
     Ok(unsafe { cx.car(pair) })
 }
 
+fn number_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Num, Error> {
+    cx.number(v).ok_or_else(|| type_error(name, "a number", v))
+}
+
+fn is_number<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(cx.number(args[0]).is_some()))
+}
+
+fn is_integer<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(match cx.number(args[0]) {
+        Some(Num::Fixnum(_) | Num::Integer(_)) => true,
+        Some(Num::Flonum(x)) => x.is_finite() && x.fract() == 0.0,
+        None => false,
+    }))
+}
+
+fn is_exact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(
+        number_arg(cx, "exact?", args[0])?.exact().is_some(),
+    ))
+}
+
+fn is_inexact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(
+        number_arg(cx, "inexact?", args[0])?.exact().is_none(),
+    ))
+}
+
+/// The sign of a number: -1, 0 or 1, with NaN as 0.
+fn sign<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<i32, Error> {
+    Ok(match number_arg(cx, name, v)? {
+        Num::Fixnum(n) => n.signum() as i32,
+        Num::Integer(n) if n.is_zero() => 0,
+        Num::Integer(n) => {
+            if n.is_negative() {
+                -1
+            } else {
+                1
+            }
+        }
+        Num::Flonum(x) if x > 0.0 => 1,
+        Num::Flonum(x) if x < 0.0 => -1,
+        Num::Flonum(_) => 0,
+    })
+}
+
+fn is_zero<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let zero = match number_arg(cx, "zero?", args[0])? {
+        Num::Flonum(x) => x == 0.0,
+        _ => sign(cx, "zero?", args[0])? == 0,
+    };
+    Ok(Value::boolean(zero))
+}
+
+fn is_positive<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(sign(cx, "positive?", args[0])? > 0))
+}
+
+fn is_negative<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(sign(cx, "negative?", args[0])? < 0))
+}
+
+fn parity<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<bool, Error> {
+    match cx.number(v) {
+        Some(Num::Fixnum(n)) => Ok(n % 2 != 0),
+        Some(Num::Integer(n)) => Ok(n.limbs().1.first().is_some_and(|l| l & 1 != 0)),
+        Some(Num::Flonum(x)) if x.is_finite() && x.fract() == 0.0 => Ok(x % 2.0 != 0.0),
+        _ => Err(type_error(name, "an integer", v)),
+    }
+}
+
+fn is_odd<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(parity(cx, "odd?", args[0])?))
+}
+
+fn is_even<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(!parity(cx, "even?", args[0])?))
+}
+
+fn abs<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    if sign(cx, "abs", args[0])? < 0 {
+        cx.arith(Arith::Sub, Value::fixnum(0).expect("fits"), args[0])
+    } else {
+        Ok(args[0])
+    }
+}
+
+/// `min` and `max`: if any argument is inexact, so is the result.
+fn extremum<S: Strategy>(
+    cx: &mut Cx<S>,
+    name: &str,
+    args: &[Value],
+    pick_greater: bool,
+) -> Result<Value, Error> {
+    let mut best = args[0];
+    number_arg(cx, name, best)?;
+    let mut inexact = cx.number(best).is_some_and(|n| n.exact().is_none());
+    for &x in &args[1..] {
+        inexact |= number_arg(cx, name, x)?.exact().is_none();
+        let x_less = cx.compare(Compare::Lt, x, best)?;
+        let best_less = cx.compare(Compare::Lt, best, x)?;
+        if (pick_greater && best_less) || (!pick_greater && x_less) {
+            best = x;
+        }
+    }
+    if inexact {
+        let x = cx.number(best).expect("checked").to_f64();
+        return Ok(cx.flonum_raw(x)?);
+    }
+    Ok(best)
+}
+
+fn min<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    extremum(cx, "min", args, false)
+}
+
+fn max<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    extremum(cx, "max", args, true)
+}
+
+fn exact_to_inexact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let x = number_arg(cx, "exact->inexact", args[0])?.to_f64();
+    Ok(cx.flonum_raw(x)?)
+}
+
+/// `inexact->exact` for whole numbers; other flonums need rationals.
+fn inexact_to_exact<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    match number_arg(cx, "inexact->exact", args[0])? {
+        Num::Flonum(x) if x.is_finite() && x.fract() == 0.0 => {
+            Ok(cx.integer_raw(&whole_flonum(x))?)
+        }
+        Num::Flonum(_) => Err(Error::scheme(
+            "inexact->exact: rationals are not supported in the heap yet",
+        )),
+        _ => Ok(args[0]),
+    }
+}
+
+/// The exact integer a finite, whole flonum equals: its significand shifted
+/// by its exponent.
+fn whole_flonum(x: f64) -> vali_num::Integer {
+    use vali_num::Integer;
+    let bits = x.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i64;
+    let fraction = bits & ((1 << 52) - 1);
+    let significand = if exponent == 0 {
+        fraction << 1
+    } else {
+        fraction | 1 << 52
+    };
+    // x = significand × 2^shift
+    let shift = exponent - 1075;
+    let mut n = if shift >= 0 {
+        let mut n = Integer::from(significand);
+        let mut left = shift;
+        while left > 0 {
+            let step = left.min(62);
+            n = &n * &Integer::from(1u64 << step);
+            left -= step;
+        }
+        n
+    } else {
+        // Whole, so the bits shifted out are zero.
+        Integer::from(significand >> (-shift).min(63))
+    };
+    if x < 0.0 {
+        n = &Integer::from(0) - &n;
+    }
+    n
+}
+
+fn is_boolean<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(args[0].as_boolean().is_some()))
+}
+
+fn is_procedure<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(args[0].tag() == Tag::Closure))
+}
+
+fn is_vector<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    // SAFETY: a valid value.
+    Ok(Value::boolean(
+        unsafe { cx.header_type(args[0]) } == Some(TypeCode::Vector),
+    ))
+}
+
+/// `list?`: a proper list, which is never circular.
+fn is_list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let (mut slow, mut fast) = (args[0], args[0]);
+    loop {
+        for _ in 0..2 {
+            if fast == Value::EMPTY_LIST {
+                return Ok(Value::TRUE);
+            }
+            if !fast.is_pair() {
+                return Ok(Value::FALSE);
+            }
+            // SAFETY: a live pair.
+            fast = unsafe { cx.cdr(fast) };
+        }
+        // SAFETY: the slow pointer trails the fast one through pairs already
+        // checked.
+        slow = unsafe { cx.cdr(slow) };
+        if slow == fast {
+            return Ok(Value::FALSE);
+        }
+    }
+}
+
+fn symbol_eq<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    for &x in args {
+        if x.tag() != Tag::Symbol {
+            return Err(type_error("symbol=?", "a symbol", x));
+        }
+    }
+    Ok(Value::boolean(args.windows(2).all(|p| p[0] == p[1])))
+}
+
 /// `(apply f a ... list)`: asks the VM to tail-call `f`.
 fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
@@ -690,6 +908,25 @@ impl<S: Strategy> Cx<S> {
             ("list-tail", Arity::exactly(2), list_tail),
             ("list-ref", Arity::exactly(2), list_ref),
             ("apply", at_least(1), apply),
+            ("number?", Arity::exactly(1), is_number),
+            ("integer?", Arity::exactly(1), is_integer),
+            ("exact?", Arity::exactly(1), is_exact),
+            ("inexact?", Arity::exactly(1), is_inexact),
+            ("zero?", Arity::exactly(1), is_zero),
+            ("positive?", Arity::exactly(1), is_positive),
+            ("negative?", Arity::exactly(1), is_negative),
+            ("odd?", Arity::exactly(1), is_odd),
+            ("even?", Arity::exactly(1), is_even),
+            ("abs", Arity::exactly(1), abs),
+            ("min", at_least(1), min),
+            ("max", at_least(1), max),
+            ("exact->inexact", Arity::exactly(1), exact_to_inexact),
+            ("inexact->exact", Arity::exactly(1), inexact_to_exact),
+            ("boolean?", Arity::exactly(1), is_boolean),
+            ("procedure?", Arity::exactly(1), is_procedure),
+            ("vector?", Arity::exactly(1), is_vector),
+            ("list?", Arity::exactly(1), is_list),
+            ("symbol=?", at_least(1), symbol_eq),
         ];
         for &(name, arity, f) in table {
             self.define_native(name, arity, f)?;
