@@ -210,7 +210,13 @@ const STANDARD: &[(&[&str], &str)] = &[
         &["scheme", "inexact"],
         include_str!("../lib/scheme/inexact.sld"),
     ),
+    (&["scheme", "file"], include_str!("../lib/scheme/file.sld")),
     (&["scheme", "lazy"], include_str!("../lib/scheme/lazy.sld")),
+    (
+        &["scheme", "process-context"],
+        include_str!("../lib/scheme/process-context.sld"),
+    ),
+    (&["scheme", "read"], include_str!("../lib/scheme/read.sld")),
     (
         &["scheme", "write"],
         include_str!("../lib/scheme/write.sld"),
@@ -218,8 +224,15 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["srfi", "64"], include_str!("../lib/srfi/64.sld")),
 ];
 
-/// The source of the standard library `name`, if it is one.
+/// The source of the standard library `name`, if it is one: Scheme
+/// source, or one of Vali's own native libraries.
 fn standard(name: &LibraryName) -> Option<Source> {
+    if *name == LibraryName::new(["vali", "ports"]) {
+        return Some(Source::native(
+            Identity::new("vali:vali/ports"),
+            vali_runtime::ports::library(),
+        ));
+    }
     let (parts, text) = STANDARD
         .iter()
         .find(|(parts, _)| *name == LibraryName::new(parts.iter().copied()))?;

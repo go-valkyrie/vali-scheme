@@ -15,6 +15,7 @@ use vali_num::Number;
 
 use crate::cx::Cx;
 use crate::handle::{Error, Handle};
+use crate::ports::Style;
 use crate::strategy::Strategy;
 use crate::value::Value;
 
@@ -71,9 +72,9 @@ impl<S: Strategy> Printer<'_, S> {
     }
 
     /// Finds the objects that close a cycle: those reached again while
-    /// still being visited. Iterative, so long lists don't overflow the
-    /// Rust stack.
-    fn find_cycles(&mut self, root: Value) {
+    /// still being visited; with `shared`, every object reached twice.
+    /// Iterative, so long lists don't overflow the Rust stack.
+    fn find_cycles(&mut self, root: Value, shared: bool) {
         #[derive(PartialEq)]
         enum State {
             Visiting,
@@ -95,7 +96,12 @@ impl<S: Strategy> Printer<'_, S> {
                     self.labels.insert(v.raw(), None);
                     continue;
                 }
-                Some(State::Done) => continue,
+                Some(State::Done) => {
+                    if shared {
+                        self.labels.insert(v.raw(), None);
+                    }
+                    continue;
+                }
                 None => {}
             }
             state.insert(v.raw(), State::Visiting);
@@ -322,6 +328,21 @@ impl<S: Strategy> Printer<'_, S> {
 
 impl<S: Strategy> Cx<S> {
     fn print(&self, v: Value, mode: Mode) -> String {
+        let style = match mode {
+            Mode::Write => Style::Write,
+            Mode::Display => Style::Display,
+        };
+        self.print_styled(v, style)
+    }
+
+    /// `v` as one of R7RS's printing procedures prints it: `write` labels
+    /// what closes a cycle, `write-shared` everything shared, and
+    /// `write-simple` nothing, so it never ends on a cycle.
+    pub(crate) fn print_styled(&self, v: Value, style: Style) -> String {
+        let mode = match style {
+            Style::Display => Mode::Display,
+            _ => Mode::Write,
+        };
         let mut printer = Printer {
             cx: self,
             mode,
@@ -329,7 +350,11 @@ impl<S: Strategy> Cx<S> {
             next_label: 0,
             out: String::new(),
         };
-        printer.find_cycles(v);
+        match style {
+            Style::WriteSimple => {}
+            Style::WriteShared => printer.find_cycles(v, true),
+            Style::Display | Style::Write => printer.find_cycles(v, false),
+        }
         printer.print(v);
         printer.out
     }

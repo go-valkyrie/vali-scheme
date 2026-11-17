@@ -10,10 +10,10 @@ use vali_bytecode::Arity;
 use crate::code::NativeFn;
 use crate::cx::Cx;
 use crate::handle::Error;
+use crate::records;
 use crate::strategy::Strategy;
 use crate::value::Value;
 use crate::vm::type_error;
-use crate::{output, records};
 
 const fn at_least(n: u8) -> Arity {
     Arity {
@@ -518,11 +518,29 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ),
         ("values", at_least(0), records::values),
         ("%values->list", Arity::exactly(1), records::values_to_list),
-        ("display", one_or_two(), output::display),
-        ("write", one_or_two(), output::write),
-        ("newline", zero_or_one(), output::newline),
-        ("write-string", one_or_two(), output::write_string),
-        ("write-char", one_or_two(), output::write_char),
+        ("%write-to", Arity::exactly(3), crate::ports::write_to),
+        ("%read", Arity::exactly(1), crate::ports::read),
+        (
+            "%console-input",
+            Arity::exactly(0),
+            crate::ports::console_input,
+        ),
+        (
+            "%console-output",
+            Arity::exactly(0),
+            crate::ports::console_output,
+        ),
+        (
+            "%console-error",
+            Arity::exactly(0),
+            crate::ports::console_error,
+        ),
+        ("eof-object", Arity::exactly(0), crate::ports::eof_object),
+        (
+            "eof-object?",
+            Arity::exactly(1),
+            crate::ports::is_eof_object,
+        ),
         (
             "%make-record-type",
             Arity::exactly(2),
@@ -563,31 +581,16 @@ pub fn primitive_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// An object, then an optional port.
-fn one_or_two() -> Arity {
-    Arity {
-        required: 1,
-        optional: 1,
-        rest: false,
-    }
-}
-
-/// An optional port.
-fn zero_or_one() -> Arity {
-    Arity {
-        required: 0,
-        optional: 1,
-        rest: false,
-    }
-}
-
 impl<S: Strategy> Cx<S> {
-    /// Binds the standard procedures implemented so far as globals.
+    /// Binds the standard procedures implemented so far as globals, and
+    /// registers Vali's own native libraries, which are deterministic, so
+    /// they work at expansion time too.
     pub fn install_primitives(&mut self) -> Result<(), Error> {
         for (name, arity, f) in table::<S>() {
             self.define_native(name, arity, f)?;
         }
         self.define_catch()?;
+        self.register_native_library(crate::ports::PORTS_IDENTITY, crate::ports::library());
         Ok(())
     }
 }

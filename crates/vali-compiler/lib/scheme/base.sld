@@ -12,7 +12,10 @@
           (rename (vali primitive)
                   (member %member) (assoc %assoc)
                   (vector->list %vector->list) (vector-fill! %vector-fill!)
-                  (string->list %string->list)))
+                  (string->list %string->list))
+          ;; The port procedures, which the definitions below give their
+          ;; current-port defaults.
+          (prefix (vali ports) %))
   (export
    ;; Core forms.
    quote quote-syntax if begin lambda let letrec letrec* set! define
@@ -48,7 +51,23 @@
    bytevector-append
    string>? string<=? string>=?
    char? char->integer integer->char char=? char<? char>? char<=? char>=?
-   newline write-char write-string
+   ;; Parameters and ports (R7RS 4.2.6, 6.13).
+   make-parameter parameterize
+   current-input-port current-output-port current-error-port
+   (rename %port? port?) input-port? output-port? textual-port? binary-port?
+   input-port-open? output-port-open?
+   (rename %close-port close-port) (rename %close-input-port close-input-port)
+   (rename %close-output-port close-output-port) call-with-port
+   (rename %open-input-string open-input-string)
+   (rename %open-output-string open-output-string)
+   (rename %get-output-string get-output-string)
+   (rename %open-input-bytevector open-input-bytevector)
+   (rename %open-output-bytevector open-output-bytevector)
+   (rename %get-output-bytevector get-output-bytevector)
+   read-char peek-char read-line read-string char-ready?
+   read-u8 peek-u8 u8-ready? read-bytevector read-bytevector!
+   newline write-char write-string write-u8 write-bytevector flush-output-port
+   eof-object eof-object?
    apply error (rename %raise raise) raise-continuable with-exception-handler
    guard error-object? error-object-message error-object-irritants
    values call-with-values
@@ -256,6 +275,102 @@
          (let ((t test)) (if t t (guard-clauses c clause ...))))
         ((_ c (test e1 e2 ...) clause ...)
          (if test (begin e1 e2 ...) (guard-clauses c clause ...)))))
+
+    ;; Parameters (R7RS 4.2.6). A parameter is a procedure over a value it
+    ;; keeps, which parameterize sets through two tokens no one else can
+    ;; name. parameterize restores the old values however its body ends,
+    ;; by returning or by a raise.
+    (define %parameter-set (list 'set))
+    (define %parameter-converter (list 'converter))
+
+    (define (make-parameter init . converter)
+      (let* ((convert (if (pair? converter) (car converter) (lambda (x) x)))
+             (value (convert init)))
+        (lambda args
+          (cond ((null? args) value)
+                ((eq? (car args) %parameter-set) (set! value (car (cdr args))))
+                ((eq? (car args) %parameter-converter) convert)
+                (else (error "a parameter takes no arguments" args))))))
+
+    (define (%parameterize params values body)
+      (let ((new (map (lambda (p v) ((p %parameter-converter) v)) params values))
+            (old (map (lambda (p) (p)) params)))
+        (define (install! vals)
+          (for-each (lambda (p v) (p %parameter-set v)) params vals))
+        (install! new)
+        (let ((result (%catch body
+                              (lambda (condition)
+                                (install! old)
+                                (%raise condition)))))
+          (install! old)
+          result)))
+
+    (define-syntax parameterize
+      (syntax-rules ()
+        ((_ ((param value) ...) body0 body1 ...)
+         (%parameterize (list param ...) (list value ...)
+                        (lambda () body0 body1 ...)))))
+
+    ;; Ports (R7RS 6.13), over (vali ports). Each procedure's port is an
+    ;; optional last argument, the current port by default.
+    (define current-input-port (make-parameter (%console-input)))
+    (define current-output-port (make-parameter (%console-output)))
+    (define current-error-port (make-parameter (%console-error)))
+
+    (define (%port rest default)
+      (if (pair? rest) (car rest) (default)))
+
+    (define (input-port? x) (and (%port? x) (%input-port? x)))
+    (define (output-port? x) (and (%port? x) (%output-port? x)))
+    (define (textual-port? x) (and (%port? x) (%textual-port? x)))
+    (define (binary-port? x) (and (%port? x) (%binary-port? x)))
+    (define (input-port-open? port) (%input-port-open? port))
+    (define (output-port-open? port) (%output-port-open? port))
+
+    (define (call-with-port port proc)
+      (let ((result (proc port)))
+        (%close-port port)
+        result))
+
+    (define (read-char . p) (%read-char (%port p current-input-port)))
+    (define (peek-char . p) (%peek-char (%port p current-input-port)))
+    (define (read-line . p) (%read-line (%port p current-input-port)))
+    (define (char-ready? . p) (%char-ready? (%port p current-input-port)))
+    (define (read-string k . p) (%read-string (%port p current-input-port) k))
+    (define (read-u8 . p) (%read-u8 (%port p current-input-port)))
+    (define (peek-u8 . p) (%peek-u8 (%port p current-input-port)))
+    (define (u8-ready? . p) (%u8-ready? (%port p current-input-port)))
+    (define (read-bytevector k . p)
+      (%read-bytevector (%port p current-input-port) k))
+
+    (define (read-bytevector! bv . rest)
+      (let* ((port (%port rest current-input-port))
+             (range (if (pair? rest) (cdr rest) '()))
+             (r (%range 'read-bytevector! range (bytevector-length bv)))
+             (got (%read-bytevector port (- (cdr r) (car r)))))
+        (if (eof-object? got)
+            got
+            (begin
+              (bytevector-copy! bv (car r) got)
+              (bytevector-length got)))))
+
+    (define (write-char c . p) (%write-char (%port p current-output-port) c))
+    (define (newline . p) (%write-char (%port p current-output-port) #\newline))
+    (define (write-u8 b . p) (%write-u8 (%port p current-output-port) b))
+    (define (flush-output-port . p)
+      (%flush-output-port (%port p current-output-port)))
+
+    (define (write-string s . rest)
+      (%write-string (%port rest current-output-port)
+                     (if (and (pair? rest) (pair? (cdr rest)))
+                         (apply string-copy s (cdr rest))
+                         s)))
+
+    (define (write-bytevector bv . rest)
+      (%write-bytevector (%port rest current-output-port)
+                         (if (and (pair? rest) (pair? (cdr rest)))
+                             (apply bytevector-copy bv (cdr rest))
+                             bv)))
 
     ;; Multiple values are an object for now; call-with-values spreads it.
     (define (call-with-values producer consumer)

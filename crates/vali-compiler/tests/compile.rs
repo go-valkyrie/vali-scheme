@@ -1150,6 +1150,164 @@ fn bytevectors() {
 }
 
 #[test]
+fn parameters() {
+    check(&[
+        (
+            "(define p (make-parameter 1)) (list (p) (parameterize ((p 2)) (p)) (p))",
+            "(1 2 1)",
+        ),
+        (
+            "(define q (make-parameter 10 (lambda (x) (* x 2))))
+             (list (q) (parameterize ((q 3)) (q)) (q))",
+            "(20 6 20)",
+        ),
+        // A raise out of the body restores the old value.
+        (
+            "(define p (make-parameter 1))
+             (list (guard (e (#t (list e (p)))) (parameterize ((p 2)) (raise 'x))) (p))",
+            "((x 1) 1)",
+        ),
+        (
+            "(define a (make-parameter 'a)) (define b (make-parameter 'b))
+             (parameterize ((a 1) (b 2)) (parameterize ((a 3)) (list (a) (b))))",
+            "(3 2)",
+        ),
+    ]);
+}
+
+#[test]
+fn string_and_bytevector_ports() {
+    check(&[
+        (
+            "(let ((p (open-input-string \"héllo\\nworld\")))
+               (list (read-char p) (peek-char p) (read-line p) (read-string 3 p)
+                     (read-line p) (eof-object? (read-char p)) (eof-object? (read-line p))))",
+            "(#\\h #\\é \"éllo\" \"wor\" \"ld\" #t #t)",
+        ),
+        (
+            "(let ((p (open-output-string)))
+               (write-char #\\a p) (write-string \"xbcd\" p 1) (newline p)
+               (equal? (get-output-string p) (string #\\a #\\b #\\c #\\d #\\newline)))",
+            "#t",
+        ),
+        (
+            "(let ((p (open-output-string)))
+               (parameterize ((current-output-port p)) (write-string \"inside\"))
+               (get-output-string p))",
+            "\"inside\"",
+        ),
+        (
+            "(let ((p (open-input-bytevector #u8(1 2 3))))
+               (list (read-u8 p) (peek-u8 p) (read-bytevector 5 p) (eof-object? (read-u8 p))))",
+            "(1 2 #u8(2 3) #t)",
+        ),
+        (
+            "(let ((p (open-output-bytevector)))
+               (write-u8 7 p) (write-bytevector #u8(1 2 3) p 1) (get-output-bytevector p))",
+            "#u8(7 2 3)",
+        ),
+        (
+            "(let ((bv (make-bytevector 4 0)) (p (open-input-bytevector #u8(9 8))))
+               (list (read-bytevector! bv p 1) bv))",
+            "(2 #u8(0 9 8 0))",
+        ),
+        (
+            "(let ((p (open-input-string \"\")))
+               (list (port? p) (input-port? p) (output-port? p) (textual-port? p) (binary-port? p)
+                     (port? 5) (input-port? 5) (input-port-open? p)
+                     (begin (close-port p) (input-port-open? p))))",
+            "(#t #t #f #t #f #f #f #t #f)",
+        ),
+        (
+            "(let ((p (open-input-string \"abc\"))) (list (call-with-port p read-char) (input-port-open? p)))",
+            "(#\\a #f)",
+        ),
+        (
+            "(list (open-input-string \"\") (open-output-bytevector))",
+            "(#<textual input port> #<binary output port>)",
+        ),
+        (
+            "(list (eof-object? (eof-object)) (eof-object? 'eof))",
+            "(#t #f)",
+        ),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(
+        error("(read-char (open-output-string))")
+            .contains("read-char: expected an open textual input port")
+    );
+    assert!(error("(read-char 5)").contains("read-char: argument 1: expected port, got 5"));
+    assert!(
+        error("(let ((p (open-output-string))) (close-port p) (write-char #\\a p))")
+            .contains("expected an open textual output port")
+    );
+}
+
+#[test]
+fn reading_and_writing() {
+    check(&[
+        (
+            "(import (scheme base) (scheme read))
+             (let ((p (open-input-string \"(a . b) 42 \\\"s\\\" #(1)\")))
+               (list (read p) (read p) (read p) (read p) (eof-object? (read p))))",
+            "((a . b) 42 \"s\" #(1) #t)",
+        ),
+        (
+            "(import (scheme base) (scheme write))
+             (let ((p (open-output-string)))
+               (write '(a \"b\" #\\c) p) (display '(a \"b\" #\\c) p)
+               (equal? (get-output-string p)
+                       (string-append \"(a \" (string #\\\" #\\b #\\\") \" #\\\\c)(a b c)\")))",
+            "#t",
+        ),
+        (
+            "(import (scheme base) (scheme write))
+             (let ((x (list 1 2)) (shared (open-output-string)) (plain (open-output-string)))
+               (write-shared (list x x) shared) (write (list x x) plain) (write-simple x plain)
+               (list (get-output-string shared) (get-output-string plain)))",
+            "(\"(#0=(1 2) #0#)\" \"((1 2) (1 2))(1 2)\")",
+        ),
+        (
+            "(import (scheme base) (scheme write))
+             (let ((x (list 1 2)) (p (open-output-string)))
+               (set-cdr! (cdr x) x) (write x p) (get-output-string p))",
+            "\"#0=(1 2 . #0#)\"",
+        ),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(
+        error("(import (scheme base) (scheme file)) (open-input-file \"x\")")
+            .contains("open-input-file: needs the file capability")
+    );
+    assert!(
+        error("(import (scheme base) (scheme process-context)) (command-line)")
+            .contains("command-line: needs the process-context capability")
+    );
+}
+
+#[test]
+fn console_ports() {
+    let program = vali_compiler::compile_program(
+        "(import (scheme base) (scheme write))
+         (display \"out \") (write \"q\")
+         (write-string \"err\" (current-error-port))
+         (list (read-char) (read-line))",
+        &Identity::new("test"),
+        &NoLibraries,
+    )
+    .unwrap();
+    let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    cx.give_input("ab\ncd").unwrap();
+    let id = vali_compiler::load(&mut cx, program).unwrap();
+    let result = cx.run(id).unwrap();
+    assert_eq!(cx.write_string(&result).unwrap(), "(#\\a \"b\")");
+    assert_eq!(cx.take_output(), "out \"q\"");
+    assert_eq!(cx.take_output(), "");
+    assert_eq!(cx.take_error_output(), "err");
+}
+
+#[test]
 fn lists_from_r7rs() {
     check(&[
         (

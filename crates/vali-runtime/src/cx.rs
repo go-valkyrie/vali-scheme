@@ -72,9 +72,10 @@ pub struct Cx<S: Strategy> {
     pub(crate) error_object_type: Option<Value>,
     /// The record type of multiple values, made when first needed.
     pub(crate) values_type: Option<Value>,
-    /// What `display`, `write` and `newline` have written, until the host
-    /// takes it.
-    pub(crate) output: String,
+    /// The console ports: the current ports' defaults (`ports`).
+    pub(crate) console_input: Option<Handle>,
+    pub(crate) console_output: Option<Handle>,
+    pub(crate) console_error: Option<Handle>,
     /// The Rust objects Scheme holds (ADR 0016).
     pub(crate) objects: crate::rust_objects::Objects,
     /// The native libraries loaded programs brought, by identity, which
@@ -145,7 +146,9 @@ impl<S: Strategy> Cx<S> {
             catches: Vec::new(),
             error_object_type: None,
             values_type: None,
-            output: String::new(),
+            console_input: None,
+            console_output: None,
+            console_error: None,
             objects: Default::default(),
             native_libraries: HashMap::new(),
         }
