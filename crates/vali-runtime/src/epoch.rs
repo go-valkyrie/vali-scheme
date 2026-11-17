@@ -106,9 +106,16 @@ impl<S: Strategy> Cx<S> {
                 self.free_all(&mut work);
             }
         }
+        // A Rust object in a garbage cycle drops its value as it is freed.
+        let (heap, objects) = self.heap_and_objects();
+        let mut finalize = |v| {
+            if let Some(i) = Self::rust_object_index(v) {
+                objects.remove(i);
+            }
+        };
         // SAFETY: the stack's references are counted in, and the table is
         // empty.
-        unsafe { S::collect_cycles(self.heap_mut(), Self::describe, force_cycles) };
+        unsafe { S::collect_cycles(heap, Self::describe, &mut finalize, force_cycles) };
         for &v in roots {
             S::release(self.heap_mut(), v);
         }
@@ -129,6 +136,9 @@ impl<S: Strategy> Cx<S> {
                         work.push(c);
                     }
                 }
+                // Nothing refers to it any more, even if a cycle candidate
+                // keeps its memory a while.
+                self.finalize(v);
                 S::free(self.heap_mut(), v, words);
             }
         }

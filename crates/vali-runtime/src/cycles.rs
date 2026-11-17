@@ -160,7 +160,15 @@ impl Cycles {
     /// heap, the runtime and the stack counted once. An object counting
     /// freed while buffered must have been left black, with a count of zero,
     /// for this to free.
-    pub(crate) unsafe fn collect<C: Counted>(&mut self, heap: &mut C::Heap, describe: Describe) {
+    ///
+    /// `finalize` is called with each object the collection frees, before
+    /// its memory goes; those counting freed earlier were finalized then.
+    pub(crate) unsafe fn collect<C: Counted>(
+        &mut self,
+        heap: &mut C::Heap,
+        describe: Describe,
+        finalize: &mut dyn FnMut(Value),
+    ) {
         let mut roots = std::mem::take(&mut self.candidates);
         // Mark the roots: subtract the references inside what each reaches.
         roots.retain(|&s| {
@@ -190,7 +198,7 @@ impl Cycles {
             C::set_buffered(s, false);
             // SAFETY: what is white is garbage, and the buffer no longer
             // refers to `s`.
-            unsafe { self.collect_white::<C>(heap, s, describe) };
+            unsafe { self.collect_white::<C>(heap, s, describe, finalize) };
         }
         roots.clear();
         // Keep the buffer's memory for the next round.
@@ -262,6 +270,7 @@ impl Cycles {
         heap: &mut C::Heap,
         s: Value,
         describe: Describe,
+        finalize: &mut dyn FnMut(Value),
     ) {
         if C::colour(s) != Colour::White || C::buffered(s) {
             return;
@@ -279,6 +288,7 @@ impl Cycles {
                         self.work.push(t);
                     }
                 }
+                finalize(x);
                 C::reclaim(heap, x, words);
             }
         }

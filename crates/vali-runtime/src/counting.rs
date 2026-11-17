@@ -466,12 +466,17 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> References for Counting<SIDE_
         unsafe { Self::reclaim(&mut heap.pages, v, words) };
     }
 
-    unsafe fn collect_cycles(heap: &mut CountingHeap, describe: Describe, force: bool) {
+    unsafe fn collect_cycles(
+        heap: &mut CountingHeap,
+        describe: Describe,
+        finalize: &mut dyn FnMut(Value),
+        force: bool,
+    ) {
         let CountingHeap { pages, cycles, .. } = heap;
         if force || heap.cycle_bytes + heap.since >= heap.cycle_threshold {
             // SAFETY: passed on to the caller: the stack's references are
             // counted in, so every count is exact.
-            unsafe { cycles.collect::<Self>(pages, describe) };
+            unsafe { cycles.collect::<Self>(pages, describe, finalize) };
             heap.cycle_bytes = 0;
             heap.cycle_threshold = CYCLE_BYTES.max(heap.pages.bytes_live());
         } else {

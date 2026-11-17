@@ -25,6 +25,7 @@ mod primitives;
 mod printer;
 mod read;
 mod records;
+mod rust_objects;
 mod stack;
 mod strategy;
 mod strings;
@@ -44,6 +45,7 @@ pub use handle::{Error, Handle, SchemeError};
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
 pub use primitives::primitive_names;
+pub use rust_objects::RustObject;
 pub use strategy::{Allocate, References, Space, Strategy};
 pub use value::Value;
 

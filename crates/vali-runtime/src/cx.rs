@@ -75,6 +75,8 @@ pub struct Cx<S: Strategy> {
     /// What `display`, `write` and `newline` have written, until the host
     /// takes it.
     pub(crate) output: String,
+    /// The Rust objects Scheme holds (ADR 0016).
+    pub(crate) objects: crate::rust_objects::Objects,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -141,6 +143,7 @@ impl<S: Strategy> Cx<S> {
             error_object_type: None,
             values_type: None,
             output: String::new(),
+            objects: Default::default(),
         }
     }
 
@@ -152,6 +155,11 @@ impl<S: Strategy> Cx<S> {
     /// The strategy's state, to change.
     pub(crate) fn heap_mut(&mut self) -> &mut S::Heap {
         &mut self.heap
+    }
+
+    /// The strategy's state and the Rust objects, both to change.
+    pub(crate) fn heap_and_objects(&mut self) -> (&mut S::Heap, &mut crate::rust_objects::Objects) {
+        (&mut self.heap, &mut self.objects)
     }
 
     /// How many bytes the heap has taken from the system.

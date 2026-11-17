@@ -220,6 +220,10 @@ impl<S: Strategy> Printer<'_, S> {
                     let type_code = header.and_then(vali_abi::Header::type_code);
                     match type_code {
                         Some(TypeCode::Box) => self.out.push_str("#<box>"),
+                        Some(TypeCode::RustObject) => {
+                            let i = Cx::<S>::rust_object_index(v).expect("a Rust object");
+                            self.cx.write_object(i, &mut self.out);
+                        }
                         Some(TypeCode::Record) => {
                             let name = self.cx.record_type_name(v).unwrap_or("?");
                             let _ = write!(self.out, "#<{name}>");

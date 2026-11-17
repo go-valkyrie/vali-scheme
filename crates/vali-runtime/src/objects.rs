@@ -57,6 +57,8 @@ impl<S: Strategy> Cx<S> {
             match t {
                 TypeCode::Pair | TypeCode::RecordType => 2,
                 TypeCode::Ratnum | TypeCode::ExactComplex | TypeCode::InexactComplex => 2,
+                // Its index in the isolate's table, not a value.
+                TypeCode::RustObject => 1,
                 TypeCode::Flonum | TypeCode::Box | TypeCode::Syntax => 1,
                 TypeCode::Symbol => 2,
                 TypeCode::String => 4,

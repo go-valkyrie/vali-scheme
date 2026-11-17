@@ -126,7 +126,8 @@ pub trait References: Allocate {
     /// Nothing may refer to `v`, and nothing may use it afterwards.
     unsafe fn free(_heap: &mut Self::Heap, _v: crate::Value, _words: usize) {}
 
-    /// Frees cycles of garbage if a collection is due, or if `force`.
+    /// Frees cycles of garbage if a collection is due, or if `force`,
+    /// calling `finalize` with each object as it frees it.
     ///
     /// # Safety
     ///
@@ -136,6 +137,7 @@ pub trait References: Allocate {
     unsafe fn collect_cycles(
         _heap: &mut Self::Heap,
         _describe: crate::cycles::Describe,
+        _finalize: &mut dyn FnMut(crate::Value),
         _force: bool,
     ) {
     }
