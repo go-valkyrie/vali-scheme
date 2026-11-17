@@ -158,3 +158,24 @@ fn strings_symbols_and_characters() {
     let read = cx.read("abc").unwrap();
     assert_eq!(cx.get(&from_string), cx.get(&read[0]));
 }
+
+#[test]
+fn searching_lists() {
+    let mut cx = cx();
+    let cases = [
+        ("memq", "c (a b c d)", "(c d)"),
+        ("memq", "z (a b)", "#f"),
+        ("memv", "2.0 (1.0 2.0 3.0)", "(2.0 3.0)"),
+        ("member", "(x) (a (x) b)", "((x) b)"),
+        ("memq", "(x) (a (x) b)", "#f"),
+        ("assq", "b ((a 1) (b 2))", "(b 2)"),
+        ("assv", "2 ((1 . one) (2 . two))", "(2 . two)"),
+        ("assoc", "\"k\" ((\"j\" . 1) (\"k\" . 2))", "(\"k\" . 2)"),
+        ("assq", "z ((a 1))", "#f"),
+        ("list-tail", "(a b c) 2", "(c)"),
+        ("list-ref", "(a b c) 1", "b"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+}

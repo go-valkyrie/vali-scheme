@@ -250,8 +250,12 @@ fn eqv<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
 /// bytevectors, `eqv?` otherwise. A pair of objects already being compared
 /// counts as equal, so circular structure terminates.
 fn equal<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(equal_values(cx, args[0], args[1])))
+}
+
+fn equal_values<S: Strategy>(cx: &Cx<S>, a: Value, b: Value) -> bool {
     let mut assumed = HashSet::new();
-    let mut work = vec![(args[0], args[1])];
+    let mut work = vec![(a, b)];
     while let Some((a, b)) = work.pop() {
         if eqv_values(cx, a, b) || !assumed.insert((a.raw(), b.raw())) {
             continue;
@@ -286,10 +290,10 @@ fn equal<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
             }
         };
         if !same {
-            return Ok(Value::FALSE);
+            return false;
         }
     }
-    Ok(Value::TRUE)
+    true
 }
 
 fn vector<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -513,6 +517,103 @@ fn char_lt<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error>
     Ok(Value::boolean(result))
 }
 
+/// The first tail of `list` whose car matches `x` under `same`, or `#f`.
+fn member_by<S: Strategy>(
+    cx: &Cx<S>,
+    name: &str,
+    x: Value,
+    list: Value,
+    same: fn(&Cx<S>, Value, Value) -> bool,
+) -> Result<Value, Error> {
+    let mut tail = list;
+    while tail.is_pair() {
+        // SAFETY: a live pair.
+        if same(cx, x, unsafe { cx.car(tail) }) {
+            return Ok(tail);
+        }
+        // SAFETY: a live pair.
+        tail = unsafe { cx.cdr(tail) };
+    }
+    if tail == Value::EMPTY_LIST {
+        Ok(Value::FALSE)
+    } else {
+        Err(type_error(name, "a proper list", list))
+    }
+}
+
+/// The first pair in the association list `alist` whose car matches `x`
+/// under `same`, or `#f`.
+fn assoc_by<S: Strategy>(
+    cx: &Cx<S>,
+    name: &str,
+    x: Value,
+    alist: Value,
+    same: fn(&Cx<S>, Value, Value) -> bool,
+) -> Result<Value, Error> {
+    for entry in elements(cx, name, alist)? {
+        if !entry.is_pair() {
+            return Err(type_error(name, "an association list", alist));
+        }
+        // SAFETY: a live pair.
+        if same(cx, x, unsafe { cx.car(entry) }) {
+            return Ok(entry);
+        }
+    }
+    Ok(Value::FALSE)
+}
+
+fn same_eq<S: Strategy>(_cx: &Cx<S>, a: Value, b: Value) -> bool {
+    a == b
+}
+
+fn memq<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    member_by(cx, "memq", args[0], args[1], same_eq)
+}
+fn memv<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    member_by(cx, "memv", args[0], args[1], eqv_values)
+}
+fn member<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    member_by(cx, "member", args[0], args[1], equal_values)
+}
+fn assq<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    assoc_by(cx, "assq", args[0], args[1], same_eq)
+}
+fn assv<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    assoc_by(cx, "assv", args[0], args[1], eqv_values)
+}
+fn assoc<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    assoc_by(cx, "assoc", args[0], args[1], equal_values)
+}
+
+/// `list-tail`: `list` with its first `k` pairs dropped.
+fn tail_at<S: Strategy>(cx: &Cx<S>, name: &str, list: Value, k: Value) -> Result<Value, Error> {
+    let Some(k) = k.as_fixnum().filter(|k| *k >= 0) else {
+        return Err(type_error(name, "a non-negative fixnum", k));
+    };
+    let mut tail = list;
+    for _ in 0..k {
+        if !tail.is_pair() {
+            return Err(Error::scheme(format!(
+                "{name}: the list is shorter than {k}"
+            )));
+        }
+        // SAFETY: a live pair.
+        tail = unsafe { cx.cdr(tail) };
+    }
+    Ok(tail)
+}
+
+fn list_tail<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    tail_at(cx, "list-tail", args[0], args[1])
+}
+
+fn list_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let tail = tail_at(cx, "list-ref", args[0], args[1])?;
+    let pair = pair_arg("list-ref", tail)?;
+    // SAFETY: a live pair.
+    Ok(unsafe { cx.car(pair) })
+}
+
 impl<S: Strategy> Cx<S> {
     /// Binds the standard procedures implemented so far as globals, which
     /// variables of the same name in modules loaded afterwards are bound to.
@@ -571,6 +672,14 @@ impl<S: Strategy> Cx<S> {
             ("integer->char", Arity::exactly(1), integer_to_char),
             ("char=?", at_least(1), char_eq),
             ("char<?", at_least(1), char_lt),
+            ("memq", Arity::exactly(2), memq),
+            ("memv", Arity::exactly(2), memv),
+            ("member", Arity::exactly(2), member),
+            ("assq", Arity::exactly(2), assq),
+            ("assv", Arity::exactly(2), assv),
+            ("assoc", Arity::exactly(2), assoc),
+            ("list-tail", Arity::exactly(2), list_tail),
+            ("list-ref", Arity::exactly(2), list_ref),
         ];
         for &(name, arity, f) in table {
             self.define_native(name, arity, f)?;
