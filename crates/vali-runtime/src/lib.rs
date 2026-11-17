@@ -27,6 +27,7 @@ mod read;
 mod records;
 mod stack;
 mod strategy;
+mod strings;
 mod stubs;
 mod syntax;
 mod trampoline;

@@ -72,7 +72,11 @@ fn list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
 }
 
 /// The elements of a proper list, or an error naming `name`.
-fn elements<S: Strategy>(cx: &Cx<S>, name: &str, mut list: Value) -> Result<Vec<Value>, Error> {
+pub(crate) fn elements<S: Strategy>(
+    cx: &Cx<S>,
+    name: &str,
+    mut list: Value,
+) -> Result<Vec<Value>, Error> {
     let start = list;
     let mut items = Vec::new();
     while list.is_pair() {
@@ -262,169 +266,6 @@ fn vector_length<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, E
     Ok(Value::fixnum(len as i64).expect("lengths fit"))
 }
 
-fn string_arg<'a, S: Strategy>(cx: &'a Cx<S>, name: &str, v: Value) -> Result<&'a str, Error> {
-    if v.tag() == Tag::String {
-        // SAFETY: a live string, read before anything can change it.
-        Ok(unsafe { cx.string_str(v) })
-    } else {
-        Err(type_error(name, "a string", v))
-    }
-}
-
-fn char_arg(name: &str, v: Value) -> Result<char, Error> {
-    v.as_character()
-        .ok_or_else(|| type_error(name, "a character", v))
-}
-
-fn index_arg(name: &str, v: Value, len: usize) -> Result<usize, Error> {
-    match v.as_fixnum() {
-        Some(i) if (0..=len as i64).contains(&i) => Ok(i as usize),
-        _ => Err(Error::scheme(format!(
-            "{name}: index {v:?} is out of range for length {len}"
-        ))),
-    }
-}
-
-fn string_length<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    string_arg(cx, "string-length", args[0])?;
-    // SAFETY: a live string.
-    let n = unsafe { cx.string_length(args[0]) };
-    Ok(Value::fixnum(n as i64).expect("lengths fit"))
-}
-
-/// `string-ref`: a direct index into all-ASCII strings, a scan otherwise,
-/// until strings carry index hints (ADR 0002 #11).
-fn string_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let text = string_arg(cx, "string-ref", args[0])?;
-    let len = text.chars().count();
-    let i = index_arg("string-ref", args[1], len)?;
-    let c = if text.is_ascii() {
-        text.as_bytes().get(i).map(|&b| char::from(b))
-    } else {
-        text.chars().nth(i)
-    };
-    c.map(Value::character).ok_or_else(|| {
-        Error::scheme(format!(
-            "string-ref: index {i} is out of range for length {len}"
-        ))
-    })
-}
-
-fn string_eq<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let first = string_arg(cx, "string=?", args[0])?;
-    let mut result = true;
-    for &other in &args[1..] {
-        result &= string_arg(cx, "string=?", other)? == first;
-    }
-    Ok(Value::boolean(result))
-}
-
-fn string_lt<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let mut result = true;
-    for pair in args.windows(2) {
-        result &= string_arg(cx, "string<?", pair[0])? < string_arg(cx, "string<?", pair[1])?;
-    }
-    Ok(Value::boolean(result))
-}
-
-fn string_append<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let mut text = String::new();
-    for &s in args {
-        text.push_str(string_arg(cx, "string-append", s)?);
-    }
-    Ok(cx.string_raw(&text, false)?)
-}
-
-fn substring<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let text = string_arg(cx, "substring", args[0])?;
-    let len = text.chars().count();
-    let start = index_arg("substring", args[1], len)?;
-    let end = index_arg("substring", args[2], len)?;
-    if start > end {
-        return Err(Error::scheme(format!(
-            "substring: start {start} is after end {end}"
-        )));
-    }
-    let part: String = text.chars().skip(start).take(end - start).collect();
-    Ok(cx.string_raw(&part, false)?)
-}
-
-fn string_to_list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let chars: Vec<char> = string_arg(cx, "string->list", args[0])?.chars().collect();
-    let mut list = Value::EMPTY_LIST;
-    for c in chars.into_iter().rev() {
-        // SAFETY: valid values.
-        list = unsafe { cx.cons_raw(Value::character(c), list)? };
-    }
-    Ok(list)
-}
-
-fn list_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let text = elements(cx, "list->string", args[0])?
-        .into_iter()
-        .map(|v| char_arg("list->string", v))
-        .collect::<Result<String, _>>()?;
-    Ok(cx.string_raw(&text, false)?)
-}
-
-fn is_string<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(args[0].tag() == Tag::String))
-}
-
-fn is_symbol<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(args[0].tag() == Tag::Symbol))
-}
-
-fn symbol_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    if args[0].tag() != Tag::Symbol {
-        return Err(type_error("symbol->string", "a symbol", args[0]));
-    }
-    // SAFETY: a live symbol; its name is copied before allocating.
-    let name = unsafe { cx.symbol_name(args[0]) }.to_owned();
-    // The result must not be modified, so it shares nothing and is
-    // immutable, as R7RS allows.
-    Ok(cx.string_raw(&name, true)?)
-}
-
-fn string_to_symbol<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let name = string_arg(cx, "string->symbol", args[0])?.to_owned();
-    Ok(cx.intern(&name)?)
-}
-
-fn is_char<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(args[0].as_character().is_some()))
-}
-
-fn char_to_integer<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let c = char_arg("char->integer", args[0])?;
-    Ok(Value::fixnum(i64::from(u32::from(c))).expect("fits"))
-}
-
-fn integer_to_char<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    args[0]
-        .as_fixnum()
-        .and_then(|n| u32::try_from(n).ok())
-        .and_then(char::from_u32)
-        .map(Value::character)
-        .ok_or_else(|| type_error("integer->char", "a Unicode scalar value", args[0]))
-}
-
-fn char_eq<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let mut result = true;
-    for pair in args.windows(2) {
-        result &= char_arg("char=?", pair[0])? == char_arg("char=?", pair[1])?;
-    }
-    Ok(Value::boolean(result))
-}
-
-fn char_lt<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let mut result = true;
-    for pair in args.windows(2) {
-        result &= char_arg("char<?", pair[0])? < char_arg("char<?", pair[1])?;
-    }
-    Ok(Value::boolean(result))
-}
-
 /// The first tail of `list` whose car matches `x` under `same`, or `#f`.
 fn member_by<S: Strategy>(
     cx: &Cx<S>,
@@ -605,53 +446,6 @@ fn vector_fill<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Err
     Ok(Value::UNSPECIFIED)
 }
 
-/// A one-character case mapping, keeping the character when Unicode maps it
-/// to several.
-fn single(mut mapped: impl Iterator<Item = char>, c: char) -> char {
-    match (mapped.next(), mapped.next()) {
-        (Some(m), None) => m,
-        _ => c,
-    }
-}
-
-fn char_upcase<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let c = char_arg("char-upcase", args[0])?;
-    Ok(Value::character(single(c.to_uppercase(), c)))
-}
-
-fn char_downcase<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let c = char_arg("char-downcase", args[0])?;
-    Ok(Value::character(single(c.to_lowercase(), c)))
-}
-
-fn char_alphabetic<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(
-        char_arg("char-alphabetic?", args[0])?.is_alphabetic(),
-    ))
-}
-
-fn char_numeric<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(
-        char_arg("char-numeric?", args[0])?.is_numeric(),
-    ))
-}
-
-fn char_whitespace<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    Ok(Value::boolean(
-        char_arg("char-whitespace?", args[0])?.is_whitespace(),
-    ))
-}
-
-fn string_upcase<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let text = string_arg(cx, "string-upcase", args[0])?.to_uppercase();
-    Ok(cx.string_raw(&text, false)?)
-}
-
-fn string_downcase<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let text = string_arg(cx, "string-downcase", args[0])?.to_lowercase();
-    Ok(cx.string_raw(&text, false)?)
-}
-
 /// `(apply f a ... list)`: asks the VM to tail-call `f`.
 fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
@@ -690,23 +484,6 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("vector-ref", Arity::exactly(2), vector_ref),
         ("vector-set!", Arity::exactly(3), vector_set),
         ("vector-length", Arity::exactly(1), vector_length),
-        ("string?", Arity::exactly(1), is_string),
-        ("string-length", Arity::exactly(1), string_length),
-        ("string-ref", Arity::exactly(2), string_ref),
-        ("string=?", at_least(1), string_eq),
-        ("string<?", at_least(1), string_lt),
-        ("string-append", at_least(0), string_append),
-        ("substring", Arity::exactly(3), substring),
-        ("string->list", Arity::exactly(1), string_to_list),
-        ("list->string", Arity::exactly(1), list_to_string),
-        ("symbol?", Arity::exactly(1), is_symbol),
-        ("symbol->string", Arity::exactly(1), symbol_to_string),
-        ("string->symbol", Arity::exactly(1), string_to_symbol),
-        ("char?", Arity::exactly(1), is_char),
-        ("char->integer", Arity::exactly(1), char_to_integer),
-        ("integer->char", Arity::exactly(1), integer_to_char),
-        ("char=?", at_least(1), char_eq),
-        ("char<?", at_least(1), char_lt),
         ("memq", Arity::exactly(2), memq),
         ("memv", Arity::exactly(2), memv),
         ("member", Arity::exactly(2), member),
@@ -719,13 +496,6 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("vector->list", Arity::exactly(1), vector_to_list),
         ("list->vector", Arity::exactly(1), list_to_vector),
         ("vector-fill!", Arity::exactly(2), vector_fill),
-        ("char-upcase", Arity::exactly(1), char_upcase),
-        ("char-downcase", Arity::exactly(1), char_downcase),
-        ("char-alphabetic?", Arity::exactly(1), char_alphabetic),
-        ("char-numeric?", Arity::exactly(1), char_numeric),
-        ("char-whitespace?", Arity::exactly(1), char_whitespace),
-        ("string-upcase", Arity::exactly(1), string_upcase),
-        ("string-downcase", Arity::exactly(1), string_downcase),
         ("boolean?", Arity::exactly(1), is_boolean),
         ("procedure?", Arity::exactly(1), is_procedure),
         ("vector?", Arity::exactly(1), is_vector),
@@ -774,6 +544,7 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("%record-set!", Arity::exactly(4), records::record_set),
     ];
     table.extend(crate::numbers::table());
+    table.extend(crate::strings::table());
     table
 }
 

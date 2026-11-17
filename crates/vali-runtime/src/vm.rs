@@ -229,6 +229,14 @@ pub(crate) fn type_error(operation: &str, expected: &str, got: Value) -> Error {
     Error::scheme(format!("{operation}: expected {expected}, got {got:?}"))
 }
 
+/// A type error from `name`, naming what it got as `write` prints it.
+pub(crate) fn wrong_type<S: Strategy>(cx: &Cx<S>, name: &str, expected: &str, got: Value) -> Error {
+    Error::scheme(format!(
+        "{name}: expected {expected}, got {}",
+        cx.written(got)
+    ))
+}
+
 /// Loading modules, and the procedures Rust code calls.
 impl<S: Strategy> Cx<S> {
     /// Validates `module` and loads it into this isolate: its constants are
@@ -487,7 +495,11 @@ impl<S: Strategy> Cx<S> {
             Constant::Bignum { negative, limbs } => {
                 self.integer_raw(&Integer::from_limbs(*negative, limbs))?
             }
-            Constant::Bytevector(bytes) => self.bytevector_raw(bytes)?,
+            Constant::Bytevector(bytes) => {
+                let v = self.bytevector_raw(bytes)?;
+                self.make_immutable(v);
+                v
+            }
             Constant::Ratio(..) | Constant::Complex(..) => {
                 let n = constant_number(constant).ok_or_else(|| {
                     Error::scheme(format!("invalid numeric constant {constant:?}"))

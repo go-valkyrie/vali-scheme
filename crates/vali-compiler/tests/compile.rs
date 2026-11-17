@@ -1047,6 +1047,109 @@ fn inexact_and_complex_libraries() {
 }
 
 #[test]
+fn mutable_strings() {
+    check(&[
+        (
+            "(list (make-string 3 #\\x) (string #\\a #\\b) (string) (string-length (make-string 2)))",
+            "(\"xxx\" \"ab\" \"\" 2)",
+        ),
+        (
+            "(let ((s (make-string 3 #\\a))) (string-set! s 1 #\\b) s)",
+            "\"aba\"",
+        ),
+        // A character that takes more bytes replaces the string's bytes.
+        (
+            "(let ((s (string-copy \"abc\"))) (string-set! s 1 #\\λ) (list s (string-length s) (string-ref s 2)))",
+            "(\"aλc\" 3 #\\c)",
+        ),
+        (
+            "(let ((s (string-copy \"aλc\"))) (string-set! s 1 #\\b) (list s (string->utf8 s)))",
+            "(\"abc\" #u8(97 98 99))",
+        ),
+        (
+            "(let ((s (string-copy \"日本語\"))) (string-set! s 2 #\\x) s)",
+            "\"日本x\"",
+        ),
+        (
+            "(let ((s (make-string 5 #\\-))) (string-fill! s #\\* 1 3) s)",
+            "\"-**--\"",
+        ),
+        (
+            "(let ((s (string-copy \"hello\"))) (string-copy! s 1 \"XYZ\" 1) s)",
+            "\"hYZlo\"",
+        ),
+        (
+            "(let ((s (string-copy \"abcde\"))) (string-copy! s 1 s 0 3) s)",
+            "\"aabce\"",
+        ),
+        (
+            "(list (string->utf8 \"λx\") (utf8->string #u8(206 187 120)) (string->utf8 \"abc\" 1 2) (utf8->string #u8(97 98 99) 1))",
+            "(#u8(206 187 120) \"λx\" #u8(98) \"bc\")",
+        ),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(
+        error("(string-set! \"literal\" 0 #\\x)")
+            .contains("string-set!: the string \"literal\" is immutable")
+    );
+    assert!(error("(string-set! (symbol->string 'abc) 0 #\\x)").contains("is immutable"));
+    assert!(
+        error("(string-set! (make-string 2) 2 #\\x)")
+            .contains("index 2 is out of range for length 2")
+    );
+    assert!(error("(utf8->string (bytevector 255))").contains("invalid UTF-8"));
+    assert!(error("(string-length 'abc)").contains("string-length: expected a string, got abc"));
+}
+
+#[test]
+fn characters_and_case() {
+    check(&[
+        (
+            "(import (scheme base) (scheme char))
+             (list (char-ci=? #\\a #\\A #\\a) (char-ci<? #\\a #\\B) (char-foldcase #\\Σ) (char-upcase #\\ß)
+                   (char-upper-case? #\\A) (char-lower-case? #\\A) (digit-value #\\7) (digit-value #\\٣)
+                   (digit-value #\\x) (char-numeric? #\\٣) (char-numeric? #\\Ⅻ))",
+            "(#t #t #\\σ #\\ß #t #f 7 3 #f #t #f)",
+        ),
+        (
+            "(import (scheme base) (scheme char))
+             (list (string-ci=? \"Straße\" \"STRASSE\") (string-ci<? \"abc\" \"ABD\") (string-foldcase \"ΣΑΣ\")
+                   (string-upcase \"straße\") (string-downcase \"ΣΑΣ\"))",
+            "(#t #t \"σασ\" \"STRASSE\" \"σας\")",
+        ),
+    ]);
+}
+
+#[test]
+fn bytevectors() {
+    check(&[
+        (
+            "(list (bytevector 1 2 3) (make-bytevector 2 7) (bytevector-length (make-bytevector 4)) (bytevector? #u8()) (bytevector? \"x\"))",
+            "(#u8(1 2 3) #u8(7 7) 4 #t #f)",
+        ),
+        (
+            "(let ((b (bytevector 1 2 3))) (bytevector-u8-set! b 0 255) (list b (bytevector-u8-ref b 0)))",
+            "(#u8(255 2 3) 255)",
+        ),
+        (
+            "(list (bytevector-copy #u8(1 2 3 4) 1 3) (bytevector-append #u8(1) #u8() #u8(2 3)))",
+            "(#u8(2 3) #u8(1 2 3))",
+        ),
+        (
+            "(let ((b (bytevector 1 2 3 4 5))) (bytevector-copy! b 1 b 0 3) b)",
+            "#u8(1 1 2 3 5)",
+        ),
+        ("(equal? (bytevector 1 2) #u8(1 2))", "#t"),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(
+        error("(bytevector-u8-set! #u8(1 2) 0 3)").contains("the bytevector #u8(1 2) is immutable")
+    );
+    assert!(error("(bytevector 256)").contains("bytevector: expected a byte, got 256"));
+    assert!(error("(bytevector-u8-ref (bytevector 1) 1)").contains("out of range"));
+}
+
+#[test]
 fn lists_from_r7rs() {
     check(&[
         (

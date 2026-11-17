@@ -21,7 +21,7 @@ use crate::page::OutOfMemory;
 use crate::records;
 use crate::strategy::Strategy;
 use crate::value::Value;
-use crate::vm::{Arith, Compare, type_error};
+use crate::vm::{Arith, Compare, type_error, wrong_type};
 
 impl<S: Strategy> Cx<S> {
     /// The number `v` is, if it is one.
@@ -158,14 +158,6 @@ impl<S: Strategy> Cx<S> {
             (Compare::Eq, Some(o)) => o.is_eq(),
         })
     }
-}
-
-/// A type error from `name`, naming what it got as `write` prints it.
-fn wrong_type<S: Strategy>(cx: &Cx<S>, name: &str, expected: &str, got: Value) -> Error {
-    Error::scheme(format!(
-        "{name}: expected {expected}, got {}",
-        cx.written(got)
-    ))
 }
 
 /// An arithmetic error as an error from `name`, blaming the first of `args`

@@ -41,6 +41,11 @@
    vector->string string->vector
    string? string-length string-ref string=? string<? string-append
    substring string->list list->string string-copy string-map string-for-each
+   make-string string string-set! string-fill! string-copy!
+   string->utf8 utf8->string
+   bytevector? make-bytevector bytevector bytevector-length
+   bytevector-u8-ref bytevector-u8-set! bytevector-copy bytevector-copy!
+   bytevector-append
    string>? string<=? string>=?
    char? char->integer integer->char char=? char<? char>? char<=? char>=?
    newline write-char write-string
