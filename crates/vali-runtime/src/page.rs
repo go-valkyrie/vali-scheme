@@ -3,8 +3,6 @@
 use std::alloc::{self, Layout};
 use std::fmt;
 use std::ptr::NonNull;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The size of a page, which is also its alignment, so an object's page
 /// starts at its address with the low bits cleared.
@@ -38,15 +36,12 @@ pub struct HeapConfig {
 /// and frees them all when dropped.
 pub struct PageSource {
     limit: usize,
-    used: AtomicUsize,
-    blocks: Mutex<Vec<(NonNull<u8>, Layout)>>,
+    used: usize,
+    blocks: Vec<(NonNull<u8>, Layout)>,
 }
 
-// SAFETY: the blocks are owned by the source and only freed in `drop`; the
-// list is behind a mutex.
+// SAFETY: the blocks are owned by the source, and only freed in `drop`.
 unsafe impl Send for PageSource {}
-// SAFETY: as above.
-unsafe impl Sync for PageSource {}
 
 impl fmt::Debug for PageSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -62,54 +57,43 @@ impl PageSource {
     pub fn new(config: &HeapConfig) -> PageSource {
         PageSource {
             limit: config.max_bytes.unwrap_or(usize::MAX),
-            used: AtomicUsize::new(0),
-            blocks: Mutex::new(Vec::new()),
+            used: 0,
+            blocks: Vec::new(),
         }
     }
 
     /// How many bytes the source has handed out.
     pub fn bytes_used(&self) -> usize {
-        self.used.load(Ordering::Relaxed)
+        self.used
     }
 
     /// A fresh page, `PAGE_BYTES` long and aligned to `PAGE_BYTES`.
-    pub fn page(&self) -> Result<NonNull<u8>, OutOfMemory> {
+    pub fn page(&mut self) -> Result<NonNull<u8>, OutOfMemory> {
         self.block(Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).expect("a valid page layout"))
     }
 
     /// Memory for one large object of `bytes` bytes, 8-byte aligned.
-    pub fn large(&self, bytes: usize) -> Result<NonNull<u8>, OutOfMemory> {
+    pub fn large(&mut self, bytes: usize) -> Result<NonNull<u8>, OutOfMemory> {
         self.block(Layout::from_size_align(bytes, 8).map_err(|_| OutOfMemory)?)
     }
 
-    fn block(&self, layout: Layout) -> Result<NonNull<u8>, OutOfMemory> {
-        let size = layout.size();
-        let before = self.used.fetch_add(size, Ordering::Relaxed);
-        if before
-            .checked_add(size)
-            .is_none_or(|after| after > self.limit)
-        {
-            self.used.fetch_sub(size, Ordering::Relaxed);
+    fn block(&mut self, layout: Layout) -> Result<NonNull<u8>, OutOfMemory> {
+        let used = self.used.checked_add(layout.size()).ok_or(OutOfMemory)?;
+        if used > self.limit {
             return Err(OutOfMemory);
         }
         // SAFETY: the layout has a non-zero size: a page, or an object of at
         // least one header word.
-        let block = NonNull::new(unsafe { alloc::alloc(layout) }).ok_or_else(|| {
-            self.used.fetch_sub(size, Ordering::Relaxed);
-            OutOfMemory
-        })?;
-        self.blocks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((block, layout));
+        let block = NonNull::new(unsafe { alloc::alloc(layout) }).ok_or(OutOfMemory)?;
+        self.used = used;
+        self.blocks.push((block, layout));
         Ok(block)
     }
 }
 
 impl Drop for PageSource {
     fn drop(&mut self) {
-        let blocks = self.blocks.get_mut().unwrap_or_else(|e| e.into_inner());
-        for (block, layout) in blocks.drain(..) {
+        for (block, layout) in self.blocks.drain(..) {
             // SAFETY: each block was allocated with exactly this layout and
             // is freed once.
             unsafe { alloc::dealloc(block.as_ptr(), layout) };
@@ -117,7 +101,7 @@ impl Drop for PageSource {
     }
 }
 
-/// A bump-allocation buffer over part of a page, owned by one task.
+/// A bump-allocation buffer over part of a page.
 #[derive(Debug, Default)]
 pub struct Bump {
     cursor: usize,
@@ -131,7 +115,7 @@ impl Bump {
     #[inline]
     pub fn allocate(
         &mut self,
-        source: &PageSource,
+        source: &mut PageSource,
         bytes: usize,
     ) -> Result<NonNull<u64>, OutOfMemory> {
         debug_assert!(bytes.is_multiple_of(8) && bytes <= PAGE_BYTES);

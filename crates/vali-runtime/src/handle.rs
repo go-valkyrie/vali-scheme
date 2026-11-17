@@ -1,13 +1,13 @@
 //! Handles: how Rust code holds Scheme values (ADR 0003).
 //!
 //! A [`Handle`] is an ordinary Rust value, `Send`, `Sync`, `Clone` and
-//! `'static`. A handle to a heap object points to a root slot in its owning
-//! task's [`RootTable`]; the slot has its own atomic count, which only Rust
+//! `'static`. A handle to a heap object points to a root slot in its
+//! isolate's [`RootTable`]; the slot has its own atomic count, which only Rust
 //! clones and drops change. The object itself has one ordinary reference,
-//! from the slot, which only the owning task adds and removes. Using a
-//! handle takes the owning task, which proves nothing else is touching that
-//! task's objects; dropping one takes nothing, and queues the slot for the
-//! owner to release at its next safepoint. Immediates need no slot.
+//! from the slot, which only the isolate adds and removes. Using a handle
+//! takes the isolate's context, which proves the isolate is not running
+//! anywhere else; dropping one takes nothing, and queues the slot for the
+//! isolate to release at its next safepoint. Immediates need no slot.
 
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -26,9 +26,9 @@ use crate::value::Value;
 pub enum Error {
     /// Allocation failed.
     OutOfMemory,
-    /// The handle belongs to another task. Its owner must share the object
-    /// before another task can use it (ADR 0008).
-    WrongTask,
+    /// The handle belongs to another isolate. Values move between isolates
+    /// by being sent through a channel, which copies them (ADR 0008).
+    WrongIsolate,
     /// The value is not of the type the operation needs.
     WrongType {
         /// What the operation needs.
@@ -42,8 +42,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::OutOfMemory => f.write_str("out of memory"),
-            Error::WrongTask => f.write_str(
-                "this handle belongs to another task; its owner must share the object first",
+            Error::WrongIsolate => f.write_str(
+                "this handle belongs to another isolate; send the value through a channel to copy it",
             ),
             Error::WrongType { expected } => write!(f, "expected {expected}"),
             Error::OutOfRange => f.write_str("index out of range"),
@@ -65,7 +65,7 @@ const NONE: u32 = u32::MAX;
 /// One root: a value held for Rust, with Rust's count of handles to it.
 #[derive(Debug)]
 pub(crate) struct Slot {
-    /// The value. Only the owning task reads or writes it.
+    /// The value. Only the owning isolate reads or writes it.
     value: AtomicU64,
     /// How many handles point here. Any thread changes it.
     count: AtomicU32,
@@ -81,20 +81,20 @@ struct Owned {
     free: Vec<u32>,
 }
 
-/// A task's root slots. Slots live in chunks that never move, so handles
+/// An isolate's root slots. Slots live in chunks that never move, so handles
 /// point straight at them.
 pub(crate) struct RootTable {
     /// The top of the stack of slots whose count reached zero: an index, or
     /// `NONE`. Handles push onto it from any thread; the owner takes the
     /// whole stack at once, so the stack has no ABA problem.
     released: AtomicU32,
-    /// Only the owning task touches this, through `&mut Task`.
+    /// Only the owning isolate touches this, through `&mut Cx`.
     owned: UnsafeCell<Owned>,
 }
 
 // SAFETY: `released` and each slot's `count` and `next` are atomics, used
 // from any thread. `owned` and each slot's `value` are only used by the
-// owning task, which `&mut Task` makes exclusive.
+// owning isolate, which `&mut Cx` makes exclusive.
 unsafe impl Send for RootTable {}
 // SAFETY: as above.
 unsafe impl Sync for RootTable {}
@@ -117,7 +117,7 @@ impl RootTable {
     ///
     /// # Safety
     ///
-    /// Only the owning task may call this, with exclusive access to itself.
+    /// Only the owning isolate may call this, with exclusive access to itself.
     #[allow(clippy::mut_from_ref)]
     unsafe fn owned(&self) -> &mut Owned {
         // SAFETY: passed on to the caller.
@@ -220,11 +220,11 @@ enum Inner {
 }
 
 // SAFETY: a rooted handle only touches its slot's atomic count, and its
-// table's release stack, without its owning task; the slot lives as long as
+// table's release stack, without its owning isolate; the slot lives as long as
 // the table, which the handle keeps alive.
 unsafe impl Send for Handle {}
 // SAFETY: as above; every method on `&Handle` that reads the value goes
-// through the owning task.
+// through the owning isolate.
 unsafe impl Sync for Handle {}
 
 impl Handle {
@@ -257,7 +257,7 @@ impl Handle {
         Handle(Inner::Rooted { table, slot, tag })
     }
 
-    /// The value's tag, which needs no task.
+    /// The value's tag, which needs no context.
     pub fn tag(&self) -> Tag {
         match &self.0 {
             Inner::Immediate(v) => v.tag(),
@@ -270,17 +270,17 @@ impl Handle {
         self.tag() == Tag::Pair
     }
 
-    /// The fixnum, if this is one. Needs no task.
+    /// The fixnum, if this is one. Needs no context.
     pub fn as_fixnum(&self) -> Option<i64> {
         self.as_immediate()?.as_fixnum()
     }
 
-    /// The boolean, if this is one. Needs no task.
+    /// The boolean, if this is one. Needs no context.
     pub fn as_boolean(&self) -> Option<bool> {
         self.as_immediate()?.as_boolean()
     }
 
-    /// The character, if this is one. Needs no task.
+    /// The character, if this is one. Needs no context.
     pub fn as_character(&self) -> Option<char> {
         self.as_immediate()?.as_character()
     }
@@ -300,10 +300,10 @@ impl Handle {
                 table: own, slot, ..
             } => {
                 if !Arc::ptr_eq(own, table) {
-                    return Err(Error::WrongTask);
+                    return Err(Error::WrongIsolate);
                 }
                 // SAFETY: the slot lives as long as its table, which this
-                // handle keeps alive; the caller is the owning task.
+                // handle keeps alive; the caller is the owning isolate.
                 let slot = unsafe { slot.as_ref() };
                 Ok(Value::from_raw(slot.value.load(Ordering::Relaxed)))
             }

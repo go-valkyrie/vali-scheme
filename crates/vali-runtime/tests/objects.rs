@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 
 use vali_abi::{StrategyLayout, Tag, TypeCode, data};
 use vali_runtime::{
-    Allocate, Buffers, Heap, HeapConfig, NoCollection, OutOfMemory, PAGE_BYTES, PageSource, Space,
-    Strategy, Task, Value,
+    Allocate, BumpHeap, Cx, HeapConfig, NoCollection, OutOfMemory, PAGE_BYTES, References, Space,
+    Strategy, Value,
 };
 
 /// No collection, but with a header on every pair and flonum, as a counting
@@ -14,65 +14,63 @@ use vali_runtime::{
 #[derive(Debug)]
 struct Headered;
 
-// SAFETY: delegates to `NoCollection`, which upholds the contract.
+// SAFETY: delegates to `BumpHeap`, which upholds the contract.
 unsafe impl Allocate for Headered {
     const LAYOUT: StrategyLayout = StrategyLayout::HEADERED;
-    type Heap = PageSource;
-    type Mutator = Buffers;
+    type Heap = BumpHeap;
 
-    fn new_heap(config: &HeapConfig) -> PageSource {
-        NoCollection::new_heap(config)
-    }
-
-    fn new_mutator(heap: &PageSource) -> Buffers {
-        NoCollection::new_mutator(heap)
+    fn new_heap(config: &HeapConfig) -> BumpHeap {
+        BumpHeap::new(config)
     }
 
     fn allocate(
-        heap: &PageSource,
-        mutator: &mut Buffers,
+        heap: &mut BumpHeap,
         space: Space,
         words: usize,
     ) -> Result<NonNull<u64>, OutOfMemory> {
-        NoCollection::allocate(heap, mutator, space, words)
+        heap.allocate(space, words)
+    }
+
+    fn bytes_used(heap: &BumpHeap) -> usize {
+        heap.bytes_used()
     }
 }
 
-impl vali_runtime::References for Headered {}
+impl References for Headered {}
 
 impl Strategy for Headered {
     const NAME: &'static str = "test-headered";
 }
 
-fn task<S: Strategy>() -> Task<S> {
-    Task::new(Heap::new(&HeapConfig::default()))
+fn cx<S: Strategy>() -> Cx<S> {
+    Cx::new(&HeapConfig::default())
 }
 
 fn lists_and_pairs<S: Strategy>() {
-    let mut task = task::<S>();
+    let mut cx = cx::<S>();
     let mut list = Value::EMPTY_LIST;
     for i in 0..100_000 {
-        list = unsafe { task.cons_raw(Value::fixnum(i).unwrap(), list) }.unwrap();
+        list = unsafe { cx.cons_raw(Value::fixnum(i).unwrap(), list) }.unwrap();
         assert_eq!(list.tag(), Tag::Pair);
     }
     let mut expected = 100_000;
     let mut sum = 0;
     while list != Value::EMPTY_LIST {
         expected -= 1;
-        let n = unsafe { task.car(list) }.as_fixnum().unwrap();
+        let n = unsafe { cx.car(list) }.as_fixnum().unwrap();
         assert_eq!(n, expected);
         sum += n;
-        list = unsafe { task.cdr(list) };
+        list = unsafe { cx.cdr(list) };
     }
     assert_eq!(sum, (0..100_000).sum::<i64>());
 
-    let pair = unsafe { task.cons_raw(Value::TRUE, Value::FALSE) }.unwrap();
+    let pair = unsafe { cx.cons_raw(Value::TRUE, Value::FALSE) }.unwrap();
     unsafe {
-        task.set_car(pair, Value::character('x'));
-        task.set_cdr(pair, Value::EMPTY_LIST);
-        assert_eq!(task.car(pair), Value::character('x'));
-        assert_eq!(task.cdr(pair), Value::EMPTY_LIST);
-        let header = task.header(pair, TypeCode::Pair);
+        cx.set_car(pair, Value::character('x'));
+        cx.set_cdr(pair, Value::EMPTY_LIST);
+        assert_eq!(cx.car(pair), Value::character('x'));
+        assert_eq!(cx.cdr(pair), Value::EMPTY_LIST);
+        let header = cx.header(pair, TypeCode::Pair);
         assert_eq!(header.is_some(), S::LAYOUT.pair_header);
         if let Some(header) = header {
             assert_eq!(header.type_code(), Some(TypeCode::Pair));
@@ -92,39 +90,39 @@ fn lists_with_pair_headers() {
 
 #[test]
 fn pairs_fill_pages_densely() {
-    let mut task = task::<NoCollection>();
-    let first = unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
-    let second = unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
+    let mut cx = cx::<NoCollection>();
+    let first = unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
+    let second = unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     assert_eq!(second.address() - first.address(), 16, "two words per pair");
     assert_eq!(first.address() % PAGE_BYTES as u64, 0, "a fresh page");
-    let used = task.heap().state().bytes_used();
+    let used = cx.bytes_used();
     for _ in 0..(PAGE_BYTES / 16) {
-        unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
+        unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     }
-    assert_eq!(task.heap().state().bytes_used(), used + PAGE_BYTES);
+    assert_eq!(cx.bytes_used(), used + PAGE_BYTES);
 }
 
 fn flonums_and_vectors<S: Strategy>() {
-    let mut task = task::<S>();
-    let x = task.flonum_raw(-0.0).unwrap();
+    let mut cx = cx::<S>();
+    let x = cx.flonum_raw(-0.0).unwrap();
     assert_eq!(x.tag(), Tag::Flonum);
-    assert!(unsafe { task.flonum_value(x) }.to_bits() == (-0.0f64).to_bits());
-    let nan = task.flonum_raw(f64::NAN).unwrap();
-    assert!(unsafe { task.flonum_value(nan) }.is_nan());
+    assert!(unsafe { cx.flonum_value(x) }.to_bits() == (-0.0f64).to_bits());
+    let nan = cx.flonum_raw(f64::NAN).unwrap();
+    assert!(unsafe { cx.flonum_value(nan) }.is_nan());
 
     for len in [0, 1, 7, 10_000] {
-        let v = unsafe { task.make_vector_raw(len, Value::UNSPECIFIED) }.unwrap();
+        let v = unsafe { cx.make_vector_raw(len, Value::UNSPECIFIED) }.unwrap();
         assert_eq!(v.tag(), Tag::Other);
         unsafe {
-            assert_eq!(task.vector_length(v), len);
-            let header = task.header(v, TypeCode::Vector).unwrap();
+            assert_eq!(cx.vector_length(v), len);
+            let header = cx.header(v, TypeCode::Vector).unwrap();
             assert_eq!(header.type_code(), Some(TypeCode::Vector));
             for i in 0..len {
-                assert_eq!(task.vector_ref(v, i), Value::UNSPECIFIED);
-                task.vector_set(v, i, Value::fixnum(i as i64).unwrap());
+                assert_eq!(cx.vector_ref(v, i), Value::UNSPECIFIED);
+                cx.vector_set(v, i, Value::fixnum(i as i64).unwrap());
             }
             for i in 0..len {
-                assert_eq!(task.vector_ref(v, i), Value::fixnum(i as i64).unwrap());
+                assert_eq!(cx.vector_ref(v, i), Value::fixnum(i as i64).unwrap());
             }
         }
     }
@@ -142,40 +140,39 @@ fn flonums_and_vectors_headered() {
 
 #[test]
 fn strings_are_utf8() {
-    let mut task = task::<NoCollection>();
+    let mut cx = cx::<NoCollection>();
     for (text, ascii) in [("", true), ("hello", true), ("héllo, λ 🦀", false)] {
-        let s = task.string_raw(text, false).unwrap();
+        let s = cx.string_raw(text, false).unwrap();
         assert_eq!(s.tag(), Tag::String);
         unsafe {
-            assert_eq!(task.string_str(s), text);
-            assert_eq!(task.string_length(s), text.chars().count());
-            let header = task.header(s, TypeCode::String).unwrap();
+            assert_eq!(cx.string_str(s), text);
+            assert_eq!(cx.string_length(s), text.chars().count());
+            let header = cx.header(s, TypeCode::String).unwrap();
             assert_eq!(header.data() & data::ASCII != 0, ascii);
             assert_eq!(header.data() & data::IMMUTABLE, 0);
         }
     }
-    let literal = task.string_raw("x", true).unwrap();
-    let header = unsafe { task.header(literal, TypeCode::String) }.unwrap();
+    let literal = cx.string_raw("x", true).unwrap();
+    let header = unsafe { cx.header(literal, TypeCode::String) }.unwrap();
     assert_ne!(header.data() & data::IMMUTABLE, 0);
 
-    let bytes = task.bytevector_raw(&[1, 2, 3, 255]).unwrap();
-    assert_eq!(unsafe { task.bytevector_bytes(bytes) }, &[1, 2, 3, 255]);
+    let bytes = cx.bytevector_raw(&[1, 2, 3, 255]).unwrap();
+    assert_eq!(unsafe { cx.bytevector_bytes(bytes) }, &[1, 2, 3, 255]);
 }
 
 #[test]
 fn the_heap_limit_is_enforced() {
-    let heap = Heap::<NoCollection>::new(&HeapConfig {
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig {
         max_bytes: Some(2 * PAGE_BYTES),
     });
-    let mut task = Task::new(heap);
     let mut pairs = 0;
-    while unsafe { task.cons_raw(Value::TRUE, Value::TRUE) }.is_ok() {
+    while unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.is_ok() {
         pairs += 1;
     }
     assert_eq!(pairs, 2 * PAGE_BYTES / 16);
     // Large objects count against the same limit.
     assert_eq!(
-        unsafe { task.make_vector_raw(10_000, Value::TRUE) }.unwrap_err(),
+        unsafe { cx.make_vector_raw(10_000, Value::TRUE) }.unwrap_err(),
         OutOfMemory
     );
 }
@@ -196,10 +193,7 @@ fn values() {
 }
 
 #[test]
-fn tasks_and_heaps_are_send() {
+fn a_context_is_send() {
     fn send<T: Send>() {}
-    fn sync<T: Sync>() {}
-    send::<Task<NoCollection>>();
-    send::<std::sync::Arc<Heap<NoCollection>>>();
-    sync::<Heap<NoCollection>>();
+    send::<Cx<NoCollection>>();
 }

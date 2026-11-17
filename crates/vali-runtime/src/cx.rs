@@ -1,7 +1,8 @@
-//! Heaps and tasks, and the raw object API.
+//! An isolate's context, and the raw object API.
 //!
-//! A [`Heap`] is shared by an isolate's tasks; each [`Task`] allocates from
-//! buffers of its own (ADR 0003). The object constructors and accessors here
+//! A [`Cx`] holds an isolate's heap and its root table. One thread at a time
+//! uses it (ADR 0008), so the strategy's state needs no locks and its counts
+//! no atomics. The object constructors and accessors here
 //! work on raw [`Value`]s, so the accessors are `unsafe`: a raw value is
 //! valid only until the next allocation, and must have the type the accessor
 //! expects.
@@ -17,46 +18,19 @@ use crate::page::{HeapConfig, OutOfMemory};
 use crate::strategy::{Space, Strategy};
 use crate::value::Value;
 
-/// The memory shared by an isolate's tasks.
-pub struct Heap<S: Strategy> {
-    state: S::Heap,
-}
-
-impl<S: Strategy> fmt::Debug for Heap<S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Heap")
-            .field("strategy", &S::NAME)
-            .field("state", &self.state)
-            .finish()
-    }
-}
-
-impl<S: Strategy> Heap<S> {
-    /// A heap set up by `config`.
-    pub fn new(config: &HeapConfig) -> Arc<Heap<S>> {
-        Arc::new(Heap {
-            state: S::new_heap(config),
-        })
-    }
-
-    /// The strategy's shared state.
-    pub fn state(&self) -> &S::Heap {
-        &self.state
-    }
-}
-
-/// One task's view of a heap: its allocation buffers and pending work.
-pub struct Task<S: Strategy> {
-    heap: Arc<Heap<S>>,
-    mutator: S::Mutator,
+/// An isolate's context: its heap and its root table. Holding `&mut Cx`
+/// proves the isolate is not running Scheme code anywhere else, which is
+/// what using a handle requires (ADR 0003).
+pub struct Cx<S: Strategy> {
+    heap: S::Heap,
     roots: Arc<RootTable>,
 }
 
-impl<S: Strategy> fmt::Debug for Task<S> {
+impl<S: Strategy> fmt::Debug for Cx<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Task")
+        f.debug_struct("Cx")
             .field("strategy", &S::NAME)
-            .field("mutator", &self.mutator)
+            .field("heap", &self.heap)
             .finish_non_exhaustive()
     }
 }
@@ -87,23 +61,26 @@ unsafe fn put(v: Value, offset: i32, x: u64) {
     unsafe { word(v, offset) }.store(x, Ordering::Relaxed)
 }
 
-impl<S: Strategy> Task<S> {
+impl<S: Strategy> Cx<S> {
     /// Where fields sit under this strategy.
     pub const LAYOUT: Layout = Layout::new(S::LAYOUT);
 
-    /// A task allocating from `heap`.
-    pub fn new(heap: Arc<Heap<S>>) -> Task<S> {
-        let mutator = S::new_mutator(&heap.state);
-        Task {
-            heap,
-            mutator,
+    /// A context with a fresh heap set up by `config`.
+    pub fn new(config: &HeapConfig) -> Cx<S> {
+        Cx {
+            heap: S::new_heap(config),
             roots: RootTable::new(),
         }
     }
 
-    /// The heap this task allocates from.
-    pub fn heap(&self) -> &Arc<Heap<S>> {
+    /// The strategy's state.
+    pub fn heap(&self) -> &S::Heap {
         &self.heap
+    }
+
+    /// How many bytes the heap has taken from the system.
+    pub fn bytes_used(&self) -> usize {
+        S::bytes_used(&self.heap)
     }
 
     /// A new object of type `t` with `fields` words after its header, the
@@ -115,7 +92,7 @@ impl<S: Strategy> Task<S> {
             _ => Space::General,
         };
         let words = Self::LAYOUT.words(t, fields);
-        let memory = S::allocate(&self.heap.state, &mut self.mutator, space, words)?;
+        let memory = S::allocate(&mut self.heap, space, words)?;
         let v = Value::from_address(t.tag(), memory.as_ptr() as u64);
         if let Some(offset) = Self::LAYOUT.header(t) {
             let header = Header::new(t, data).expect("runtime data fits in 24 bits");
@@ -349,8 +326,8 @@ impl<S: Strategy> Task<S> {
 }
 
 /// Handles: rooting values for Rust, and the safe constructors.
-impl<S: Strategy> Task<S> {
-    /// Holds `v` for Rust code, as a handle owned by this task.
+impl<S: Strategy> Cx<S> {
+    /// Holds `v` for Rust code, as a handle owned by this isolate.
     ///
     /// # Safety
     ///
@@ -360,14 +337,14 @@ impl<S: Strategy> Task<S> {
             return Handle::immediate(v);
         }
         self.safepoint();
-        S::retain(&mut self.mutator, v);
-        // SAFETY: this task owns its root table, and `&mut self` makes this
+        S::retain(&mut self.heap, v);
+        // SAFETY: this context owns its root table, and `&mut self` makes this
         // the only use of it.
         let slot = unsafe { self.roots.insert(v) };
         Handle::rooted(Arc::clone(&self.roots), slot, v.tag())
     }
 
-    /// The raw value `h` holds, if this task owns it. The value is valid
+    /// The raw value `h` holds, if this isolate owns it. The value is valid
     /// until the next allocation.
     pub fn get(&self, h: &Handle) -> Result<Value, Error> {
         h.value_in(&self.roots)
@@ -375,10 +352,10 @@ impl<S: Strategy> Task<S> {
 
     /// Releases the objects of handles dropped since the last safepoint.
     pub fn safepoint(&mut self) {
-        let mutator = &mut self.mutator;
-        // SAFETY: this task owns its root table, and `&mut self` makes this
+        let heap = &mut self.heap;
+        // SAFETY: this context owns its root table, and `&mut self` makes this
         // the only use of it.
-        unsafe { self.roots.reclaim(|v| S::release(mutator, v)) };
+        unsafe { self.roots.reclaim(|v| S::release(heap, v)) };
     }
 
     /// How many root slots hold values, after releasing dropped handles.
@@ -391,7 +368,7 @@ impl<S: Strategy> Task<S> {
     /// A new pair.
     pub fn cons(&mut self, car: &Handle, cdr: &Handle) -> Result<Handle, Error> {
         let (car, cdr) = (self.get(car)?, self.get(cdr)?);
-        // SAFETY: both values come from live handles of this task.
+        // SAFETY: both values come from live handles of this isolate.
         unsafe {
             let pair = self.cons_raw(car, cdr)?;
             Ok(self.root(pair))
@@ -415,7 +392,7 @@ impl<S: Strategy> Task<S> {
     /// A new vector of `len` elements, each `fill`.
     pub fn vector(&mut self, len: usize, fill: &Handle) -> Result<Handle, Error> {
         let fill = self.get(fill)?;
-        // SAFETY: `fill` comes from a live handle of this task.
+        // SAFETY: `fill` comes from a live handle of this isolate.
         unsafe {
             let v = self.make_vector_raw(len, fill)?;
             Ok(self.root(v))
@@ -447,105 +424,105 @@ impl<S: Strategy> Task<S> {
     }
 }
 
-/// Using handles. Each method takes the handle's owning task, which proves
-/// nothing else is touching that task's objects (ADR 0003).
+/// Using handles. Each method takes the context of the handle's isolate,
+/// which proves the isolate is not running anywhere else (ADR 0003).
 impl Handle {
     /// A pair's `car`.
-    pub fn car<S: Strategy>(&self, task: &mut Task<S>) -> Result<Handle, Error> {
-        let pair = task.pair(self)?;
+    pub fn car<S: Strategy>(&self, cx: &mut Cx<S>) -> Result<Handle, Error> {
+        let pair = cx.pair(self)?;
         // SAFETY: `pair` is a live pair, and its `car` a valid value.
         unsafe {
-            let car = task.car(pair);
-            Ok(task.root(car))
+            let car = cx.car(pair);
+            Ok(cx.root(car))
         }
     }
 
     /// A pair's `cdr`.
-    pub fn cdr<S: Strategy>(&self, task: &mut Task<S>) -> Result<Handle, Error> {
-        let pair = task.pair(self)?;
+    pub fn cdr<S: Strategy>(&self, cx: &mut Cx<S>) -> Result<Handle, Error> {
+        let pair = cx.pair(self)?;
         // SAFETY: `pair` is a live pair, and its `cdr` a valid value.
         unsafe {
-            let cdr = task.cdr(pair);
-            Ok(task.root(cdr))
+            let cdr = cx.cdr(pair);
+            Ok(cx.root(cdr))
         }
     }
 
     /// Sets a pair's `car`.
-    pub fn set_car<S: Strategy>(&self, task: &mut Task<S>, x: &Handle) -> Result<(), Error> {
-        let (pair, x) = (task.pair(self)?, task.get(x)?);
+    pub fn set_car<S: Strategy>(&self, cx: &mut Cx<S>, x: &Handle) -> Result<(), Error> {
+        let (pair, x) = (cx.pair(self)?, cx.get(x)?);
         // SAFETY: `pair` is a live pair and `x` a valid value.
-        unsafe { task.set_car(pair, x) };
+        unsafe { cx.set_car(pair, x) };
         Ok(())
     }
 
     /// Sets a pair's `cdr`.
-    pub fn set_cdr<S: Strategy>(&self, task: &mut Task<S>, x: &Handle) -> Result<(), Error> {
-        let (pair, x) = (task.pair(self)?, task.get(x)?);
+    pub fn set_cdr<S: Strategy>(&self, cx: &mut Cx<S>, x: &Handle) -> Result<(), Error> {
+        let (pair, x) = (cx.pair(self)?, cx.get(x)?);
         // SAFETY: `pair` is a live pair and `x` a valid value.
-        unsafe { task.set_cdr(pair, x) };
+        unsafe { cx.set_cdr(pair, x) };
         Ok(())
     }
 
     /// A flonum's value.
-    pub fn to_f64<S: Strategy>(&self, task: &mut Task<S>) -> Result<f64, Error> {
-        let v = task.get(self)?;
+    pub fn to_f64<S: Strategy>(&self, cx: &mut Cx<S>) -> Result<f64, Error> {
+        let v = cx.get(self)?;
         if v.tag() != vali_abi::Tag::Flonum {
             return Err(Error::WrongType {
                 expected: "a flonum",
             });
         }
         // SAFETY: `v` is a live flonum.
-        Ok(unsafe { task.flonum_value(v) })
+        Ok(unsafe { cx.flonum_value(v) })
     }
 
     /// A string's text, copied out.
-    pub fn string_value<S: Strategy>(&self, task: &mut Task<S>) -> Result<String, Error> {
-        let v = task.get(self)?;
+    pub fn string_value<S: Strategy>(&self, cx: &mut Cx<S>) -> Result<String, Error> {
+        let v = cx.get(self)?;
         if v.tag() != vali_abi::Tag::String {
             return Err(Error::WrongType {
                 expected: "a string",
             });
         }
         // SAFETY: `v` is a live string, copied before anything can change it.
-        Ok(unsafe { task.string_str(v) }.to_owned())
+        Ok(unsafe { cx.string_str(v) }.to_owned())
     }
 
     /// A vector's length.
-    pub fn vector_length<S: Strategy>(&self, task: &mut Task<S>) -> Result<usize, Error> {
-        let v = task.vector_value(self)?;
+    pub fn vector_length<S: Strategy>(&self, cx: &mut Cx<S>) -> Result<usize, Error> {
+        let v = cx.vector_value(self)?;
         // SAFETY: `v` is a live vector.
-        Ok(unsafe { task.vector_length(v) })
+        Ok(unsafe { cx.vector_length(v) })
     }
 
     /// A vector's `i`th element.
-    pub fn vector_ref<S: Strategy>(&self, task: &mut Task<S>, i: usize) -> Result<Handle, Error> {
-        let v = task.vector_value(self)?;
+    pub fn vector_ref<S: Strategy>(&self, cx: &mut Cx<S>, i: usize) -> Result<Handle, Error> {
+        let v = cx.vector_value(self)?;
         // SAFETY: `v` is a live vector, checked to have more than `i`
         // elements.
         unsafe {
-            if i >= task.vector_length(v) {
+            if i >= cx.vector_length(v) {
                 return Err(Error::OutOfRange);
             }
-            let element = task.vector_ref(v, i);
-            Ok(task.root(element))
+            let element = cx.vector_ref(v, i);
+            Ok(cx.root(element))
         }
     }
 
     /// Sets a vector's `i`th element.
     pub fn vector_set<S: Strategy>(
         &self,
-        task: &mut Task<S>,
+        cx: &mut Cx<S>,
         i: usize,
         x: &Handle,
     ) -> Result<(), Error> {
-        let (v, x) = (task.vector_value(self)?, task.get(x)?);
+        let (v, x) = (cx.vector_value(self)?, cx.get(x)?);
         // SAFETY: `v` is a live vector, checked to have more than `i`
         // elements, and `x` a valid value.
         unsafe {
-            if i >= task.vector_length(v) {
+            if i >= cx.vector_length(v) {
                 return Err(Error::OutOfRange);
             }
-            task.vector_set(v, i, x);
+            cx.vector_set(v, i, x);
         }
         Ok(())
     }

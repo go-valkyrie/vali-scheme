@@ -33,37 +33,35 @@ pub enum Space {
 pub unsafe trait Allocate: Sized + Send + Sync + 'static {
     /// Whether pairs and flonums carry a header under this strategy.
     const LAYOUT: StrategyLayout;
-    /// The state shared by every task of a heap.
-    type Heap: Send + Sync + Debug;
-    /// The state of one task: its allocation buffers, and pending work.
-    type Mutator: Send + Debug;
+    /// The state of one isolate's heap: its pages, allocation buffers and
+    /// pending work. One thread at a time uses it (ADR 0008).
+    type Heap: Send + Debug;
 
-    /// A heap's shared state.
+    /// A fresh heap.
     fn new_heap(config: &HeapConfig) -> Self::Heap;
-
-    /// A task's state.
-    fn new_mutator(heap: &Self::Heap) -> Self::Mutator;
 
     /// Uninitialised memory for an object of `words` words in `space`.
     fn allocate(
-        heap: &Self::Heap,
-        mutator: &mut Self::Mutator,
+        heap: &mut Self::Heap,
         space: Space,
         words: usize,
     ) -> Result<NonNull<u64>, OutOfMemory>;
+
+    /// How many bytes the heap has taken from the system.
+    fn bytes_used(heap: &Self::Heap) -> usize;
 }
 
-/// References the runtime holds on objects outside the heap, such as a
-/// task's root slots for Rust handles (ADR 0003). A counting strategy counts
+/// References the runtime holds on objects outside the heap, such as an
+/// isolate's root slots for Rust handles (ADR 0003). A counting strategy counts
 /// them; the defaults do nothing.
 pub trait References: Allocate {
     /// The runtime now holds one more reference to `v`, a heap object.
     #[inline(always)]
-    fn retain(_mutator: &mut Self::Mutator, _v: crate::Value) {}
+    fn retain(_heap: &mut Self::Heap, _v: crate::Value) {}
 
     /// The runtime has dropped one reference to `v`, a heap object.
     #[inline(always)]
-    fn release(_mutator: &mut Self::Mutator, _v: crate::Value) {}
+    fn release(_heap: &mut Self::Heap, _v: crate::Value) {}
 }
 
 /// A memory strategy: every capability trait together.
