@@ -8,11 +8,23 @@
 //!
 //! [`Evaluate`] compiles and runs each file; [`ReadOnly`] only checks that
 //! each file reads as Scheme.
+//!
+//! What [`Evaluate`] does depends on the file's kind:
+//! - `scheme`: runs it; it passes if it runs to the end.
+//! - `host`: the same, in the host fixture `host:` names. `in-memory-loader`
+//!   also serves `(regression virtual)` from memory; `expansion-reads-scoped`
+//!   lets expansion read the test's `data/` directory and nothing else.
+//! - `performance`: the file defines `(program n)`, returning a program as
+//!   data. Compiling `(program (* 4 n))` must take at most twice as long
+//!   as linear growth would, eight times as long as `(program n)` for an
+//!   `n` large enough to time, where a quadratic pass would take sixteen.
+//! - `benchmark`: not run yet.
 
 mod header;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use libtest_mimic::{Failed, Trial};
 use vali_syntax::{SourceId, TextSize};
@@ -87,24 +99,122 @@ impl Backend for Evaluate {
         if let outcome @ Outcome::Invalid(_) = ReadOnly.run(file, header) {
             return outcome;
         }
-        if header.kind != Kind::Scheme {
-            return Outcome::Unsupported(format!("cannot run {:?} tests yet", header.kind));
+        let mut host = TestHost::new(file);
+        match (header.kind, header.host.as_deref()) {
+            (Kind::Scheme, _) => {}
+            (Kind::Host, Some("in-memory-loader")) => host.in_memory = true,
+            (Kind::Host, Some("expansion-reads-scoped")) => {
+                host.readable = file.path.parent().map(|dir| dir.join("data"));
+            }
+            (Kind::Host, Some(other)) => {
+                return Outcome::Unsupported(format!("no host fixture named {other}"));
+            }
+            (Kind::Performance, _) => return performance(file, &host),
+            (kind, _) => {
+                return Outcome::Unsupported(format!("cannot run {kind:?} tests yet"));
+            }
         }
-        let identity = vali_compiler::Identity::new(&file.name);
-        let host = TestHost::new(&file.name);
-        let program = match vali_compiler::compile_program(&file.source, &identity, &host) {
-            Ok(program) => program,
-            Err(e) => return Outcome::Failed(format!("compiling: {e}")),
-        };
-        let mut cx = vali_runtime::Cx::<vali_runtime::NoCollection>::new(&Default::default());
-        let result = cx
-            .install_primitives()
-            .and_then(|()| vali_compiler::load(&mut cx, program))
-            .and_then(|id| cx.run(id));
-        match result {
+        match run(file, &host) {
             Ok(_) => Outcome::Passed,
-            Err(e) => Outcome::Failed(e.to_string()),
+            Err(e) => Outcome::Failed(e),
         }
+    }
+}
+
+/// Compiles and runs `file` in a fresh isolate, with `host`'s libraries,
+/// returning the isolate and the program's module.
+fn run(
+    file: &TestFile,
+    host: &TestHost,
+) -> Result<
+    (
+        vali_runtime::Cx<vali_runtime::NoCollection>,
+        vali_runtime::ModuleId,
+    ),
+    String,
+> {
+    let identity = vali_compiler::Identity::new(&file.name);
+    let program = vali_compiler::compile_program(&file.source, &identity, host)
+        .map_err(|e| format!("compiling: {e}"))?;
+    let mut cx = vali_runtime::Cx::<vali_runtime::NoCollection>::new(&Default::default());
+    let id = cx
+        .install_primitives()
+        .and_then(|()| vali_compiler::load(&mut cx, program))
+        .map_err(|e| e.to_string())?;
+    cx.run(id).map_err(|e| e.to_string())?;
+    Ok((cx, id))
+}
+
+/// How much longer compiling four times as much may take, at most: twice
+/// what linear growth gives, where a quadratic pass gives sixteen.
+const MAX_GROWTH: f64 = 8.0;
+
+/// Below this, compile times are too short to compare.
+const MIN_TIME: Duration = Duration::from_millis(30);
+
+/// Runs a performance test: see the module documentation.
+fn performance(file: &TestFile, host: &TestHost) -> Outcome {
+    let (mut cx, id) = match run(file, host) {
+        Ok(ran) => ran,
+        Err(e) => return Outcome::Failed(e),
+    };
+    let Some(program) = cx.variable(id, "program") else {
+        return Outcome::Invalid(format!(
+            "{}: a performance test defines (program n)",
+            file.path.display()
+        ));
+    };
+    // The best of three compiles of `(program n)`.
+    let mut time = |n: u32| -> Result<Duration, String> {
+        let n = vali_runtime::Handle::fixnum(i64::from(n)).expect("small");
+        let source = cx
+            .call(&program, &[n])
+            .and_then(|datum| cx.write_string(&datum))
+            .map_err(|e| format!("(program n): {e}"))?;
+        let identity = vali_compiler::Identity::new(&format!("{}:generated", file.name));
+        let mut best = Duration::MAX;
+        for _ in 0..3 {
+            let start = Instant::now();
+            vali_compiler::compile_program(&source, &identity, host)
+                .map_err(|e| format!("compiling (program n): {e}"))?;
+            best = best.min(start.elapsed());
+        }
+        Ok(best)
+    };
+    match growth(&mut time) {
+        Ok(()) => Outcome::Passed,
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
+/// Decides a performance test, given `time`, which compiles `(program n)`.
+/// Only the time above `(program 0)`'s counts: most of that is compiling
+/// the libraries the program imports, the same whatever `n` is. `n` grows
+/// until its share is long enough to time, then `(program (* 4 n))`'s
+/// share may be at most `MAX_GROWTH` times as long.
+fn growth(mut time: impl FnMut(u32) -> Result<Duration, String>) -> Result<(), String> {
+    let base = time(0)?;
+    let mut n = 25;
+    let mut small = time(n)?.saturating_sub(base);
+    while small < MIN_TIME {
+        if n >= 1 << 16 {
+            return Err(format!(
+                "(program {n}) takes no longer to compile than (program 0): nothing to compare"
+            ));
+        }
+        n *= 2;
+        small = time(n)?.saturating_sub(base);
+    }
+    let large = time(4 * n)?.saturating_sub(base);
+    let growth = large.as_secs_f64() / small.as_secs_f64();
+    if growth <= MAX_GROWTH {
+        Ok(())
+    } else {
+        Err(format!(
+            "compiling (program {}) took {large:?} more than (program 0), {growth:.1} times \
+             (program {n})'s {small:?}; linear growth gives about 4",
+            4 * n
+        ))
     }
 }
 
@@ -114,7 +224,20 @@ impl Backend for Evaluate {
 /// 0009 #6). The command line is `vali-test` and the test's name.
 struct TestHost {
     process: Arc<vali_runtime::NativeLibrary>,
+    /// Whether it serves `(regression virtual)`, from memory.
+    in_memory: bool,
+    /// The test's own directory, which its includes are relative to.
+    dir: PathBuf,
+    /// The directory expansion may read, if any.
+    readable: Option<PathBuf>,
 }
+
+/// What the `in-memory-loader` fixture serves, with no file behind it.
+const VIRTUAL: &str = "
+(define-library (regression virtual)
+  (import (scheme base))
+  (export where-was-i-loaded-from)
+  (begin (define (where-was-i-loaded-from) 'served-from-memory)))";
 
 /// The test host's (scheme process-context).
 const PROCESS_CONTEXT: &str = "
@@ -129,8 +252,8 @@ const PROCESS_CONTEXT: &str = "
       (map (lambda (p) (cons (car p) (cadr p))) (%get-environment-variables)))))";
 
 impl TestHost {
-    fn new(test: &str) -> TestHost {
-        let command_line = vec!["vali-test".to_owned(), test.to_owned()];
+    fn new(file: &TestFile) -> TestHost {
+        let command_line = vec!["vali-test".to_owned(), file.name.clone()];
         let process = vali_runtime::NativeLibrary::new(&["vali-test", "process"])
             .function("command-line", move || command_line.clone())
             .function("get-environment-variable", |name: String| {
@@ -143,6 +266,13 @@ impl TestHost {
             });
         TestHost {
             process: Arc::new(process),
+            in_memory: false,
+            dir: file
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            readable: None,
         }
     }
 }
@@ -165,10 +295,39 @@ impl vali_compiler::Loader for TestHost {
                     Identity::new("vali-test:process"),
                     Arc::clone(&self.process),
                 ))
+            } else if self.in_memory && *name == LibraryName::new(["regression", "virtual"]) {
+                Some(Source::scheme(
+                    Identity::new("memory:regression/virtual"),
+                    VIRTUAL,
+                ))
             } else {
                 None
             },
         )
+    }
+
+    /// Files under the readable directory, if there is one, relative to the
+    /// test's own directory; nothing else, `..` and links included, since
+    /// paths are compared once resolved.
+    fn include(
+        &self,
+        path: &str,
+        _from: &vali_compiler::Identity,
+    ) -> Result<Option<String>, vali_compiler::LoadError> {
+        let Some(readable) = self.readable.as_ref().and_then(|d| d.canonicalize().ok()) else {
+            return Ok(None);
+        };
+        let Ok(resolved) = self.dir.join(path).canonicalize() else {
+            return Ok(None);
+        };
+        if !resolved.starts_with(&readable) {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&resolved)
+            .map(Some)
+            .map_err(|e| vali_compiler::LoadError {
+                message: e.to_string(),
+            })
     }
 }
 
@@ -265,6 +424,26 @@ mod tests {
                 .contains("now passes")
         );
         assert!(verdict(&xfail, Outcome::Invalid("broken".into())).is_err());
+    }
+
+    #[test]
+    fn compile_time_growth() {
+        let base = Duration::from_millis(40);
+        // Linear: passes.
+        assert_eq!(
+            growth(|n| Ok(base + Duration::from_micros(500) * n)),
+            Ok(())
+        );
+        // Quadratic: fails, naming the sizes.
+        let quadratic = growth(|n| Ok(base + Duration::from_micros(u64::from(n * n))));
+        assert!(
+            quadratic
+                .as_ref()
+                .is_err_and(|e| e.contains("linear growth gives about 4")),
+            "{quadratic:?}"
+        );
+        // Flat: nothing to compare.
+        assert!(growth(|_| Ok(base)).is_err_and(|e| e.contains("nothing to compare")));
     }
 
     #[test]

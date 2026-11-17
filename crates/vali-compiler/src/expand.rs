@@ -227,7 +227,13 @@ impl Expander {
         let mut table = BindingTable::new();
         for &(name, form) in CORE {
             table
-                .bind(name.to_owned(), core, Phases::All, Binding::Core(form))
+                .bind(
+                    &context,
+                    name.to_owned(),
+                    core,
+                    Phases::All,
+                    Binding::Core(form),
+                )
                 .map_err(|_| CompileError {
                     message: format!("{name} is bound twice"),
                     span: None,
@@ -564,10 +570,13 @@ impl Expander {
     /// fine if both mean the same.
     fn import(&mut self, set: &ImportSet, top: ScopeSetId, span: Span) -> Result<()> {
         for (name, binding) in self.import_bindings(set, span)? {
-            match self
-                .table
-                .bind(name.clone(), top, Phases::All, binding.clone())
-            {
+            match self.table.bind(
+                &self.context,
+                name.clone(),
+                top,
+                Phases::All,
+                binding.clone(),
+            ) {
                 Ok(()) => {}
                 Err(AlreadyBound { existing }) if *existing == binding => {}
                 Err(_) => {
@@ -1038,7 +1047,13 @@ impl Expander {
             .as_identifier()
             .ok_or_else(|| error(format!("{what}: expected a name"), id.span()))?;
         self.table
-            .bind(name.to_owned(), id.scopes(), Phases::All, binding)
+            .bind(
+                &self.context,
+                name.to_owned(),
+                id.scopes(),
+                Phases::All,
+                binding,
+            )
             .map_err(|_| error(format!("{what}: {name} is bound twice"), id.span()))
     }
 
@@ -1257,6 +1272,7 @@ impl Expander {
         };
         let unit = self.units.len() - 1;
         match self.table.bind(
+            &self.context,
             name.to_owned(),
             id.scopes(),
             Phases::All,

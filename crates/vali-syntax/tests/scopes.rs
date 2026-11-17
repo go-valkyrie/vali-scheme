@@ -54,7 +54,13 @@ impl Expander {
         let mut table = BindingTable::new();
         for core in ["lambda", "let", "if", "quote"] {
             table
-                .bind(core.to_owned(), top, Phases::All, Binding::Core(core))
+                .bind(
+                    &context,
+                    core.to_owned(),
+                    top,
+                    Phases::All,
+                    Binding::Core(core),
+                )
                 .unwrap();
         }
         Expander {
@@ -83,6 +89,7 @@ impl Expander {
         let index = self.macros.len() - 1;
         self.table
             .bind(
+                &self.context,
                 name.to_owned(),
                 self.top,
                 Phases::All,
@@ -110,6 +117,7 @@ impl Expander {
         let unique = format!("{}.{}", id.identifier().expect("a binder"), self.next);
         self.table
             .bind(
+                &self.context,
                 id.identifier().unwrap().to_owned(),
                 id.scopes,
                 Phases::All,
@@ -341,7 +349,13 @@ fn bound_and_free_identifier_equality() {
     let inner = context.add(outer, m).unwrap();
     let mut table = BindingTable::new();
     table
-        .bind("x".to_owned(), outer, Phases::All, Binding::Core("x"))
+        .bind(
+            &context,
+            "x".to_owned(),
+            outer,
+            Phases::All,
+            Binding::Core("x"),
+        )
         .unwrap();
     let id = |scopes| Syntax::from_datum(&read("x"), scopes);
     let (x1, x2) = (id(outer), id(inner));
@@ -369,7 +383,7 @@ fn incomparable_candidates_are_ambiguous() {
     let only_a = context.intern(&[a]).unwrap();
     let mut table = BindingTable::new();
     for (scopes, n) in [(only_a, 0), (ab, 1), (ac, 2)] {
-        table.bind("x", scopes, Phases::All, n).unwrap();
+        table.bind(&context, "x", scopes, Phases::All, n).unwrap();
     }
     assert_eq!(
         table.resolve(&context, "x", abc, Phase::RUN),
@@ -392,10 +406,18 @@ fn phases_filter_candidates() {
     let outer = context.intern(&[a]).unwrap();
     let inner = context.intern(&[a, b]).unwrap();
     let mut table = BindingTable::new();
-    table.bind("x", outer, Phases::All, "outer").unwrap();
+    table
+        .bind(&context, "x", outer, Phases::All, "outer")
+        .unwrap();
     // `(import (for (lib) expand))`: visible only at phase 1.
     table
-        .bind("x", inner, Phases::Only(vec![Phase::EXPAND]), "import")
+        .bind(
+            &context,
+            "x",
+            inner,
+            Phases::Only(vec![Phase::EXPAND]),
+            "import",
+        )
         .unwrap();
     assert_eq!(
         table.resolve(&context, "x", inner, Phase::RUN),
@@ -408,8 +430,14 @@ fn phases_filter_candidates() {
     // The same set at another phase is a separate binding; at a shared
     // phase it is refused.
     table
-        .bind("x", inner, Phases::Only(vec![Phase(2)]), "meta 2")
+        .bind(&context, "x", inner, Phases::Only(vec![Phase(2)]), "meta 2")
         .unwrap();
-    let refused = table.bind("x", inner, Phases::Only(vec![Phase(2), Phase(3)]), "again");
+    let refused = table.bind(
+        &context,
+        "x",
+        inner,
+        Phases::Only(vec![Phase(2), Phase(3)]),
+        "again",
+    );
     assert_eq!(refused.unwrap_err().existing, &"meta 2");
 }

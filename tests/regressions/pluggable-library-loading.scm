@@ -2,7 +2,6 @@
 ;;; found-in: scheme-rs
 ;;; kind: host
 ;;; host: in-memory-loader
-;;; expect: fail, needs loaders (M1, M2)
 
 ;; scheme-rs searched a fixed path: the current directory, one environment
 ;; variable, and its built-ins. The `in-memory-loader` host serves

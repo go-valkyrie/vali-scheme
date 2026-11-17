@@ -4,6 +4,7 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-17, the expander: written in Rust, syntax objects as Rust values behind one heap type, `syntax-case` matching in Rust, and the core forms (items 12 to 17)
 - **Amended:** 2026-11-17, `syntax-rules` stays built into the expander (item 14)
+- **Amended:** 2026-11-17, the binding table keeps each symbol's entries by the newest scope in their sets, so resolving stays linear in the program (item 2)
 - **Related:** 0001 (phasing, determinism, stable scope identities), 0007 (`syntax-case` and the syntax procedures), 0012 (distribution format), 0013 (standalone executables, `eval`), 0014 (spans and macro origins)
 
 ## Context
@@ -24,6 +25,8 @@ Syntax objects are values that macros manipulate. Most exist only at expansion t
 
 1. **Binding uses sets of scopes** (Flatt, POPL 2016). A scope is an opaque identity. Every syntax object carries one set of scopes. Expansion adds scopes for each binding form, flips a fresh scope on a macro's input and output to tell introduced identifiers from passed ones, and adds use-site scopes where definitions and uses share a context.
 2. **The binding table maps a symbol and a scope set to a binding.** Resolving an identifier finds every entry for its symbol whose scope set is a subset of the identifier's. The entry whose set is a superset of all the others wins. If there is no such entry, the reference is ambiguous, which is an error that names the candidates.
+
+   **Entries are kept by a scope, as Racket keeps bindings in their scopes.** Each symbol's entries are filed under the newest scope in their sets. An entry whose set is a subset of an identifier's has that scope among the identifier's, so resolving looks only at the entries filed under the identifier's own scopes. A flat list per symbol made expansion quadratic: every body binding a common name such as `x` added a candidate that every later reference to `x` tested. The no-quadratic-compiler-passes regression found it; compiling 16,000 chained definitions went from 4.2 s to 0.55 s.
 3. **One scope set per syntax object; phases live in the binding table.** Each entry records the phases where it is visible: all phases, or only the listed ones. Under implicit phasing nearly every entry is visible at all phases. Only R6RS `for` imports restrict it. Resolution at phase *p* ignores entries not visible at *p*.
 
    Local bindings are visible at all phases. An identifier that resolves to a local binding from another phase, as when a transformer returns a quoted reference to one of its own locals, is reported as "used out of context", as Racket does. It is never resolved silently to a less specific binding.

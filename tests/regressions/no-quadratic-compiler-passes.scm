@@ -1,7 +1,6 @@
 ;;; requirement: No quadratic compiler passes
 ;;; found-in: scheme-rs
 ;;; kind: performance
-;;; expect: fail, needs the compiler and performance checks (M1)
 
 ;; In scheme-rs, the reduce pass took 784 ms of a 1.1 s load, because it
 ;; recomputed use counts for every rewrite; a use-count census fixed it.

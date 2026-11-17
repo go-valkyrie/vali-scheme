@@ -4,12 +4,19 @@
 //! where the binding is visible. An identifier refers to the entry, among
 //! those visible at its phase whose scope sets are subsets of its own, whose
 //! set contains all the others.
+//!
+//! Each symbol's entries are kept by the newest scope in their sets, as
+//! Racket keeps bindings in their scopes: an entry whose set is a subset of
+//! an identifier's has that scope among the identifier's, so resolving
+//! looks only at the identifier's own scopes' entries. A symbol bound in
+//! a thousand bodies, such as a common parameter name, costs a lookup no
+//! more than one bound once, so expansion stays linear in the program.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::scope::{ScopeContext, ScopeSetId};
+use crate::scope::{Scope, ScopeContext, ScopeSetId};
 
 /// A phase: 0 for run time, 1 for the expansion of phase-0 code, and so on.
 /// R6RS `meta` levels can be negative.
@@ -61,7 +68,14 @@ struct Entry<B> {
 /// `B` whatever the expander binds identifiers to.
 #[derive(Clone, Debug)]
 pub struct BindingTable<S, B> {
-    entries: HashMap<S, Vec<Entry<B>>>,
+    /// Each symbol's entries, by the newest scope of their sets, `None` for
+    /// the empty set.
+    entries: HashMap<S, HashMap<Option<Scope>, Vec<Entry<B>>>>,
+}
+
+/// The scope an entry with `scopes` is kept by.
+fn key(context: &ScopeContext, scopes: ScopeSetId) -> Option<Scope> {
+    context.scopes(scopes).last().copied()
 }
 
 impl<S, B> Default for BindingTable<S, B> {
@@ -104,12 +118,18 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
     /// whether that is an error.
     pub fn bind(
         &mut self,
+        context: &ScopeContext,
         symbol: S,
         scopes: ScopeSetId,
         phases: Phases,
         binding: B,
     ) -> Result<(), AlreadyBound<'_, B>> {
-        let entries = self.entries.entry(symbol).or_default();
+        let entries = self
+            .entries
+            .entry(symbol)
+            .or_default()
+            .entry(key(context, scopes))
+            .or_default();
         if let Some(at) = entries
             .iter()
             .position(|e| e.scopes == scopes && e.phases.overlaps(&phases))
@@ -138,11 +158,15 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         S: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
-        let Some(entries) = self.entries.get(symbol) else {
+        let Some(by_key) = self.entries.get(symbol) else {
             return Resolution::Unbound;
         };
-        let candidates: Vec<&Entry<B>> = entries
-            .iter()
+        // Only entries kept by one of the identifier's own scopes can have
+        // sets that are subsets of its set.
+        let keys = std::iter::once(None).chain(context.scopes(scopes).iter().copied().map(Some));
+        let candidates: Vec<&Entry<B>> = keys
+            .filter_map(|k| by_key.get(&k))
+            .flatten()
             .filter(|e| e.phases.contains(phase) && context.is_subset(e.scopes, scopes))
             .collect();
         let Some(best) = candidates
