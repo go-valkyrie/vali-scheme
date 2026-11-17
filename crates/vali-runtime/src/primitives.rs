@@ -167,6 +167,40 @@ fn cdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     Ok(unsafe { cx.cdr(pair) })
 }
 
+fn set_car<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let pair = pair_arg("set-car!", args[0])?;
+    // SAFETY: a live pair, and a valid value.
+    unsafe { cx.set_car(pair, args[1]) };
+    Ok(Value::UNSPECIFIED)
+}
+
+fn set_cdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let pair = pair_arg("set-cdr!", args[0])?;
+    // SAFETY: a live pair, and a valid value.
+    unsafe { cx.set_cdr(pair, args[1]) };
+    Ok(Value::UNSPECIFIED)
+}
+
+/// `(error message irritant ...)`: raises an error whose message is
+/// `message` followed by each irritant as `write` prints it.
+fn error<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let mut text = if args[0].tag() == Tag::String {
+        // SAFETY: a live string.
+        unsafe { cx.string_str(args[0]) }.to_owned()
+    } else {
+        // SAFETY: arguments are valid values.
+        let message = unsafe { cx.root(args[0]) };
+        cx.write_string(&message)?
+    };
+    for &irritant in &args[1..] {
+        // SAFETY: as above.
+        let irritant = unsafe { cx.root(irritant) };
+        text.push(' ');
+        text.push_str(&cx.write_string(&irritant)?);
+    }
+    Err(Error::scheme(text))
+}
+
 fn list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let mut list = Value::EMPTY_LIST;
     for &x in args.iter().rev() {
@@ -1090,6 +1124,9 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("vector?", Arity::exactly(1), is_vector),
         ("list?", Arity::exactly(1), is_list),
         ("symbol=?", at_least(1), symbol_eq),
+        ("set-car!", Arity::exactly(2), set_car),
+        ("set-cdr!", Arity::exactly(2), set_cdr),
+        ("error", at_least(1), error),
     ]
 }
 

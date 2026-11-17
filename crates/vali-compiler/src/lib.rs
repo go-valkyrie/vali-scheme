@@ -92,13 +92,22 @@ fn read(source: &str) -> Result<Vec<Datum>, CompileError> {
     Ok(read.datums)
 }
 
-/// Reads and compiles `source`, a program that needs no libraries but
-/// built-in ones, as a module named `name`.
+/// Reads and compiles `source`, a program that imports only standard
+/// libraries, as a module named `name`. The module must not need any
+/// library's variables at run time: standard libraries that only provide
+/// macros and the procedures implemented in Rust, as `(scheme base)` does,
+/// need nothing loaded. Otherwise, use [`compile_program`] and [`load`].
 pub fn compile(source: &str, name: &str) -> Result<Module, CompileError> {
     let program = compile_program(source, &Identity::new(name), &NoLibraries)?;
-    if let Some((identity, _)) = program.libraries.first() {
+    let linked = program.body.variables.iter().find_map(|v| match &v.link {
+        vali_bytecode::Link::Imported(library) => Some(library),
+        _ => None,
+    });
+    if let Some(library) = linked {
         return Err(CompileError {
-            message: format!("the program needs the library {identity}: use compile_program"),
+            message: format!(
+                "the program uses the library {library} at run time: use compile_program and load"
+            ),
             span: None,
         });
     }
@@ -148,7 +157,12 @@ fn build(
         let module = expander.library(library.identity.as_str(), &library.form)?;
         libraries.push((library.identity.clone(), module));
     }
-    let body = expander.program(identity.as_str(), &program.imports, &program.body)?;
+    let body = expander.program(
+        identity.as_str(),
+        &program.imports,
+        program.implicit,
+        &program.body,
+    )?;
     Ok(Program { libraries, body })
 }
 

@@ -47,6 +47,18 @@ pub(crate) struct Shared {
     pub(crate) origin: Option<Arc<Origin>>,
 }
 
+/// The syntax procedures transformers call, which only the phase-1
+/// isolate has.
+pub(crate) const SYNTAX_PROCEDURES: &[&str] = &[
+    "syntax->datum",
+    "datum->syntax",
+    "identifier?",
+    "bound-identifier=?",
+    "free-identifier=?",
+    "generate-temporaries",
+    "syntax-violation",
+];
+
 /// The procedures phase-1 code compiles calls to.
 pub(crate) const QUOTE_SYNTAX: &str = "%quote-syntax";
 pub(crate) const SYNTAX_MATCH: &str = "%syntax-match";

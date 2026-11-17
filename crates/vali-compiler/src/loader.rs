@@ -135,6 +135,24 @@ impl<L: AsyncLoader> Fetch for Async<'_, L> {
     }
 }
 
+/// The standard libraries' sources, embedded in the binary (ADR 0007 #11).
+const STANDARD: &[(&[&str], &str)] = &[
+    (&["scheme", "base"], include_str!("../lib/scheme/base.sld")),
+    (&["scheme", "char"], include_str!("../lib/scheme/char.sld")),
+    (&["scheme", "cxr"], include_str!("../lib/scheme/cxr.sld")),
+];
+
+/// The source of the standard library `name`, if it is one.
+fn standard(name: &LibraryName) -> Option<Source> {
+    let (parts, text) = STANDARD
+        .iter()
+        .find(|(parts, _)| *name == LibraryName::new(parts.iter().copied()))?;
+    Some(Source {
+        identity: Identity::new(&format!("vali:{}", parts.join("/"))),
+        text: (*text).to_owned(),
+    })
+}
+
 /// A library in the import graph.
 #[derive(Clone, Debug)]
 pub(crate) struct Library {
@@ -148,6 +166,9 @@ pub(crate) struct Library {
 pub(crate) struct Program {
     pub(crate) libraries: Vec<LibraryForm>,
     pub(crate) imports: Vec<ImportSet>,
+    /// Whether the imports are the implicit `(scheme base)` of a program
+    /// with no `import` form.
+    pub(crate) implicit: bool,
     pub(crate) body: Vec<Datum>,
 }
 
@@ -164,10 +185,15 @@ pub(crate) fn program(datums: &[Datum]) -> Result<Program> {
             None => break,
         }
     }
-    let (imports, body) = library::program_imports(rest)?;
+    let (mut imports, body) = library::program_imports(rest)?;
+    let implicit = imports.is_empty();
+    if implicit {
+        imports.push(ImportSet::Library(LibraryName::new(["scheme", "base"])));
+    }
     Ok(Program {
         libraries,
         imports,
+        implicit,
         body: body.to_vec(),
     })
 }
@@ -262,22 +288,26 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
         if by_name.contains_key(&name) || library::is_builtin(&name) {
             continue;
         }
+        // Standard libraries come first, so no loader can replace them.
         let (library_identity, form) = match local.get(&name) {
             Some(form) => (
                 Identity::new(&format!("{identity}#{name}")),
                 (*form).clone(),
             ),
             None => {
-                let source = loader
-                    .fetch(&name, importer.as_ref())
-                    .await
-                    .map_err(|e| error(format!("{name}: {e}"), None))?
-                    .ok_or_else(|| {
-                        let by = importer
-                            .as_ref()
-                            .map_or_else(|| "the program".to_owned(), |i| i.to_string());
-                        error(format!("library {name} not found, imported by {by}"), None)
-                    })?;
+                let source = match standard(&name) {
+                    Some(source) => Some(source),
+                    None => loader
+                        .fetch(&name, importer.as_ref())
+                        .await
+                        .map_err(|e| error(format!("{name}: {e}"), None))?,
+                };
+                let source = source.ok_or_else(|| {
+                    let by = importer
+                        .as_ref()
+                        .map_or_else(|| "the program".to_owned(), |i| i.to_string());
+                    error(format!("library {name} not found, imported by {by}"), None)
+                })?;
                 if let Some(&index) = by_identity.get(&source.identity) {
                     by_name.insert(name, index);
                     continue;

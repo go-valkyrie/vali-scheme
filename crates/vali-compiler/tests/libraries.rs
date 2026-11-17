@@ -101,7 +101,10 @@ fn import_sets() {
         ),
     ]);
     let error = run(&format!("{library} (import {BASE} (only (nums) one)) two")).unwrap_err();
-    assert!(error.contains("unbound variable: two"), "{error}");
+    assert!(
+        error.contains("two is not bound: is it imported?"),
+        "{error}"
+    );
     let error = run(&format!("{library} (import {BASE} (only (nums) four)) 1")).unwrap_err();
     assert!(error.contains("(nums) does not export four"), "{error}");
 }
@@ -305,4 +308,40 @@ fn an_async_loader_serves_libraries() {
     let id = vali_compiler::load(&mut cx, program).unwrap();
     let result = cx.run(id).unwrap();
     assert_eq!(cx.write_string(&result).unwrap(), "42");
+}
+
+#[test]
+fn standard_libraries() {
+    check(&[
+        // (scheme cxr) defines its procedures in Scheme, so it is loaded
+        // and linked at run time.
+        (
+            "(import (scheme base) (scheme cxr)) (list (caddr '(1 2 3)) (cdddr '(1 2 3 4)))",
+            "(3 (4))",
+        ),
+        (
+            "(import (scheme base) (scheme char)) (list (char-upcase #\\a) (string-upcase \"hi\"))",
+            "(#\\A \"HI\")",
+        ),
+        // The derived forms come from (scheme base).
+        (
+            "(import (scheme base)) (let* ((a 1) (b (+ a 1))) (cond ((> b 1) 'big) (else 'small)))",
+            "big",
+        ),
+    ]);
+    // A program that imports (scheme base) explicitly sees only what it
+    // imports, and cannot redefine it.
+    let error = run("(import (scheme base)) (char-upcase #\\a)").unwrap_err();
+    assert!(
+        error.contains("char-upcase is not bound: is it imported?"),
+        "{error}"
+    );
+    let error = run("(import (scheme base)) (define (car x) x)").unwrap_err();
+    assert!(
+        error.contains("car is imported, and cannot be redefined"),
+        "{error}"
+    );
+    // error raises.
+    let error = run("(error \"bad thing:\" 'x 42)").unwrap_err();
+    assert!(error.contains("bad thing: x 42"), "{error}");
 }

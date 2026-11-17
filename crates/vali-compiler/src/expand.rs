@@ -17,8 +17,8 @@
 //! (`pattern`). Each use flips a fresh macro scope on its input and output;
 //! a use in a definition context also adds a use-site scope to its input,
 //! which definitions then drop, so a macro can define a name its use
-//! supplies. The derived forms are macros in `prelude.scm`, bound in the
-//! core scope.
+//! supplies. The derived forms are macros in `(scheme base)`, whose source
+//! is in `lib/`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -37,9 +37,6 @@ use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
 use crate::library::{ExportSpec, ImportSet, LibraryForm, LibraryName};
 use crate::pattern::{self, Builder, Match, Pattern, Spelling, Template, Vars};
 use crate::phase::{self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, Shared};
-
-/// The derived forms, as macros.
-const PRELUDE: &str = include_str!("prelude.scm");
 
 /// How many macro steps may produce one form, counting both uses nested
 /// in expressions and a body's forms that expand into further uses, so a
@@ -172,6 +169,10 @@ struct Unit {
     imports: Vec<usize>,
     /// Its compiled module, once there is one.
     module: Option<Module>,
+    /// Whether an unbound identifier is an error. It is in a library and
+    /// in a program with imports; a program with none refers to the
+    /// isolate's globals by name, as a script or a REPL does.
+    strict: bool,
 }
 
 pub(crate) struct Expander {
@@ -181,15 +182,13 @@ pub(crate) struct Expander {
     table: BindingTable<String, Binding>,
     /// The scopes of the core forms.
     core: ScopeSetId,
-    /// The scope of a program with no imports, beside the core scope.
-    program_scope: Scope,
     /// The scopes of the current unit's own forms.
     top: ScopeSetId,
     /// The units compiled so far, the current one last.
     units: Vec<Unit>,
     /// Each library name, to its unit.
     by_name: HashMap<LibraryName, usize>,
-    /// What `(vali core)` exports: the core forms and the prelude's macros.
+    /// What `(vali core)` exports: the core forms.
     core_interface: Vec<(String, Binding)>,
     /// The units instantiated in the phase-1 isolate.
     phase1_units: HashSet<usize>,
@@ -213,7 +212,6 @@ impl Expander {
     pub(crate) fn new() -> Result<Expander> {
         let mut context = ScopeContext::new();
         let core_scope = context.new_scope(ScopeKind::Library).map_err(too_many)?;
-        let program_scope = context.new_scope(ScopeKind::Library).map_err(too_many)?;
         let core = context.intern(&[core_scope]).map_err(too_many)?;
         let mut table = BindingTable::new();
         for &(name, form) in CORE {
@@ -224,13 +222,12 @@ impl Expander {
                     span: None,
                 })?;
         }
-        let mut expander = Expander {
+        let expander = Expander {
             vars: Vec::new(),
             lambdas: Vec::new(),
             context,
             table,
             core,
-            program_scope,
             top: core,
             units: Vec::new(),
             by_name: HashMap::new(),
@@ -247,9 +244,6 @@ impl Expander {
             compiled: Compiled::default(),
             floors: Vec::new(),
         };
-        let prelude = expander.open_lambda(None);
-        expander.prelude()?;
-        expander.close_lambda(prelude, Vec::new(), None, Expr::Unspecified);
         Ok(expander)
     }
 
@@ -264,7 +258,8 @@ impl Expander {
         let top = self.context.intern(&[scope]).map_err(too_many)?;
         self.unit(
             identity,
-            Some(&form.imports),
+            &form.imports,
+            top,
             top,
             &form.body,
             &form.exports,
@@ -273,12 +268,15 @@ impl Expander {
     }
 
     /// Expands and compiles a program. With imports, it sees only what it
-    /// imports; with none, the core forms, the prelude and the standard
-    /// procedures, which it can shadow.
+    /// imports. An `implicit` import, of `(scheme base)` for a program with
+    /// no `import` form (ADR 0007 #11), is bound in a scope around the
+    /// program's own, so the program can define names it also imports, as
+    /// a script or a REPL can.
     pub(crate) fn program(
         &mut self,
         identity: &str,
         imports: &[ImportSet],
+        implicit: bool,
         body: &[vali_syntax::Datum],
     ) -> Result<Module> {
         let span = body.first().map_or(
@@ -288,34 +286,38 @@ impl Expander {
             },
             |d| d.span,
         );
-        if imports.is_empty() {
-            let core = self.context.scopes(self.core).to_vec();
-            let top = self
-                .context
-                .intern(&[core, vec![self.program_scope]].concat())
-                .map_err(too_many)?;
-            return self.unit(identity, None, top, body, &[], span);
-        }
         let scope = self.scope(ScopeKind::Library)?;
+        if implicit {
+            let around = self.scope(ScopeKind::Library)?;
+            let imported = self.context.intern(&[around]).map_err(too_many)?;
+            let top = self.context.intern(&[around, scope]).map_err(too_many)?;
+            return self.unit(identity, imports, imported, top, body, &[], span);
+        }
         let top = self.context.intern(&[scope]).map_err(too_many)?;
-        self.unit(identity, Some(imports), top, body, &[], span)
+        self.unit(identity, imports, top, top, body, &[], span)
     }
 
     /// Expands `body` as a new unit whose forms carry `top`, with
-    /// `imports` bound there, and compiles it into a module that exports
-    /// every variable it defines, by name, for linking.
+    /// `imports` bound at `imported`, and compiles it into a module that
+    /// exports every variable it defines, by name, for linking.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each says how the unit is scoped"
+    )]
     fn unit(
         &mut self,
         identity: &str,
-        imports: Option<&[ImportSet]>,
+        imports: &[ImportSet],
+        imported: ScopeSetId,
         top: ScopeSetId,
         body: &[vali_syntax::Datum],
         exports: &[ExportSpec],
         span: Span,
     ) -> Result<Module> {
         let index = self.units.len();
+        let imported_at = imported;
         let mut imported = Vec::new();
-        for set in imports.unwrap_or_default() {
+        for set in imports {
             if let Some(&unit) = self.by_name.get(set.library()) {
                 imported.push(unit);
             }
@@ -325,10 +327,11 @@ impl Expander {
             interface: HashMap::new(),
             imports: imported,
             module: None,
+            strict: imported_at == top,
         });
         self.top = top;
-        for set in imports.unwrap_or_default() {
-            self.import(set, top, span)?;
+        for set in imports {
+            self.import(set, imported_at, span)?;
         }
         let forms = body.iter().map(|d| Syntax::from_datum(d, top)).collect();
         let lambda = self.open_lambda(None);
@@ -392,8 +395,12 @@ impl Expander {
             return Ok(self.core_interface.clone());
         }
         if *name == LibraryName::new(["vali", "primitive"]) {
+            // The syntax procedures exist only in the phase-1 isolate, but
+            // are bound everywhere, so transformers in libraries can name
+            // them.
             return Ok(vali_runtime::primitive_names()
                 .into_iter()
+                .chain(phase::SYNTAX_PROCEDURES.iter().copied())
                 .map(|n| (n.to_owned(), Binding::Primitive(n.to_owned())))
                 .collect());
         }
@@ -476,32 +483,6 @@ impl Expander {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Expands the prelude, whose forms carry only the core scope, so the
-    /// macros it defines are bound where the core forms are.
-    fn prelude(&mut self) -> Result<()> {
-        let read = vali_syntax::read(PRELUDE, SourceId(u32::MAX));
-        if let Some(e) = read.errors.first() {
-            return Err(CompileError {
-                message: format!("the prelude does not read: {}", e.kind),
-                span: None,
-            });
-        }
-        let forms = read
-            .datums
-            .iter()
-            .map(|d| Syntax::from_datum(d, self.core))
-            .collect();
-        self.body(
-            forms,
-            true,
-            Span {
-                source: SourceId(u32::MAX),
-                range: Default::default(),
-            },
-        )?;
         Ok(())
     }
 
@@ -1085,9 +1066,6 @@ impl Expander {
                         .to_owned();
                     let m = self.transformer(spec, &name)?;
                     self.bind(&id, Binding::Macro(m), "define-syntax")?;
-                    if id.scopes() == self.core {
-                        self.core_interface.push((name, Binding::Macro(m)));
-                    }
                 }
                 Some((Binding::Core(Core::Define), parts)) => {
                     if definitions_end {
@@ -1277,6 +1255,10 @@ impl Expander {
                     Ok(self.variable(owner, global))
                 }
                 Some(Binding::Primitive(name)) => Ok(Expr::Free(name)),
+                None if self.units.last().is_some_and(|u| u.strict) => Err(error(
+                    format!("{name} is not bound: is it imported?"),
+                    stx.span(),
+                )),
                 None => Ok(Expr::Free(name.to_owned())),
                 Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
