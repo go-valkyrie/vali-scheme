@@ -122,3 +122,39 @@ fn errors() {
     assert!(message(&mut cx, "+", "1 a").contains("expected a number"));
     assert!(message(&mut cx, "cons", "1").contains("wrong number of arguments"));
 }
+
+#[test]
+fn strings_symbols_and_characters() {
+    let mut cx = cx();
+    let cases = [
+        ("string-length", "\"héllo\"", "5"),
+        ("string-ref", "\"abc\" 1", "#\\b"),
+        ("string-ref", "\"héllo\" 1", "#\\é"),
+        ("string=?", "\"a\" \"a\" \"a\"", "#t"),
+        ("string=?", "\"a\" \"b\"", "#f"),
+        ("string<?", "\"a\" \"b\" \"c\"", "#t"),
+        ("string-append", "\"ab\" \"\" \"cd\"", "\"abcd\""),
+        ("substring", "\"héllo\" 1 4", "\"éll\""),
+        ("string->list", "\"ab\"", "(#\\a #\\b)"),
+        ("list->string", "(#\\a #\\λ)", "\"aλ\""),
+        ("symbol->string", "abc", "\"abc\""),
+        ("string->symbol", "\"hello world\"", "|hello world|"),
+        ("symbol?", "abc", "#t"),
+        ("string?", "abc", "#f"),
+        ("char->integer", "#\\A", "65"),
+        ("integer->char", "955", "#\\λ"),
+        ("char=?", "#\\a #\\a", "#t"),
+        ("char<?", "#\\a #\\b", "#t"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+    // string->symbol interns: the same symbol as one read.
+    let from_string = {
+        let f = cx.global("string->symbol").unwrap();
+        let arg = cx.read("\"abc\"").unwrap();
+        cx.call(&f, &arg).unwrap()
+    };
+    let read = cx.read("abc").unwrap();
+    assert_eq!(cx.get(&from_string), cx.get(&read[0]));
+}
