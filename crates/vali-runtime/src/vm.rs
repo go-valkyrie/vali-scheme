@@ -357,6 +357,18 @@ impl<S: Strategy> Cx<S> {
         Ok(unsafe { &*(get(v, Self::LAYOUT.closure_code()) as *const Code<S>) })
     }
 
+    /// The name of the procedure `v`, if it is one.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a valid value.
+    pub(crate) unsafe fn procedure_name(&self, v: Value) -> Option<String> {
+        // SAFETY: passed on to the caller.
+        unsafe { self.procedure_code(v) }
+            .ok()
+            .map(|code| code.name().to_owned())
+    }
+
     /// Whether `v` is a heap object of type `t` under the "other" tag.
     fn is_other(&self, v: Value, t: TypeCode) -> bool {
         // SAFETY: values in slots are valid, so an "other" pointer points to
@@ -384,7 +396,7 @@ impl<S: Strategy> Cx<S> {
     /// # Safety
     ///
     /// `v` must be a live bignum.
-    unsafe fn bignum_value(&self, v: Value) -> Integer {
+    pub(crate) unsafe fn bignum_value(&self, v: Value) -> Integer {
         // SAFETY: passed on to the caller; a bignum is its header, its limb
         // count, then its limbs.
         unsafe {

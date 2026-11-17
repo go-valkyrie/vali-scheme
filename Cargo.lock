@@ -454,6 +454,7 @@ dependencies = [
  "vali-abi",
  "vali-bytecode",
  "vali-num",
+ "vali-syntax",
 ]
 
 [[package]]

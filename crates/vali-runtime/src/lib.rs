@@ -14,6 +14,7 @@ mod cx;
 mod handle;
 mod no_collection;
 mod page;
+mod printer;
 mod stack;
 mod strategy;
 mod stubs;
