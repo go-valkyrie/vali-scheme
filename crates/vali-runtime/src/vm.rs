@@ -677,11 +677,10 @@ impl<S: Strategy> Cx<S> {
             argc,
             resume: ENTRY,
         };
-        let (resume_address, entry_resume_address, boundary_resume_address) = (
-            trampoline::resume(),
-            trampoline::entry_resume(),
-            trampoline::boundary_resume(),
-        );
+        // Ordinary frames return into their caller's own marker stub; these
+        // two are shared.
+        let (entry_resume_address, boundary_resume_address) =
+            (trampoline::entry_resume(), trampoline::boundary_resume());
         // The marker stub of the current frame, which frames it calls
         // return to. The entry pseudo-frame has none: its callee returns to
         // the host.
@@ -725,14 +724,14 @@ impl<S: Strategy> Cx<S> {
             // stub for the bottom frame, for the first frame of a chained
             // segment, or for any other. Frames it calls return to it.
             macro_rules! stub_of {
-                ($position:expr) => {{
+                ($position:expr, $code:expr) => {{
                     let position = $position;
                     if position == ENTRY {
                         entry_resume_address
                     } else if position & BOUNDARY != 0 {
                         boundary_resume_address
                     } else {
-                        resume_address
+                        $code.stub
                     }
                 }};
             }
@@ -806,7 +805,7 @@ impl<S: Strategy> Cx<S> {
                                 *callee_fp.add(2) = position;
                                 attempt!(self.enter(callee, callee_fp, argc));
                                 fp = callee_fp;
-                                link_to!(fp, stub_of!(position));
+                                link_to!(fp, stub_of!(position, callee));
                                 pc = 0;
                                 switch_to!(callee);
                             }
@@ -852,9 +851,11 @@ impl<S: Strategy> Cx<S> {
                                     for (i, &v) in moved.iter().enumerate() {
                                         set(fp, i, v);
                                     }
-                                    link_to!(fp, stub_of!(position));
+                                    *link.record = fp as u64;
                                 }
                                 attempt!(self.enter(callee, fp, argc));
+                                // A different function now runs in this frame.
+                                link_to!(fp, stub_of!(*fp.add(2), callee));
                                 pc = 0;
                                 switch_to!(callee);
                             }
@@ -872,9 +873,9 @@ impl<S: Strategy> Cx<S> {
                             limit = self.pop_segment();
                         }
                         fp = caller;
-                        link_to!(fp, stub_of!(*fp.add(2)));
                         pc = (position & 0xFFFF_FFFF) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
+                        link_to!(fp, stub_of!(*fp.add(2), caller));
                         switch_to!(caller);
                     }
                 }

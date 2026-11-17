@@ -2,9 +2,10 @@
 //!
 //! `debugger_child` runs a Scheme procedure that recurses four frames deep
 //! and then calls a Rust procedure, which hits a breakpoint. `gdb_backtrace`
-//! runs this test binary under gdb, stopped there, and checks that the
-//! backtrace walks from the Rust procedure, through the interpreter and the
-//! trampoline, through every interpreted frame, and back into the host.
+//! and `lldb_backtrace` run this test binary under each debugger, stopped
+//! there, and check that the backtrace walks from the Rust procedure,
+//! through the interpreter and the trampoline, through every interpreted
+//! frame, named after its Scheme function, and back into the host.
 
 use std::process::Command;
 
@@ -139,10 +140,9 @@ fn gdb_backtrace() {
     let breakpoint = position("vali_test_breakpoint");
     // The trampoline is marked as a signal frame, which GDB shows this way.
     let trampoline = position("<signal handler called>");
-    let interpreted = frames
-        .iter()
-        .filter(|f| f.contains("vali_interpreted"))
-        .count();
+    // f 0, f 1 and f 2 are named after their function through their marker
+    // stubs; f 3, the bottom frame, keeps the shared stub.
+    let named = frames.iter().filter(|f| f.contains(" in f ()")).count();
     let bottom = position("vali_interpreted_entry");
     let host = position("debugger_child");
     assert!(breakpoint < trampoline, "{}", frames.join("\n"));
@@ -151,8 +151,7 @@ fn gdb_backtrace() {
         "{}",
         frames.join("\n")
     );
-    // f 3, f 2, f 1 and f 0: four interpreted frames, the last the bottom.
-    assert_eq!(interpreted, 4, "{}", frames.join("\n"));
+    assert_eq!(named, 3, "{}", frames.join("\n"));
 }
 
 #[test]
@@ -194,15 +193,13 @@ fn lldb_backtrace() {
     let trampoline = position("vali_vm_enter");
     let bottom = position("vali_interpreted_entry");
     let host = position("debugger_child");
-    let interpreted = frames
-        .iter()
-        .filter(|f| f.contains("vali_interpreted"))
-        .count();
+    // Named through the JIT interface: `JIT(0x…)\`f + 5`.
+    let named = frames.iter().filter(|f| f.contains("`f + ")).count();
     assert!(breakpoint < trampoline, "{}", frames.join("\n"));
     assert!(
         trampoline < bottom && bottom < host,
         "{}",
         frames.join("\n")
     );
-    assert_eq!(interpreted, 4, "{}", frames.join("\n"));
+    assert_eq!(named, 3, "{}", frames.join("\n"));
 }

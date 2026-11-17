@@ -29,6 +29,10 @@ pub struct Code<S: Strategy> {
     pub(crate) kind: Kind<S>,
     /// Calls so far, for tier-up. Approximate under contention.
     pub(crate) calls: AtomicU32,
+    /// The return address of frames that call out of this function's
+    /// frames: a point in its marker stub, which debuggers name after it
+    /// (ADR 0004 #6).
+    pub(crate) stub: u64,
 }
 
 pub(crate) enum Kind<S: Strategy> {
@@ -72,6 +76,7 @@ impl<S: Strategy> Code<S> {
             arity,
             kind: Kind::Native(f),
             calls: AtomicU32::new(0),
+            stub: crate::trampoline::resume(),
         }
     }
 
@@ -90,17 +95,26 @@ pub(crate) struct Loaded<S: Strategy> {
 impl<S: Strategy> Loaded<S> {
     /// Builds the descriptors for `module`, which must be valid.
     pub(crate) fn new(module: Module) -> Arc<Loaded<S>> {
+        let names: Vec<Box<str>> = module
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                f.name
+                    .clone()
+                    .unwrap_or_else(|| format!("{}#{i}", module.name).into())
+            })
+            .collect();
+        let stubs = crate::stubs::Stubs::new(&names.iter().map(|n| &**n).collect::<Vec<_>>());
         Arc::new_cyclic(|this| {
             let this = this.as_ptr();
             let functions = module
                 .functions
                 .iter()
+                .zip(names)
                 .enumerate()
-                .map(|(i, f)| Code {
-                    name: f
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("{}#{i}", module.name).into()),
+                .map(|(i, (f, name))| Code {
+                    name,
                     arity: f.arity,
                     kind: Kind::Bytecode {
                         module: this,
@@ -108,6 +122,9 @@ impl<S: Strategy> Loaded<S> {
                         slots: f.slots,
                     },
                     calls: AtomicU32::new(0),
+                    stub: stubs
+                        .as_ref()
+                        .map_or_else(crate::trampoline::resume, |s| s.resume(i)),
                 })
                 .collect();
             Loaded { module, functions }

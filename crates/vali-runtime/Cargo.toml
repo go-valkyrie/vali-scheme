@@ -11,5 +11,8 @@ repository.workspace = true
 vali-abi.workspace = true
 vali-bytecode.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true

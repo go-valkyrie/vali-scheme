@@ -16,6 +16,7 @@ mod no_collection;
 mod page;
 mod stack;
 mod strategy;
+mod stubs;
 mod trampoline;
 mod value;
 mod vm;
