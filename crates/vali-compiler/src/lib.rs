@@ -16,8 +16,13 @@ mod analyze;
 mod ast;
 mod codegen;
 mod expand;
+mod library;
+mod loader;
 mod pattern;
 mod phase;
+
+pub use library::{LibraryName, NamePart};
+pub use loader::{AsyncLoader, Identity, LoadError, Loader, Source};
 
 use std::fmt;
 
