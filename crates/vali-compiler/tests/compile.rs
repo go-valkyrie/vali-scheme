@@ -1,14 +1,28 @@
 //! Compiling Scheme and running it on the tier-0 VM.
 
-use vali_compiler::compile;
+use vali_compiler::{Identity, LibraryName, LoadError, Loader, Source, compile};
 use vali_runtime::{Cx, Error, HeapConfig, NoCollection};
+
+/// Only the standard libraries.
+struct NoLibraries;
+
+impl Loader for NoLibraries {
+    fn load(
+        &self,
+        _name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        Ok(None)
+    }
+}
 
 /// Compiles and runs `source`, returning its value as `write` prints it.
 fn run(source: &str) -> Result<String, Error> {
-    let module = compile(source, "test").unwrap_or_else(|e| panic!("{source}\n{e}"));
+    let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
+        .unwrap_or_else(|e| panic!("{source}\n{e}"));
     let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
     cx.install_primitives()?;
-    let id = cx.load(module)?;
+    let id = vali_compiler::load(&mut cx, program)?;
     let result = cx.run(id)?;
     cx.write_string(&result)
 }
@@ -766,4 +780,88 @@ fn a_dotted_template_with_a_list_tail_is_a_proper_list() {
          (call + 1 2 3)",
         "6",
     )]);
+}
+
+#[test]
+fn exceptions() {
+    check(&[
+        // guard catches what raise raises, and errors from primitives.
+        (
+            "(guard (e (#t (list 'caught e))) (raise 'oops))",
+            "(caught oops)",
+        ),
+        (
+            "(guard (e ((symbol? e) 'symbol) ((string? e) 'string)) (raise \"x\"))",
+            "string",
+        ),
+        (
+            "(guard (e ((error-object? e) (error-object-message e))) (car 5))",
+            "\"car: expected a pair, got 5\"",
+        ),
+        (
+            "(guard (e (#t (list (error-object-message e) (error-object-irritants e))))
+               (error \"bad thing\" 1 'two))",
+            "(\"bad thing\" (1 two))",
+        ),
+        // => and else clauses.
+        (
+            "(guard (e ((assq 'a e) => cdr) (else 'other)) (raise '((a . 42))))",
+            "42",
+        ),
+        ("(guard (e (#f 'no) (else 'yes)) (raise 1))", "yes"),
+        // A clause that doesn't match re-raises, to the next guard out.
+        (
+            "(guard (e (#t (list 'outer e))) (guard (e ((string? e) 'inner)) (raise 'x)))",
+            "(outer x)",
+        ),
+        // Nothing raised: the body's value, and the stack is as it was.
+        ("(guard (e (#t 'no)) (+ 1 2))", "3"),
+        (
+            "(define (deep n) (if (= n 0) (raise 'bottom) (+ 1 (deep (- n 1)))))
+             (guard (e (#t e)) (deep 100000))",
+            "bottom",
+        ),
+        // Guards keep working after a raise and inside loops.
+        (
+            "(let loop ((i 0) (caught 0))
+               (if (= i 100)
+                   caught
+                   (loop (+ i 1) (+ caught (guard (e (#t 1)) (if (odd? i) (raise i) 0))))))",
+            "50",
+        ),
+        // raise-continuable returns the handler's value.
+        (
+            "(with-exception-handler
+               (lambda (c) (* c 10))
+               (lambda () (+ 1 (raise-continuable 4))))",
+            "41",
+        ),
+        // A handler that returns from raise is an error, which a guard
+        // around it catches.
+        (
+            "(guard (e ((error-object? e) 'secondary))
+               (with-exception-handler (lambda (c) 'ignored) (lambda () (raise 'x))))",
+            "secondary",
+        ),
+        // Multiple values.
+        (
+            "(call-with-values (lambda () (values 1 2 3)) list)",
+            "(1 2 3)",
+        ),
+        (
+            "(call-with-values (lambda () 5) (lambda (x) (* x 2)))",
+            "10",
+        ),
+        ("(call-with-values (lambda () (values)) list)", "()"),
+    ]);
+    // An uncaught raise reaches the host with what was raised.
+    let Err(Error::Scheme(e)) = run("(raise 'oops)") else {
+        panic!("expected an error");
+    };
+    assert_eq!(e.message, "uncaught exception: oops");
+    assert!(e.raised.is_some());
+    let Err(Error::Scheme(e)) = run("(error \"bad thing:\" 'x 42)") else {
+        panic!("expected an error");
+    };
+    assert_eq!(e.message, "bad thing: x 42");
 }

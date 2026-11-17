@@ -42,6 +42,28 @@ const ENTRY: u64 = u64::MAX;
 /// segment, so returning from it drops back to the previous segment.
 const BOUNDARY: u64 = 1 << 63;
 
+/// Set in the position word of the frame `%catch` calls its thunk in, and
+/// in the resume word of a native thunk's call: returning through it
+/// removes the innermost catch.
+const CATCH: u64 = 1 << 62;
+
+/// A `%catch` waiting for its thunk to return: where to call the handler
+/// if something is raised first.
+pub(crate) struct Catch {
+    /// The frame that called `%catch`, and the `base` of that call.
+    fp: *mut u64,
+    base: usize,
+    /// Where that frame resumes.
+    resume: u64,
+    /// How many stack segments there were.
+    segments: usize,
+    handler: Value,
+}
+
+// SAFETY: the frame pointer points into this isolate's own stack, which
+// moves between threads only whole (ADR 0008).
+unsafe impl Send for Catch {}
+
 /// A frame's position word: where the caller resumes, and the caller's
 /// `base`, so the result can be stored even when the frame was moved to a
 /// new segment.
@@ -133,6 +155,8 @@ enum Next {
         argc: usize,
     },
     Return(Value),
+    /// Something was raised.
+    Raise(Error),
 }
 
 /// Numbers the generic arithmetic understands. Rationals and complex
@@ -318,6 +342,17 @@ impl<S: Strategy> Cx<S> {
         }
         // SAFETY: as above.
         Some(unsafe { self.root(value) })
+    }
+
+    /// `%catch`, bound to the global of that name.
+    pub(crate) fn define_catch(&mut self) -> Result<(), Error> {
+        let code = Box::new(Code::catch());
+        let pointer = &*code as *const Code<S>;
+        self.natives.push(code);
+        let closure = self.closure_raw(pointer, &[])?;
+        // SAFETY: the cell belongs to this isolate.
+        unsafe { *self.global_cell("%catch") = closure };
+        Ok(())
     }
 
     /// A procedure implemented in Rust, bound to the global `name`.
@@ -589,6 +624,33 @@ impl<S: Strategy> Cx<S> {
     /// # Safety
     ///
     /// `fp` must be the frame pointer of a live frame.
+    /// A `%catch`'s thunk returned: its catch is done. Out of line, so the
+    /// return path it sits on stays small; inlined, it cost fib 10%.
+    #[cold]
+    #[inline(never)]
+    fn catch_returned(&mut self) {
+        self.catches.pop();
+    }
+
+    /// What a handler sees for `error`: what Scheme code raised, or for an
+    /// error from a Rust procedure, an error object with its message.
+    fn condition(&mut self, error: Error) -> Result<Value, Error> {
+        match error {
+            Error::Scheme(e) => match e.raised {
+                Some(raised) => self.get(&raised),
+                None => {
+                    let message = self.string_raw(&e.message, true)?;
+                    Ok(self.error_object_raw(message, Value::EMPTY_LIST)?)
+                }
+            },
+            Error::OutOfMemory => Err(Error::OutOfMemory),
+            other => {
+                let message = self.string_raw(&other.to_string(), true)?;
+                Ok(self.error_object_raw(message, Value::EMPTY_LIST)?)
+            }
+        }
+    }
+
     unsafe fn with_backtrace(&self, mut fp: *mut u64, error: Error) -> Error {
         let Error::Scheme(mut e) = error else {
             return error;
@@ -653,6 +715,7 @@ impl<S: Strategy> Cx<S> {
             std::panic::resume_unwind(panic);
         }
         let result = state.result.expect("the VM ran");
+        self.catches.clear();
         // An error can leave segments chained; only the first is kept.
         while self.stack.len() > 1 {
             self.pop_segment();
@@ -846,16 +909,6 @@ impl<S: Strategy> Cx<S> {
         // by `enter`, which checks the stack limit; heap accesses check
         // types first.
         unsafe {
-            macro_rules! fail {
-                ($e:expr) => {{
-                    let error = $e;
-                    return Err(if fp == top {
-                        error
-                    } else {
-                        self.with_backtrace(fp, error)
-                    });
-                }};
-            }
             // Switch the registers to a bytecode function's code, and to its
             // module's constants and variables if the module changes.
             macro_rules! switch_to {
@@ -899,22 +952,85 @@ impl<S: Strategy> Cx<S> {
                     *link.record.add(1) = current_stub;
                 }};
             }
-            macro_rules! attempt {
-                ($e:expr) => {
-                    match $e {
-                        Ok(v) => v,
-                        Err(e) => fail!(Error::from(e)),
-                    }
-                };
-            }
-
-            loop {
+            'run: loop {
+                // Something was raised: the call machinery handles it, in one
+                // place, so the many places that fail stay small. Defined
+                // inside the loop, so it can continue it: labels in macros are
+                // hygienic.
+                macro_rules! fail {
+                    ($e:expr) => {{
+                        next = Next::Raise($e);
+                        continue 'run;
+                    }};
+                }
+                macro_rules! attempt {
+                    ($e:expr) => {
+                        match $e {
+                            Ok(v) => v,
+                            Err(e) => fail!(Error::from(e)),
+                        }
+                    };
+                }
                 // The call machinery: set up the frame `next` asks for.
                 match next {
+                    Next::Raise(error) => {
+                        // Unwind to the innermost `%catch` and call its
+                        // handler with the condition in place of the `%catch`
+                        // call; with none, return the error to the host.
+                        let Some(catch) = self.catches.pop() else {
+                            return Err(if fp == top {
+                                error
+                            } else {
+                                self.with_backtrace(fp, error)
+                            });
+                        };
+                        let condition = self.condition(error)?;
+                        while self.stack.len() > catch.segments {
+                            self.pop_segment();
+                        }
+                        limit = self.stack.last().expect("a segment").limit();
+                        fp = catch.fp;
+                        set(fp, catch.base + 3, catch.handler);
+                        set(fp, catch.base + 4, condition);
+                        let caller = self
+                            .procedure_code(slot(fp, 0))
+                            .expect("a frame's slot 0 holds its procedure");
+                        link_to!(fp, stub_of!(*fp.add(2), caller));
+                        switch_to!(caller);
+                        next = Next::Call {
+                            base: catch.base,
+                            argc: 1,
+                            resume: catch.resume,
+                        };
+                        continue;
+                    }
                     Next::Call { base, argc, resume } => {
                         let procedure = slot(fp, base + 3);
                         let callee = attempt!(self.procedure_code(procedure));
                         match callee.kind {
+                            Kind::Catch => {
+                                // `(%catch thunk handler)`: note where to
+                                // call the handler, then call the thunk,
+                                // marking its frame so its return removes
+                                // the note.
+                                if resume == ENTRY {
+                                    fail!(Error::scheme("%catch: cannot be called from Rust"));
+                                }
+                                self.catches.push(Catch {
+                                    fp,
+                                    base,
+                                    resume,
+                                    segments: self.stack.len(),
+                                    handler: slot(fp, base + 5),
+                                });
+                                set(fp, base + 3, slot(fp, base + 4));
+                                next = Next::Call {
+                                    base,
+                                    argc: 0,
+                                    resume: resume | CATCH,
+                                };
+                                continue;
+                            }
                             Kind::Native(f) => {
                                 let result =
                                     attempt!(self.call_native(callee, f, fp, base + 4, argc));
@@ -940,8 +1056,11 @@ impl<S: Strategy> Cx<S> {
                                 if resume == ENTRY {
                                     return Ok(result);
                                 }
+                                if resume & CATCH != 0 {
+                                    self.catch_returned();
+                                }
                                 set(fp, base + 3, result);
-                                pc = resume as usize;
+                                pc = (resume & !CATCH) as usize;
                             }
                             Kind::Bytecode { slots, .. } => {
                                 let needed = usize::from(slots).max(argc + 1);
@@ -988,6 +1107,31 @@ impl<S: Strategy> Cx<S> {
                     Next::TailCall { argc } => {
                         let callee = attempt!(self.procedure_code(slot(fp, 0)));
                         match callee.kind {
+                            Kind::Catch => {
+                                // As a tail call, the handler takes this
+                                // frame's place in its caller, and the thunk
+                                // runs in this frame.
+                                let position = *fp.add(2);
+                                if position == ENTRY {
+                                    fail!(Error::scheme("%catch: cannot be called from Rust"));
+                                }
+                                let segments = if position & BOUNDARY != 0 {
+                                    self.stack.len() - 1
+                                } else {
+                                    self.stack.len()
+                                };
+                                self.catches.push(Catch {
+                                    fp: *fp as *mut u64,
+                                    base: ((position >> 32) & 0xFFFF) as usize,
+                                    resume: position & 0xFFFF_FFFF,
+                                    segments,
+                                    handler: slot(fp, 2),
+                                });
+                                set(fp, 0, slot(fp, 1));
+                                *fp.add(2) = position | CATCH;
+                                next = Next::TailCall { argc: 0 };
+                                continue;
+                            }
                             Kind::Native(f) => {
                                 let result = attempt!(self.call_native(callee, f, fp, 1, argc));
                                 if let Some((procedure, args)) = self.tail_call.take() {
@@ -1024,7 +1168,7 @@ impl<S: Strategy> Cx<S> {
                                         old
                                     } else {
                                         let base = (saved as usize - fp as usize) / 8 - 3;
-                                        position(old & 0xFFFF_FFFF, base) | BOUNDARY
+                                        position(old & 0xFFFF_FFFF, base) | BOUNDARY | (old & CATCH)
                                     };
                                     let (top, new_limit) = attempt!(self.push_segment(needed + 4));
                                     fp = top.sub(if position == ENTRY { 4 } else { 3 });
@@ -1052,6 +1196,9 @@ impl<S: Strategy> Cx<S> {
                         let position = *fp.add(2);
                         if position == ENTRY {
                             return Ok(value);
+                        }
+                        if position & CATCH != 0 {
+                            self.catch_returned();
                         }
                         let caller = *fp as *mut u64;
                         let base = ((position >> 32) & 0xFFFF) as usize;

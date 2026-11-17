@@ -10,10 +10,10 @@ use vali_bytecode::Arity;
 use crate::code::NativeFn;
 use crate::cx::Cx;
 use crate::handle::Error;
-use crate::records;
 use crate::strategy::Strategy;
 use crate::value::Value;
 use crate::vm::{Arith, Compare, Num, type_error};
+use crate::{output, records};
 
 const fn at_least(n: u8) -> Arity {
     Arity {
@@ -180,26 +180,6 @@ fn set_cdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> 
     // SAFETY: a live pair, and a valid value.
     unsafe { cx.set_cdr(pair, args[1]) };
     Ok(Value::UNSPECIFIED)
-}
-
-/// `(error message irritant ...)`: raises an error whose message is
-/// `message` followed by each irritant as `write` prints it.
-fn error<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let mut text = if args[0].tag() == Tag::String {
-        // SAFETY: a live string.
-        unsafe { cx.string_str(args[0]) }.to_owned()
-    } else {
-        // SAFETY: arguments are valid values.
-        let message = unsafe { cx.root(args[0]) };
-        cx.write_string(&message)?
-    };
-    for &irritant in &args[1..] {
-        // SAFETY: as above.
-        let irritant = unsafe { cx.root(irritant) };
-        text.push(' ');
-        text.push_str(&cx.write_string(&irritant)?);
-    }
-    Err(Error::scheme(text))
 }
 
 fn list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -1127,7 +1107,26 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("symbol=?", at_least(1), symbol_eq),
         ("set-car!", Arity::exactly(2), set_car),
         ("set-cdr!", Arity::exactly(2), set_cdr),
-        ("error", at_least(1), error),
+        ("error", at_least(1), records::error),
+        ("%raise", Arity::exactly(1), records::raise),
+        ("error-object?", Arity::exactly(1), records::is_error_object),
+        (
+            "error-object-message",
+            Arity::exactly(1),
+            records::error_object_message,
+        ),
+        (
+            "error-object-irritants",
+            Arity::exactly(1),
+            records::error_object_irritants,
+        ),
+        ("values", at_least(0), records::values),
+        ("%values->list", Arity::exactly(1), records::values_to_list),
+        ("display", one_or_two(), output::display),
+        ("write", one_or_two(), output::write),
+        ("newline", zero_or_one(), output::newline),
+        ("write-string", one_or_two(), output::write_string),
+        ("write-char", one_or_two(), output::write_char),
         (
             "%make-record-type",
             Arity::exactly(2),
@@ -1156,7 +1155,26 @@ pub fn primitive_names() -> Vec<&'static str> {
     table::<crate::NoCollection>()
         .into_iter()
         .map(|(name, _, _)| name)
+        .chain(["%catch"])
         .collect()
+}
+
+/// An object, then an optional port.
+fn one_or_two() -> Arity {
+    Arity {
+        required: 1,
+        optional: 1,
+        rest: false,
+    }
+}
+
+/// An optional port.
+fn zero_or_one() -> Arity {
+    Arity {
+        required: 0,
+        optional: 1,
+        rest: false,
+    }
 }
 
 impl<S: Strategy> Cx<S> {
@@ -1165,6 +1183,7 @@ impl<S: Strategy> Cx<S> {
         for (name, arity, f) in table::<S>() {
             self.define_native(name, arity, f)?;
         }
+        self.define_catch()?;
         Ok(())
     }
 }

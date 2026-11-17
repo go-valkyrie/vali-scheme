@@ -1,7 +1,6 @@
 ;;; requirement: A guard clause can end in a zero-value expression
 ;;; found-in: scheme-rs
 ;;; kind: scheme
-;;; expect: fail, needs guard, raise, values and (scheme write) (M1)
 
 ;; In scheme-rs, a guard clause ending with (newline) failed with "expected
 ;; 1 arguments, provided 0".

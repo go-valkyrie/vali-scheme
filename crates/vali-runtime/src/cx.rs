@@ -62,6 +62,15 @@ pub struct Cx<S: Strategy> {
     pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
     /// Data the host keeps here for its Rust procedures to reach.
     pub(crate) host_data: Option<Box<dyn std::any::Any + Send>>,
+    /// The `%catch`es whose thunks are running, innermost last.
+    pub(crate) catches: Vec<crate::vm::Catch>,
+    /// The record type of error objects, made when first needed.
+    pub(crate) error_object_type: Option<Value>,
+    /// The record type of multiple values, made when first needed.
+    pub(crate) values_type: Option<Value>,
+    /// What `display`, `write` and `newline` have written, until the host
+    /// takes it.
+    pub(crate) output: String,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -123,6 +132,10 @@ impl<S: Strategy> Cx<S> {
             tail_call: None,
             syntaxes: Vec::new(),
             host_data: None,
+            catches: Vec::new(),
+            error_object_type: None,
+            values_type: None,
+            output: String::new(),
         }
     }
 

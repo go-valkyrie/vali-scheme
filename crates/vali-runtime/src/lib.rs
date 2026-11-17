@@ -13,6 +13,7 @@ mod code;
 mod cx;
 mod handle;
 mod no_collection;
+mod output;
 mod page;
 mod primitives;
 mod printer;

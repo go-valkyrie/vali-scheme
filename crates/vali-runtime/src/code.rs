@@ -45,6 +45,9 @@ pub(crate) enum Kind<S: Strategy> {
         slots: u16,
     },
     Native(NativeFn<S>),
+    /// `%catch`, which the VM handles itself: it calls a thunk, and calls a
+    /// handler in its place if anything is raised inside (ADR 0004).
+    Catch,
 }
 
 // SAFETY: the raw pointers point into the `Loaded` module that owns this
@@ -59,6 +62,7 @@ impl<S: Strategy> fmt::Debug for Code<S> {
         let kind = match self.kind {
             Kind::Bytecode { .. } => "bytecode",
             Kind::Native(_) => "native",
+            Kind::Catch => "catch",
         };
         f.debug_struct("Code")
             .field("name", &self.name)
@@ -75,6 +79,17 @@ impl<S: Strategy> Code<S> {
             name: name.into(),
             arity,
             kind: Kind::Native(f),
+            calls: AtomicU32::new(0),
+            stub: crate::trampoline::resume(),
+        }
+    }
+
+    /// `%catch`.
+    pub(crate) fn catch() -> Code<S> {
+        Code {
+            name: "%catch".into(),
+            arity: Arity::exactly(2),
+            kind: Kind::Catch,
             calls: AtomicU32::new(0),
             stub: crate::trampoline::resume(),
         }

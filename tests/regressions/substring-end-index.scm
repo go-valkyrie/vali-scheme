@@ -1,7 +1,6 @@
 ;;; requirement: (substring s start end) takes an end index
 ;;; found-in: scheme-rs
 ;;; kind: scheme
-;;; expect: fail, needs exceptions, for SRFI 64's test-error (M1)
 
 ;; scheme-rs treated substring's third argument as a length.
 

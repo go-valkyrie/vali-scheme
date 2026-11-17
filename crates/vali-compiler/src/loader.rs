@@ -140,6 +140,10 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["scheme", "base"], include_str!("../lib/scheme/base.sld")),
     (&["scheme", "char"], include_str!("../lib/scheme/char.sld")),
     (&["scheme", "cxr"], include_str!("../lib/scheme/cxr.sld")),
+    (
+        &["scheme", "write"],
+        include_str!("../lib/scheme/write.sld"),
+    ),
     (&["srfi", "64"], include_str!("../lib/srfi/64.sld")),
 ];
 

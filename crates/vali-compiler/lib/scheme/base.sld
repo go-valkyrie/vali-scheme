@@ -26,7 +26,9 @@
    string? string-length string-ref string=? string<? string-append
    substring string->list list->string
    char? char->integer integer->char char=? char<?
-   apply error
+   apply error (rename %raise raise) raise-continuable with-exception-handler
+   guard error-object? error-object-message error-object-irritants
+   values call-with-values
    ;; The syntax procedures, for transformers.
    syntax->datum datum->syntax identifier? bound-identifier=?
    free-identifier=? generate-temporaries syntax-violation)
@@ -170,6 +172,71 @@
            (define modifier
              (let ((i (%record-field-index type 'fname)))
                (lambda (obj value) (%record-set! obj type i value))))))))
+
+    ;; Exceptions (R7RS 6.11), over the VM's one escape, (%catch thunk
+    ;; handler): a raise inside the thunk unwinds to it and calls the
+    ;; handler with what was raised. %handlers is the stack of handlers
+    ;; raise-continuable calls; each guard pushes one that raises again, so
+    ;; it reaches the guard's own %catch.
+    (define %handlers '())
+
+    (define (with-exception-handler handler thunk)
+      (let ((outer %handlers))
+        (set! %handlers (cons handler outer))
+        (let ((result
+               (%catch thunk
+                       (lambda (condition)
+                         (set! %handlers outer)
+                         (handler condition)
+                         (error "an exception handler returned from a non-continuable exception"
+                                condition)))))
+          (set! %handlers outer)
+          result)))
+
+    (define (raise-continuable obj)
+      (if (null? %handlers)
+          (%raise obj)
+          (let ((outer %handlers))
+            (set! %handlers (cdr outer))
+            (let ((result ((car outer) obj)))
+              (set! %handlers outer)
+              result))))
+
+    ;; guard's work is a procedure here, since only this library can assign
+    ;; %handlers; the macro wraps the body and the clauses in lambdas.
+    (define (%guard body clauses)
+      (let ((outer %handlers))
+        (set! %handlers (cons %raise outer))
+        (let ((result
+               (%catch body
+                       (lambda (condition)
+                         (set! %handlers outer)
+                         (clauses condition)))))
+          (set! %handlers outer)
+          result)))
+
+    (define-syntax guard
+      (syntax-rules ()
+        ((_ (var clause ...) body1 body2 ...)
+         (%guard (lambda () (let () body1 body2 ...))
+                 (lambda (condition)
+                   (let ((var condition))
+                     (guard-clauses condition clause ...)))))))
+
+    (define-syntax guard-clauses
+      (syntax-rules (else =>)
+        ((_ c) (%raise c))
+        ((_ c (else e1 e2 ...)) (begin e1 e2 ...))
+        ((_ c (test => receiver) clause ...)
+         (let ((t test)) (if t (receiver t) (guard-clauses c clause ...))))
+        ((_ c (test) clause ...)
+         (let ((t test)) (if t t (guard-clauses c clause ...))))
+        ((_ c (test e1 e2 ...) clause ...)
+         (if test (begin e1 e2 ...) (guard-clauses c clause ...)))))
+
+    ;; Multiple values are an object for now; call-with-values spreads it.
+    (define (call-with-values producer consumer)
+      (apply consumer (%values->list (producer))))
 
     (define-syntax with-syntax
       (syntax-rules ()

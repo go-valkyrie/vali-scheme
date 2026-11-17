@@ -6,7 +6,8 @@
 
 (define-library (srfi 64)
   (import (scheme base))
-  (export test-begin test-end test-assert test-equal test-eqv test-eq)
+  (export test-begin test-end test-assert test-equal test-eqv test-eq
+          test-error)
   (begin
     (define failures '())
 
@@ -37,6 +38,18 @@
       (syntax-rules ()
         ((_ name expected expr) (check eqv? 'expr expected expr))
         ((_ expected expr) (check eqv? 'expr expected expr))))
+
+    ;; (test-error [[name] type] expr): expr must raise. The type is not
+    ;; checked yet.
+    (define (check-error test thunk)
+      (unless (guard (e (#t #t)) (thunk) #f)
+        (set! failures (cons (list test 'an-error 'no-error) failures))))
+
+    (define-syntax test-error
+      (syntax-rules ()
+        ((_ name type expr) (check-error 'expr (lambda () expr)))
+        ((_ type expr) (check-error 'expr (lambda () expr)))
+        ((_ expr) (check-error 'expr (lambda () expr)))))
 
     (define-syntax test-eq
       (syntax-rules ()

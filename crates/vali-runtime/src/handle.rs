@@ -42,13 +42,28 @@ pub enum Error {
 }
 
 /// An error raised while running Scheme code.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SchemeError {
     /// What went wrong.
     pub message: String,
     /// The procedures that were running, innermost first.
     pub backtrace: Vec<String>,
+    /// What Scheme code raised, if it raised something: an error object
+    /// for `error`, or any value for `raise`. Errors from Rust procedures
+    /// raise nothing; a handler sees them as error objects with their
+    /// message.
+    pub raised: Option<Handle>,
 }
+
+/// Errors are equal if their messages and backtraces are; what they raised
+/// is not compared.
+impl PartialEq for SchemeError {
+    fn eq(&self, other: &SchemeError) -> bool {
+        self.message == other.message && self.backtrace == other.backtrace
+    }
+}
+
+impl Eq for SchemeError {}
 
 impl Error {
     /// A Scheme error with `message` and no backtrace yet.
@@ -56,6 +71,16 @@ impl Error {
         Error::Scheme(Box::new(SchemeError {
             message: message.into(),
             backtrace: Vec::new(),
+            raised: None,
+        }))
+    }
+
+    /// An error that raises `raised`, described by `message`.
+    pub fn raise(message: impl Into<String>, raised: Handle) -> Error {
+        Error::Scheme(Box::new(SchemeError {
+            message: message.into(),
+            backtrace: Vec::new(),
+            raised: Some(raised),
         }))
     }
 }

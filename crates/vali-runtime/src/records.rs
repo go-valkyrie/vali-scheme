@@ -246,3 +246,183 @@ pub(crate) fn record_set<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<
     unsafe { put(args[0], offset, args[3].raw()) };
     Ok(Value::UNSPECIFIED)
 }
+
+// Error objects and multiple values: records of types the runtime makes
+// itself, when first needed.
+
+impl<S: Strategy> Cx<S> {
+    /// A record type named `name` with `fields`, made by the runtime.
+    fn internal_type(&mut self, name: &str, fields: &[&str]) -> Result<Value, Error> {
+        let name = self.intern(name)?;
+        let mut list = Value::EMPTY_LIST;
+        for field in fields.iter().rev() {
+            let field = self.intern(field)?;
+            // SAFETY: valid values; nothing is collected meanwhile.
+            list = unsafe { self.cons_raw(field, list) }?;
+        }
+        make_record_type(self, &[name, list])
+    }
+
+    /// A record of the runtime's type `rtd` holding `values`.
+    fn internal_record(&mut self, rtd: Value, values: &[Value]) -> Result<Value, Error> {
+        let record = self.new_object(TypeCode::Record, 1 + values.len(), 0)?;
+        // SAFETY: just allocated with its type and fields.
+        unsafe {
+            put(record, Self::LAYOUT.field(TypeCode::Record, 0), rtd.raw());
+            for (i, v) in values.iter().enumerate() {
+                put(record, Self::LAYOUT.field(TypeCode::Record, 1 + i), v.raw());
+            }
+        }
+        Ok(record)
+    }
+
+    /// Field `i` of `v`, if `v` is a record of type `rtd`.
+    fn internal_field(&self, v: Value, rtd: Option<Value>, i: usize) -> Option<Value> {
+        let rtd = rtd?;
+        // SAFETY: a live record of that type, which has the field.
+        is_record_of(self, v, rtd).then(|| {
+            Value::from_raw(unsafe { get(v, Self::LAYOUT.field(TypeCode::Record, 1 + i)) })
+        })
+    }
+
+    /// An error object (R7RS 6.11) with `message` and `irritants`.
+    pub(crate) fn error_object_raw(
+        &mut self,
+        message: Value,
+        irritants: Value,
+    ) -> Result<Value, Error> {
+        let rtd = match self.error_object_type {
+            Some(rtd) => rtd,
+            None => {
+                let rtd = self.internal_type("error-object", &["message", "irritants"])?;
+                self.error_object_type = Some(rtd);
+                rtd
+            }
+        };
+        self.internal_record(rtd, &[message, irritants])
+    }
+
+    /// The message and irritants of `v`, if it is an error object.
+    pub(crate) fn error_object_parts(&self, v: Value) -> Option<(Value, Value)> {
+        Some((
+            self.internal_field(v, self.error_object_type, 0)?,
+            self.internal_field(v, self.error_object_type, 1)?,
+        ))
+    }
+
+    /// How an uncaught `raised` reads in the error the host sees: an error
+    /// object as its message and irritants, anything else as written.
+    pub(crate) fn describe_raised(&mut self, raised: Value) -> Result<String, Error> {
+        let Some((message, irritants)) = self.error_object_parts(raised) else {
+            // SAFETY: a valid value.
+            let raised = unsafe { self.root(raised) };
+            return Ok(format!(
+                "uncaught exception: {}",
+                self.write_string(&raised)?
+            ));
+        };
+        let mut text = if message.tag() == vali_abi::Tag::String {
+            // SAFETY: a live string.
+            unsafe { self.string_str(message) }.to_owned()
+        } else {
+            // SAFETY: a valid value.
+            let message = unsafe { self.root(message) };
+            self.write_string(&message)?
+        };
+        let mut rest = irritants;
+        while rest.is_pair() {
+            // SAFETY: a live pair, whose fields are valid.
+            let (irritant, next) = unsafe { (self.car(rest), self.cdr(rest)) };
+            let irritant = unsafe { self.root(irritant) };
+            text.push(' ');
+            text.push_str(&self.write_string(&irritant)?);
+            rest = next;
+        }
+        Ok(text)
+    }
+
+    /// The type of multiple values.
+    fn values_type(&mut self) -> Result<Value, Error> {
+        match self.values_type {
+            Some(rtd) => Ok(rtd),
+            None => {
+                let rtd = self.internal_type("values", &["list"])?;
+                self.values_type = Some(rtd);
+                Ok(rtd)
+            }
+        }
+    }
+}
+
+/// Raises `raised`.
+fn raise_value<S: Strategy>(cx: &mut Cx<S>, raised: Value) -> Error {
+    match cx.describe_raised(raised) {
+        // SAFETY: a valid value.
+        Ok(message) => Error::raise(message, unsafe { cx.root(raised) }),
+        Err(e) => e,
+    }
+}
+
+/// `(%raise obj)`: raises `obj`, which the innermost `%catch` receives.
+pub(crate) fn raise<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Err(raise_value(cx, args[0]))
+}
+
+/// `(error message irritant ...)`: raises an error object.
+pub(crate) fn error<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let mut irritants = Value::EMPTY_LIST;
+    for &irritant in args[1..].iter().rev() {
+        // SAFETY: valid values; nothing is collected meanwhile.
+        irritants = unsafe { cx.cons_raw(irritant, irritants) }?;
+    }
+    let object = cx.error_object_raw(args[0], irritants)?;
+    Err(raise_value(cx, object))
+}
+
+pub(crate) fn is_error_object<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(cx.error_object_parts(args[0]).is_some()))
+}
+
+pub(crate) fn error_object_message<S: Strategy>(
+    cx: &mut Cx<S>,
+    args: &[Value],
+) -> Result<Value, Error> {
+    cx.error_object_parts(args[0])
+        .map(|(message, _)| message)
+        .ok_or_else(|| type_error("error-object-message", "an error object", args[0]))
+}
+
+pub(crate) fn error_object_irritants<S: Strategy>(
+    cx: &mut Cx<S>,
+    args: &[Value],
+) -> Result<Value, Error> {
+    cx.error_object_parts(args[0])
+        .map(|(_, irritants)| irritants)
+        .ok_or_else(|| type_error("error-object-irritants", "an error object", args[0]))
+}
+
+/// `(values obj ...)`: one value is itself; any other number is a values
+/// object, which `call-with-values` spreads. Until the compiler handles
+/// multiple values itself, they are an object like any other.
+pub(crate) fn values<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    if let [one] = args {
+        return Ok(*one);
+    }
+    let mut list = Value::EMPTY_LIST;
+    for &v in args.iter().rev() {
+        // SAFETY: valid values; nothing is collected meanwhile.
+        list = unsafe { cx.cons_raw(v, list) }?;
+    }
+    let rtd = cx.values_type()?;
+    cx.internal_record(rtd, &[list])
+}
+
+/// `(%values->list obj)`: the values in a values object, or a list of
+/// `obj` alone.
+pub(crate) fn values_to_list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    match cx.internal_field(args[0], cx.values_type, 0) {
+        Some(list) => Ok(list),
+        // SAFETY: a valid value.
+        None => Ok(unsafe { cx.cons_raw(args[0], Value::EMPTY_LIST) }?),
+    }
+}
