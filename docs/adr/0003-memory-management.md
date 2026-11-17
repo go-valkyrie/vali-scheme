@@ -9,6 +9,7 @@
 - **Amended:** 2026-11-17, one kind of Rust handle: a root slot with a Rust-side count, used through the task context and released through a queue; local and shared handles are gone
 - **Amended:** 2026-11-17, the strategy owns half of the header word (ADR 0002), chooses whether pairs and flonums carry a header, and may keep side metadata on pair pages; M1 measures both pair layouts under counting
 - **Amended:** 2026-11-17, single-threaded heaps (ADR 0008): the share operation, the shared mark, atomic stores into shared objects and concurrent cycle collection are gone; handles belong to an isolate
+- **Amended:** 2026-11-18, how M1 builds and measures the counting strategies: both now, precise counting first without inference; epochs by allocation volume; trial deletion; a per-page allocator
 - **Related:** 0002 (values), 0004 (frames), 0006 (ABI version), 0008 (threads), 0009 (resource limits), 0012 (distribution format)
 
 ## Context
@@ -81,6 +82,14 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 
 1. **Milestone M1:** no collection, plus both counting strategies, measured against that baseline on the benchmark set. The faster counting strategy becomes the default. Each counting strategy is measured with both pair layouts: a header word per pair, and count bytes on pair pages whose counts stick at 255 and are recovered by the cycle collector. The faster layout is kept.
 2. **Later, when a host needs it:** an MMTk binding for tracing, and either concurrent strategy.
+
+### How M1 builds them
+
+- **Both counting strategies are built in M1, on the baseline compiler.** Precise counting starts without ownership inference: every reference from a frame slot is counted too, which is its worst case. The inference passes (owned and borrowed parameters, decrements at last use, drop-reuse) come with the CPS compiler, and precise counting is measured again then.
+- **A deferred-counting epoch runs at a safepoint once a set volume has been allocated since the last, and whenever Scheme returns to the host.** Safepoints are calls, returns and a loop's backward jumps. Triggering by allocation volume keeps expansion deterministic (ADR 0001 #4), and returning to the host bounds how long garbage waits after a call. An epoch scans the stacks of every task of the isolate, frees what has a zero count and no reference from a stack, and decrements what those objects referred to.
+- **Cycles are collected by trial deletion** (Bacon and Rajan, synchronous): an object whose count drops without reaching zero becomes a candidate root, and at an epoch the collector trial-deletes the candidates' internal references to find garbage cycles. It touches only the candidates' subgraphs, never the whole heap.
+- **The allocator keeps a free list per page,** as mimalloc does. Pages are aligned, so an object's page header is its address masked. Each page holds one size class, and allocation drains the current page of a class before taking the next page with free blocks. Freed objects go back on their own page's list, and a page whose objects are all free can take another size class. The side-count pair layout keeps its count bytes in the pair page's header, which this layout already has.
+- **Objects describe their pointers to the strategy** by type: which fields hold values. Freeing an object, cycle collection and, later, tracing all walk the same description.
 
 ## Questions to settle before accepting
 
