@@ -922,6 +922,179 @@ fn syntax_objects_at_run_time() {
     ]);
 }
 
+#[test]
+fn lists_from_r7rs() {
+    check(&[
+        (
+            "(list (caar '((1) 2)) (cadr '(1 2)) (cdar '((1 . 3))) (cddr '(1 2 3)))",
+            "(1 2 3 (3))",
+        ),
+        ("(map + '(1 2 3) '(10 20 30 40))", "(11 22 33)"),
+        ("(map (lambda (x) (* x x)) '(1 2 3))", "(1 4 9)"),
+        ("(map car '())", "()"),
+        (
+            "(let ((acc '())) (for-each (lambda (x y) (set! acc (cons (+ x y) acc))) '(1 2) '(3 4 5)) acc)",
+            "(6 4)",
+        ),
+        // A long list never deepens the stack.
+        (
+            "(length (map (lambda (x) x) (make-list 200000 0)))",
+            "200000",
+        ),
+        (
+            "(let* ((a (list 1 2 3)) (b (list-copy a))) (set-car! b 9) (list a b))",
+            "((1 2 3) (9 2 3))",
+        ),
+        ("(list-copy '(1 2 . 3))", "(1 2 . 3)"),
+        ("(list-copy 5)", "5"),
+        (
+            "(list (make-list 2 'x) (length (make-list 3)))",
+            "((x x) 3)",
+        ),
+        ("(let ((l (list 1 2 3))) (list-set! l 1 'b) l)", "(1 b 3)"),
+        ("(member 2.0 '(1 2 3) =)", "(2 3)"),
+        ("(member '(a) '(b (a) c))", "((a) c)"),
+        ("(assoc 2.0 '((1 one) (2 two)) =)", "(2 two)"),
+        ("(assoc 5 '((1 one)) =)", "#f"),
+        (
+            "(list (boolean=? #t #t #t) (boolean=? #f #t) (square 7))",
+            "(#t #f 49)",
+        ),
+    ]);
+}
+
+#[test]
+fn vectors_strings_and_chars_from_r7rs() {
+    check(&[
+        ("(vector->list #(1 2 3 4) 1)", "(2 3 4)"),
+        ("(vector->list #(1 2 3 4) 1 3)", "(2 3)"),
+        (
+            "(let ((v (vector 1 2 3 4))) (vector-fill! v 'x 1 3) v)",
+            "#(1 x x 4)",
+        ),
+        ("(vector-copy #(1 2 3) 1)", "#(2 3)"),
+        (
+            "(let ((v (vector 1 2 3 4 5))) (vector-copy! v 1 v 0 3) v)",
+            "#(1 1 2 3 5)",
+        ),
+        (
+            "(let ((v (vector 1 2 3 4 5))) (vector-copy! v 0 v 2) v)",
+            "#(3 4 5 4 5)",
+        ),
+        ("(vector-append #(1) #() #(2 3))", "#(1 2 3)"),
+        ("(vector-map + #(1 2) #(10 20 30))", "#(11 22)"),
+        (
+            "(let ((n 0)) (vector-for-each (lambda (x) (set! n (+ n x))) #(1 2 3)) n)",
+            "6",
+        ),
+        (
+            "(list (vector->string #(#\\a #\\b)) (string->vector \"abc\" 1))",
+            "(\"ab\" #(#\\b #\\c))",
+        ),
+        (
+            "(list (string->list \"hello\" 1 3) (string-copy \"hello\" 2))",
+            "((#\\e #\\l) \"llo\")",
+        ),
+        ("(string-map char-upcase \"abc\")", "\"ABC\""),
+        (
+            "(let ((acc '())) (string-for-each (lambda (a b) (set! acc (cons (list a b) acc))) \"ab\" \"xyz\") acc)",
+            "((#\\b #\\y) (#\\a #\\x))",
+        ),
+        (
+            "(list (string>? \"b\" \"a\") (string<=? \"a\" \"a\" \"b\") (string>=? \"a\" \"b\"))",
+            "(#t #t #f)",
+        ),
+        (
+            "(list (char>? #\\b #\\a) (char<=? #\\a #\\a #\\b) (char>=? #\\a #\\b))",
+            "(#t #t #f)",
+        ),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(error("(vector->list #(1 2) 1 5)").contains("vector->list: bad range"));
+}
+
+#[test]
+fn multiple_values_from_r7rs() {
+    check(&[
+        (
+            "(let-values (((a b) (values 1 2)) ((c) (values 3))) (list a b c))",
+            "(1 2 3)",
+        ),
+        (
+            "(let-values (((a . rest) (values 1 2 3)) (all (values 4 5))) (list a rest all))",
+            "(1 (2 3) (4 5))",
+        ),
+        (
+            "(let ((a 1)) (let-values (((a b) (values 2 a))) (list a b)))",
+            "(2 1)",
+        ),
+        (
+            "(let ((a 1)) (let*-values (((a b) (values 2 a)) ((c) (values a))) (list a b c)))",
+            "(2 1 2)",
+        ),
+        ("(define-values (x y) (values 1 2)) (list x y)", "(1 2)"),
+        (
+            "(define-values (x . y) (values 1 2 3)) (list x y)",
+            "(1 (2 3))",
+        ),
+        ("(define-values all (values 1 2)) all", "(1 2)"),
+        (
+            "(define (f) (define-values (a b c) (values 1 2 3)) (list c b a)) (f)",
+            "(3 2 1)",
+        ),
+    ]);
+}
+
+#[test]
+fn auxiliary_syntax_is_bound() {
+    check(&[
+        // A local binding of else is not cond's else.
+        (
+            "(let ((else #f)) (cond (else 'matched) (#t 'not-else)))",
+            "not-else",
+        ),
+        ("(cond (#f 1) (else 2))", "2"),
+        ("(case 3 ((1) 'one) (else => (lambda (x) (* x 2))))", "6"),
+    ]);
+    let compile_error = |source: &str| compile(source, "test").unwrap_err().message;
+    assert!(compile_error("(else)").contains("misplaced auxiliary syntax"));
+    assert!(
+        compile_error("(define-syntax m (syntax-rules () ((_) (syntax-error \"no way\" 1)))) (m)")
+            .contains("no way")
+    );
+}
+
+#[test]
+fn case_lambda_and_promises() {
+    check(&[
+        (
+            "(import (scheme base) (scheme case-lambda))
+             (define f (case-lambda ((x) (list 'one x)) ((x y) (list 'two x y)) ((x . r) (list 'many x r))))
+             (list (f 1) (f 1 2) (f 1 2 3))",
+            "((one 1) (two 1 2) (many 1 (2 3)))",
+        ),
+        (
+            "(import (scheme base) (scheme lazy))
+             (define n 0)
+             (define p (delay (begin (set! n (+ n 1)) n)))
+             (list (force p) (force p) (promise? p) (force (make-promise 5)) (force 7))",
+            "(1 1 #t 5 7)",
+        ),
+        // A long chain of delay-forces runs in constant space.
+        (
+            "(import (scheme base) (scheme lazy))
+             (define (loop n) (delay-force (if (= n 0) (delay 'done) (loop (- n 1)))))
+             (force (loop 100000))",
+            "done",
+        ),
+    ]);
+    let error = |source: &str| run(source).unwrap_err().to_string();
+    assert!(
+        error("(import (scheme base) (scheme case-lambda)) ((case-lambda ((x) x)))")
+            .contains("no clause accepts")
+    );
+}
+
 /// Builds and sums a 20,000-element structure ten times: about 2 MiB each
 /// time, so epochs run mid-program, at calls and loops' backward jumps.
 const CHURN: &str = "
@@ -1070,6 +1243,10 @@ fn frames_leave_nothing_counted() {
         "(guard (e (#t e)) (car (ring)) (vector-ref (vector (ring)) 5))",
     ];
     for body in repeated {
+        // Each must run, or it would check nothing.
+        if let Err(e) = run(&format!("{prelude}(rep (lambda () {body}) 1)")) {
+            panic!("{body}: {e}");
+        }
         each_strategy(|name, live| {
             let times = |n: usize| live(&format!("{prelude}(rep (lambda () {body}) {n})"));
             assert_eq!(times(4), times(2), "{name}: {body}");

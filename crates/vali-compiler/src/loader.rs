@@ -138,8 +138,13 @@ impl<L: AsyncLoader> Fetch for Async<'_, L> {
 /// The standard libraries' sources, embedded in the binary (ADR 0007 #11).
 const STANDARD: &[(&[&str], &str)] = &[
     (&["scheme", "base"], include_str!("../lib/scheme/base.sld")),
+    (
+        &["scheme", "case-lambda"],
+        include_str!("../lib/scheme/case-lambda.sld"),
+    ),
     (&["scheme", "char"], include_str!("../lib/scheme/char.sld")),
     (&["scheme", "cxr"], include_str!("../lib/scheme/cxr.sld")),
+    (&["scheme", "lazy"], include_str!("../lib/scheme/lazy.sld")),
     (
         &["scheme", "write"],
         include_str!("../lib/scheme/write.sld"),
