@@ -1,0 +1,11 @@
+[package]
+name = "vali-abi"
+description = "Vali's ABI facts: value tags, immediates, header words, type codes and object layouts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

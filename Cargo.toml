@@ -10,6 +10,7 @@ license = "MIT"
 repository = "https://github.com/go-valkyrie/vali-scheme"
 
 [workspace.dependencies]
+vali-abi = { path = "crates/vali-abi", version = "0.0.0" }
 vali-num = { path = "crates/vali-num", version = "0.0.0" }
 vali-syntax = { path = "crates/vali-syntax", version = "0.0.0" }
 
