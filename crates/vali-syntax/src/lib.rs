@@ -17,6 +17,7 @@
 //! - [`BindingTable`] maps a symbol and a scope set to a binding, with the
 //!   [`Phases`] where it is visible, and resolves identifiers.
 //! - [`Origin`] records the macro use that produced a syntax object.
+//! - [`Syntax`] is a syntax object, with scope changes propagated lazily.
 //! - With the `reference` feature, `reference` holds a plain syntax type
 //!   for tests.
 
@@ -32,6 +33,7 @@ mod reader;
 pub mod reference;
 mod scope;
 mod span;
+mod syntax;
 mod tree;
 
 pub use binding::{AlreadyBound, BindingTable, Phase, Phases, Resolution};
@@ -47,5 +49,6 @@ pub use reader::{
 };
 pub use scope::{Scope, ScopeContext, ScopeKind, ScopeSetId, TooManyScopes};
 pub use span::{SourceId, Span};
+pub use syntax::{Exposed, Syntax, bound_identifier_eq, free_identifier_eq};
 pub use text_size::{TextRange, TextSize};
 pub use tree::{SyntaxElement, SyntaxNode, SyntaxToken, TreeSink, ValiLanguage};
