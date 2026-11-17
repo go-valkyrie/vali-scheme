@@ -139,7 +139,7 @@ fn run(
     let mut cx = vali_runtime::Cx::<vali_runtime::NoCollection>::new(&Default::default());
     let id = cx
         .install_primitives()
-        .and_then(|()| vali_compiler::load(&mut cx, program))
+        .and_then(|()| vali_compiler::load_with(&mut cx, program, Arc::new(host.clone())))
         .map_err(|e| e.to_string())?;
     cx.run(id).map_err(|e| e.to_string())?;
     Ok((cx, id))
@@ -222,6 +222,7 @@ fn growth(mut time: impl FnMut(u32) -> Result<Duration, String>) -> Result<(), S
 /// process-context capability, by serving its own (scheme process-context)
 /// over (vali-test process), a native library reading the process (ADR
 /// 0009 #6). The command line is `vali-test` and the test's name.
+#[derive(Clone)]
 struct TestHost {
     process: Arc<vali_runtime::NativeLibrary>,
     /// Whether it serves `(regression virtual)`, from memory.

@@ -353,6 +353,21 @@ impl Expander {
         self.by_name.insert(name, self.units.len());
     }
 
+    /// The unit compiled with `identity`, if there is one.
+    pub(crate) fn unit_of(&self, identity: &str) -> Option<usize> {
+        self.units.iter().position(|u| u.identity == identity)
+    }
+
+    /// Notes that `name` is also the name of the library `unit` is.
+    pub(crate) fn name_unit(&mut self, name: LibraryName, unit: usize) {
+        self.by_name.insert(name, unit);
+    }
+
+    /// More files that bodies include, fetched for code compiled later.
+    pub(crate) fn add_includes(&mut self, includes: crate::loader::Includes) {
+        self.includes.extend(includes);
+    }
+
     /// Expands and compiles a library, which becomes the next unit.
     pub(crate) fn library(&mut self, identity: &str, form: &LibraryForm) -> Result<Module> {
         let scope = self.scope(ScopeKind::Library)?;
@@ -502,6 +517,7 @@ impl Expander {
             return Ok(vali_runtime::primitive_names()
                 .into_iter()
                 .chain(phase::SYNTAX_PROCEDURES.iter().copied())
+                .chain(crate::eval::EVAL_PROCEDURES.iter().copied())
                 .map(|n| (n.to_owned(), Binding::Primitive(n.to_owned())))
                 .collect());
         }

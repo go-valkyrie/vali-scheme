@@ -72,6 +72,9 @@ pub struct Cx<S: Strategy> {
     /// bindings while a transformer runs, or a program's, for syntax
     /// objects at run time.
     pub(crate) expander_data: Option<Box<dyn std::any::Any + Send>>,
+    /// What `eval` needs, if the program can evaluate code: the compiler's
+    /// state, kept apart from the host's.
+    pub(crate) evaluator: Option<Box<dyn std::any::Any + Send>>,
     /// The `%catch`es whose thunks are running, innermost last.
     pub(crate) catches: Vec<crate::vm::Catch>,
     /// The dynamic state (scheme base) keeps: `dynamic-wind`'s winders,
@@ -161,6 +164,7 @@ impl<S: Strategy> Cx<S> {
             syntaxes: Vec::new(),
             host_data: None,
             expander_data: None,
+            evaluator: None,
             catches: Vec::new(),
             dynamic: [Value::EMPTY_LIST; 3],
             raise_hook: None,

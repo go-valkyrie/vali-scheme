@@ -8,6 +8,7 @@
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
 - **Amended:** 2026-11-17, the synchronous and asynchronous loader traits, and fetching the import graph before expansion (item 1)
 - **Amended:** 2026-11-17, until the capability API exists, a host grants what a library that reaches outside needs by serving that library itself; `include` reads through the loader; `exit` ends the run (items 6 and 8)
+- **Amended:** 2026-11-17, a host passes a loader for `eval` when it loads a program; import policies are not built yet (items 1 and 20)
 - **Related:** 0001 (cache validity), 0003 (memory limit), 0005 (untrusted bytecode), 0006 (native code), 0008 (isolates)
 
 ## Context
@@ -77,6 +78,8 @@ In each of these, a read nobody registered leaves a stale cache, with no error.
 ### Policies and limits
 
 20. **Import policies** are allowlists of the library names an evaluation may import. They are checked whenever an import is resolved, including by `eval` and `environment`.
+
+    **As built so far:** `eval` fetches libraries through the loader the host passes to `vali_compiler::load_with` when it loads the program; plain `load` keeps none, so evaluated code reaches only Vali's own libraries and those the program loaded. What evaluated code includes is read through the same loader. Import policies are not built yet: a host restricts `eval` today by what its loader serves.
 21. **Each evaluation has resource limits:** a fuel budget decremented at function entry (ADR 0005), and a memory limit enforced by the allocator (ADR 0003). Both apply during expansion too, because macros can loop. Running out stops the evaluation and returns control to the host. Scheme code cannot catch it, and no `dynamic-wind` after-thunks run.
 22. **The runtime never loads native code from a file.** Native code in a process is either JIT-compiled there or part of the executable itself (ADRs 0006 and 0013). Untrusted code arrives only as source or bytecode, and bytecode is safe by construction (ADR 0005), so no rule about trusting native code is needed.
 

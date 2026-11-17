@@ -264,6 +264,7 @@ const STANDARD: &[(&[&str], &str)] = &[
         &["scheme", "inexact"],
         include_str!("../lib/scheme/inexact.sld"),
     ),
+    (&["scheme", "eval"], include_str!("../lib/scheme/eval.sld")),
     (&["scheme", "file"], include_str!("../lib/scheme/file.sld")),
     (&["scheme", "lazy"], include_str!("../lib/scheme/lazy.sld")),
     (

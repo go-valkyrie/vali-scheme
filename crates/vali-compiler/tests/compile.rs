@@ -2185,6 +2185,108 @@ fn libraries_that_reach_outside() {
 }
 
 #[test]
+fn evaluating() {
+    let prelude = "(import (scheme base) (scheme eval))
+                   (define env (environment '(scheme base)))";
+    let cases = [
+        ("(eval '(+ 1 2) env)", "3"),
+        // Macros from the environment's libraries.
+        (
+            "(eval '(let loop ((i 0) (acc '())) (if (= i 3) (reverse acc) (loop (+ i 1) (cons i acc)))) env)",
+            "(0 1 2)",
+        ),
+        // A library the program never loaded is fetched and run.
+        (
+            "(eval '(list-sort < '(3 1 2)) (environment '(scheme base) '(srfi 132)))",
+            "(1 2 3)",
+        ),
+        // Import sets, renamed and restricted.
+        (
+            "(eval '(my-car (list 1 2)) (environment '(rename (only (scheme base) car list) (car my-car))))",
+            "1",
+        ),
+        // Definitions stay local to their evaluation.
+        ("(eval '(begin (define x 5) (* x 2)) env)", "10"),
+        ("((eval '(lambda (x) (* x x)) env) 5)", "25"),
+        (
+            "(eval '(begin (define-syntax swap! (syntax-rules () ((_ a b) (let ((t a)) (set! a b) (set! b t)))))
+                           (let ((p 1) (q 2)) (swap! p q) (list p q)))
+                   env)",
+            "(2 1)",
+        ),
+        // eval inside eval.
+        (
+            "(eval '(eval '(* 6 7) (environment '(scheme base))) (environment '(scheme base) '(scheme eval)))",
+            "42",
+        ),
+        // Errors in evaluated code, and in compiling it, reach handlers.
+        ("(guard (e (#t 'caught)) (eval '(car 1) env))", "caught"),
+        (
+            "(guard (e ((error-object? e) 'compile-error)) (eval '(if) env))",
+            "compile-error",
+        ),
+        (
+            "(guard (e ((error-object? e) (error-object-message e))) (eval 'cdr (environment '(only (scheme base) car))))",
+            "\"eval: cdr is not bound: is it imported?\"",
+        ),
+        (
+            "(guard (e ((error-object? e) (error-object-message e))) (eval car env))",
+            "\"eval: expected an expression or definition as data\"",
+        ),
+        (
+            "(guard (e ((error-object? e) (error-object-message e))) (environment 5))",
+            "\"environment: expected an import set\"",
+        ),
+    ];
+    check_each(prelude, &cases);
+}
+
+/// `eval` reaches the host's libraries only through the loader the host
+/// passes with `load_with`.
+#[test]
+fn evaluating_with_a_loader() {
+    let source = "(import (scheme base) (scheme eval))
+                  (eval '(list value both extra) (environment '(scheme base) '(lib a)))";
+    let with = |loader: Option<std::sync::Arc<Files>>| {
+        let program =
+            vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+        let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = match loader {
+            Some(loader) => vali_compiler::load_with(&mut cx, program, loader),
+            None => vali_compiler::load(&mut cx, program),
+        }
+        .unwrap();
+        cx.run(id)
+            .and_then(|result| cx.write_string(&result))
+            .map_err(|e| e.to_string())
+    };
+    assert_eq!(
+        with(Some(std::sync::Arc::new(Files))),
+        Ok("(1 2 3)".to_owned())
+    );
+    let error = with(None).unwrap_err();
+    assert!(error.contains("library (lib a) not found"), "{error}");
+    // What evaluated code includes is read through the same loader, which
+    // decides what it may read.
+    let source = "(import (scheme base) (scheme eval))
+                  (define env (environment '(scheme base)))
+                  (list (eval '(begin (include \"defs.scm\") included) env)
+                        (guard (e ((error-object? e) (error-object-message e)))
+                          (eval '(include \"secret.scm\") env)))";
+    let program =
+        vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+    let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    let id = vali_compiler::load_with(&mut cx, program, std::sync::Arc::new(Files)).unwrap();
+    let result = cx.run(id).unwrap();
+    assert_eq!(
+        cx.write_string(&result).unwrap(),
+        "(42 \"eval: include: eval:2 may not read secret.scm\")"
+    );
+}
+
+#[test]
 fn console_ports() {
     let program = vali_compiler::compile_program(
         "(import (scheme base) (scheme write))

@@ -350,6 +350,18 @@ impl<S: Strategy> Cx<S> {
             .get()
     }
 
+    /// A loaded module's body, as a procedure of no arguments, to call
+    /// rather than run: a Rust procedure can tail-call it, where it could
+    /// not run it.
+    pub fn module_body(&mut self, module: ModuleId) -> Result<Handle, Error> {
+        let instance = &self.instances[module.0];
+        let body =
+            &instance.loaded.functions[instance.loaded.module.body as usize] as *const Code<S>;
+        let closure = self.closure_raw(body, &[])?;
+        // SAFETY: just allocated.
+        Ok(unsafe { self.root(closure) })
+    }
+
     /// Runs a loaded module's body, returning its result.
     pub fn run(&mut self, module: ModuleId) -> Result<Handle, Error> {
         let instance = &self.instances[module.0];

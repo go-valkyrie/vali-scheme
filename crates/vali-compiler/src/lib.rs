@@ -15,6 +15,7 @@
 mod analyze;
 mod ast;
 mod codegen;
+mod eval;
 mod expand;
 mod features;
 mod library;
@@ -58,7 +59,7 @@ impl std::error::Error for CompileError {}
 
 /// A compiled program: the libraries it needs, each after the libraries it
 /// imports, and its body.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Program {
     /// Each library, with its identity.
     pub libraries: Vec<(Identity, Module)>,
@@ -70,6 +71,21 @@ pub struct Program {
     /// The native libraries among `libraries`, which [`load`] registers
     /// with the isolate before their modules run (ADR 0016 #8).
     pub natives: Vec<(Identity, std::sync::Arc<vali_runtime::NativeLibrary>)>,
+    /// What `eval` needs, if the program imports `(scheme eval)`: the
+    /// expander that compiled it, which [`load`] keeps in the isolate.
+    pub evaluator: Option<Evaluator>,
+}
+
+/// The expander that compiled a program that imports `(scheme eval)`,
+/// with all it knows of the program's libraries, which `eval` expands new
+/// code against (ADR 0013 #7: programs that cannot evaluate code keep
+/// nothing).
+pub struct Evaluator(Box<eval::Evaluator>);
+
+impl std::fmt::Debug for Evaluator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Evaluator")
+    }
 }
 
 /// The scopes, bindings and compiled patterns and templates that syntax
@@ -85,7 +101,7 @@ impl std::fmt::Debug for SyntaxData {
 }
 
 /// Whether `module` calls the procedures syntax objects at run time use.
-fn uses_syntax(module: &Module) -> bool {
+pub(crate) fn uses_syntax(module: &Module) -> bool {
     module.variables.iter().any(|v| {
         v.link == vali_bytecode::Link::Global
             && [
@@ -185,6 +201,9 @@ fn build(
 ) -> Result<Program, CompileError> {
     let mut expander = expand::Expander::new()?;
     expander.set_includes(graph.includes);
+    let names_eval = graph
+        .by_name
+        .contains_key(&LibraryName::new(["scheme", "eval"]));
     let mut names: Vec<Vec<LibraryName>> = vec![Vec::new(); graph.libraries.len()];
     for (name, i) in graph.by_name {
         names[i].push(name);
@@ -213,22 +232,49 @@ fn build(
     )?;
     let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
         .then(|| SyntaxData(expander.syntax_data()));
+    let evaluator = names_eval.then(|| Evaluator(Box::new(eval::Evaluator::new(expander))));
     Ok(Program {
         libraries,
         body,
         syntax,
         natives,
+        evaluator,
     })
 }
 
 /// Loads a compiled program into `cx`: each library not there already is
 /// loaded, run and registered under its identity, then the body is loaded.
-/// Returns the body's module, to run.
+/// Returns the body's module, to run. If the program imports `(scheme
+/// eval)`, evaluated code reaches Vali's own libraries and those the
+/// program loaded; [`load_with`] lets it reach the host's too.
 pub fn load<S: vali_runtime::Strategy>(
     cx: &mut vali_runtime::Cx<S>,
     program: Program,
 ) -> Result<vali_runtime::ModuleId, vali_runtime::Error> {
+    load_inner(cx, program, None)
+}
+
+/// As [`load`], keeping `loader` for `eval`: evaluated code that imports a
+/// library not loaded yet fetches it there, and what it includes is read
+/// there too.
+pub fn load_with<S: vali_runtime::Strategy>(
+    cx: &mut vali_runtime::Cx<S>,
+    program: Program,
+    loader: std::sync::Arc<dyn Loader + Send + Sync>,
+) -> Result<vali_runtime::ModuleId, vali_runtime::Error> {
+    load_inner(cx, program, Some(loader))
+}
+
+fn load_inner<S: vali_runtime::Strategy>(
+    cx: &mut vali_runtime::Cx<S>,
+    mut program: Program,
+    loader: Option<std::sync::Arc<dyn Loader + Send + Sync>>,
+) -> Result<vali_runtime::ModuleId, vali_runtime::Error> {
     phase::install(cx)?;
+    if let Some(Evaluator(mut evaluator)) = program.evaluator.take() {
+        evaluator.loader = loader;
+        cx.set_evaluator(Some(evaluator));
+    }
     if let Some(SyntaxData(shared)) = program.syntax {
         cx.set_expander_data(Some(Box::new(shared)));
     }

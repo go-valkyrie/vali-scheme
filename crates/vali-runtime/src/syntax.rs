@@ -226,6 +226,16 @@ impl<S: Strategy> Cx<S> {
         std::mem::replace(&mut self.expander_data, data)
     }
 
+    /// Keeps what `eval` needs, apart from the host's data, returning what
+    /// was kept before. The compiler sets it; the runtime only holds it.
+    #[doc(hidden)]
+    pub fn set_evaluator(
+        &mut self,
+        data: Option<Box<dyn Any + Send>>,
+    ) -> Option<Box<dyn Any + Send>> {
+        std::mem::replace(&mut self.evaluator, data)
+    }
+
     /// The host's data, if it is a `T`.
     pub fn host_data<T: Any>(&mut self) -> Option<&mut T> {
         let data: &mut dyn Any = self.host_data.as_mut()?.as_mut();

@@ -100,7 +100,7 @@ pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
     for (name, arity, f) in natives {
         cx.define_native(name, arity, f)?;
     }
-    Ok(())
+    crate::eval::install(cx)
 }
 
 fn nowhere() -> Span {
