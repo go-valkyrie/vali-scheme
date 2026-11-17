@@ -697,3 +697,24 @@ fn a_program_definition_does_not_change_what_macros_mean() {
         "yes",
     )]);
 }
+
+#[test]
+fn quasiquote() {
+    check(&[
+        ("`(1 ,(+ 1 1) ,@(list 3 4) 5)", "(1 2 3 4 5)"),
+        ("(let ((x 'a)) `(x ,x . ,x))", "(x a . a)"),
+        ("`#(1 ,(* 2 1) ,@(list 3))", "#(1 2 3)"),
+        // R7RS 4.2.8: the inner unquote, at the outermost level, is
+        // evaluated; the one around it stays.
+        (
+            "`(1 `(2 ,(3 ,(+ 1 3))))",
+            "(1 (quasiquote (2 (unquote (3 4)))))",
+        ),
+        ("`,(+ 2 3)", "5"),
+        ("`()", "()"),
+        (
+            "(let ((name 'a)) `(list ,name ',name))",
+            "(list a (quote a))",
+        ),
+    ]);
+}

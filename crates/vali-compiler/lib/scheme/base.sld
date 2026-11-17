@@ -12,7 +12,7 @@
    quote quote-syntax if begin lambda let letrec letrec* set! define
    define-syntax let-syntax letrec-syntax syntax-rules syntax-case syntax
    ;; Derived forms, below.
-   and or when unless let* cond case do with-syntax
+   and or when unless let* cond case do with-syntax quasiquote
    ;; Procedures.
    + * - = < <= > >= quotient remainder modulo abs min max
    number? integer? exact? inexact? zero? positive? negative? odd? even?
@@ -123,6 +123,26 @@
 
     ;;; From R6RS's (rnrs syntax-case): with-syntax binds pattern variables to
     ;;; what each input matches, for a transformer's templates.
+
+    ;; quasiquote (R7RS 4.2.8). qq carries the nesting depth as a list,
+    ;; one element per enclosing quasiquote, so only the outermost level's
+    ;; unquotes are evaluated.
+    (define-syntax quasiquote
+      (syntax-rules ()
+        ((_ template) (qq template ()))))
+
+    (define-syntax qq
+      (syntax-rules (unquote unquote-splicing quasiquote)
+        ((_ (unquote x) ()) x)
+        ((_ (unquote x) (d . ds)) (list 'unquote (qq x ds)))
+        ((_ ((unquote-splicing x) . rest) ())
+         (append x (qq rest ())))
+        ((_ ((unquote-splicing x) . rest) (d . ds))
+         (cons (list 'unquote-splicing (qq x ds)) (qq rest (d . ds))))
+        ((_ (quasiquote x) ds) (list 'quasiquote (qq x (#t . ds))))
+        ((_ (a . b) ds) (cons (qq a ds) (qq b ds)))
+        ((_ #(x ...) ds) (list->vector (qq (x ...) ds)))
+        ((_ x ds) 'x)))
 
     (define-syntax with-syntax
       (syntax-rules ()
