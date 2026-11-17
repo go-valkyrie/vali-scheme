@@ -20,7 +20,7 @@ Each boundary below exists for a reason recorded in an ADR:
 | `vali-bytecode` | Run-format bytecode (ADR 0005): encoding, validator, disassembler, and conversion from the distribution format | `vali-abi`, `vali-dist` | M1 |
 | `vali-artifact` | The artifact container, fingerprints and cache store (ADR 0001) | `vali-bytecode`, `vali-dist` | M1 |
 | `vali-runtime` | Values, memory strategies, objects, frames and continuations, the trampoline, isolates and tasks, the VM, primitives, capability objects. The JIT is its `jit` feature | `vali-abi`, `vali-num`, `vali-syntax`, `vali-bytecode` | M1 |
-| `vali-compiler` | The expander and the compiler's front half: core forms, CPS, optimisation, the contract pass, producing distribution code. One crate because the expander must compile and run transformers | `vali-runtime`, `vali-dist` and others | M1 |
+| `vali-compiler` | The expander and the compiler's front half: core forms, CPS, optimisation, the contract pass, producing distribution code. One crate because the expander must compile and run transformers. Today it holds the baseline compiler: core forms straight to run-format bytecode, with derived forms desugared until the expander lands. The CPS compiler follows soon, since the async integration and the JIT build on it | `vali-runtime`, `vali-dist` and others | M1 |
 | `vali` | The embedding API that hosts depend on. The compiler sits behind its default `eval` feature | `vali-runtime`, `vali-compiler` | M1 |
 | `vali-cli` | The `vali` binary: REPL, scripts, `vali build`, `vali lsp` | `vali`, `vali-build` | M1 |
 | `vali-macros` | `#[bridge]`. Procedural macros must be a crate of their own | none | M2 |
