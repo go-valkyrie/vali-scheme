@@ -877,6 +877,89 @@ fn string_to_number<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value
     }
 }
 
+fn vector_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value, Error> {
+    // SAFETY: a valid value.
+    if unsafe { cx.header_type(v) } == Some(TypeCode::Vector) {
+        Ok(v)
+    } else {
+        Err(type_error(name, "a vector", v))
+    }
+}
+
+fn vector_to_list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let v = vector_arg(cx, "vector->list", args[0])?;
+    // SAFETY: a live vector; its elements are read before allocating.
+    let items: Vec<Value> = unsafe {
+        (0..cx.vector_length(v))
+            .map(|i| cx.vector_ref(v, i))
+            .collect()
+    };
+    list(cx, &items)
+}
+
+fn list_to_vector<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let items = elements(cx, "list->vector", args[0])?;
+    vector(cx, &items)
+}
+
+fn vector_fill<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let v = vector_arg(cx, "vector-fill!", args[0])?;
+    // SAFETY: a live vector.
+    unsafe {
+        for i in 0..cx.vector_length(v) {
+            cx.vector_set(v, i, args[1]);
+        }
+    }
+    Ok(Value::UNSPECIFIED)
+}
+
+/// A one-character case mapping, keeping the character when Unicode maps it
+/// to several.
+fn single(mut mapped: impl Iterator<Item = char>, c: char) -> char {
+    match (mapped.next(), mapped.next()) {
+        (Some(m), None) => m,
+        _ => c,
+    }
+}
+
+fn char_upcase<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let c = char_arg("char-upcase", args[0])?;
+    Ok(Value::character(single(c.to_uppercase(), c)))
+}
+
+fn char_downcase<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let c = char_arg("char-downcase", args[0])?;
+    Ok(Value::character(single(c.to_lowercase(), c)))
+}
+
+fn char_alphabetic<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(
+        char_arg("char-alphabetic?", args[0])?.is_alphabetic(),
+    ))
+}
+
+fn char_numeric<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(
+        char_arg("char-numeric?", args[0])?.is_numeric(),
+    ))
+}
+
+fn char_whitespace<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(
+        char_arg("char-whitespace?", args[0])?.is_whitespace(),
+    ))
+}
+
+fn string_upcase<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let text = string_arg(cx, "string-upcase", args[0])?.to_uppercase();
+    Ok(cx.string_raw(&text, false)?)
+}
+
+fn string_downcase<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let text = string_arg(cx, "string-downcase", args[0])?.to_lowercase();
+    Ok(cx.string_raw(&text, false)?)
+}
+
 /// `(apply f a ... list)`: asks the VM to tail-call `f`.
 fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
@@ -954,6 +1037,16 @@ impl<S: Strategy> Cx<S> {
             ("list-tail", Arity::exactly(2), list_tail),
             ("list-ref", Arity::exactly(2), list_ref),
             ("apply", at_least(1), apply),
+            ("vector->list", Arity::exactly(1), vector_to_list),
+            ("list->vector", Arity::exactly(1), list_to_vector),
+            ("vector-fill!", Arity::exactly(2), vector_fill),
+            ("char-upcase", Arity::exactly(1), char_upcase),
+            ("char-downcase", Arity::exactly(1), char_downcase),
+            ("char-alphabetic?", Arity::exactly(1), char_alphabetic),
+            ("char-numeric?", Arity::exactly(1), char_numeric),
+            ("char-whitespace?", Arity::exactly(1), char_whitespace),
+            ("string-upcase", Arity::exactly(1), string_upcase),
+            ("string-downcase", Arity::exactly(1), string_downcase),
             (
                 "number->string",
                 Arity {

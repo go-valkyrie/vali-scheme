@@ -371,3 +371,30 @@ fn numbers_and_strings() {
         assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
     }
 }
+
+#[test]
+fn conversions_and_case() {
+    let mut cx = cx();
+    let cases = [
+        ("vector->list", "#(1 (2) \"x\")", "(1 (2) \"x\")"),
+        ("list->vector", "(a b)", "#(a b)"),
+        ("char-upcase", "#\\ä", "#\\Ä"),
+        ("char-downcase", "#\\Σ", "#\\σ"),
+        ("char-alphabetic?", "#\\λ", "#t"),
+        ("char-numeric?", "#\\7", "#t"),
+        ("char-whitespace?", "#\\tab", "#t"),
+        ("string-upcase", "\"straße\"", "\"STRASSE\""),
+        ("string-downcase", "\"ΑΒΓ\"", "\"αβγ\""),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+    let v = cx.read("#(1 2 3)").unwrap().remove(0);
+    let fill = cx.global("vector-fill!").unwrap();
+    cx.call(
+        &fill,
+        &[v.clone(), vali_runtime::Handle::fixnum(0).unwrap()],
+    )
+    .unwrap();
+    assert_eq!(cx.write_string(&v).unwrap(), "#(0 0 0)");
+}
