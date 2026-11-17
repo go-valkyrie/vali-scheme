@@ -110,17 +110,9 @@ fn division<S: Strategy>(
     if y.is_zero() {
         return Err(Error::scheme(format!("{name}: division by zero")));
     }
-    // Fixnum fast path; bignum division comes with the rest of vali-num's
-    // arithmetic.
-    match (x.to_i64(), y.to_i64()) {
-        (Some(x), Some(y)) if !(x == i64::MIN && y == -1) => {
-            let r = if remainder { x % y } else { x / y };
-            Ok(Value::fixnum(r).expect("a quotient or remainder of fixnums fits"))
-        }
-        _ => Err(Error::scheme(format!(
-            "{name}: bignum division is not supported yet"
-        ))),
-    }
+    // Truncating division, as R7RS's quotient and remainder are.
+    let result = if remainder { &x % &y } else { &x / &y };
+    Ok(cx.integer_raw(&result)?)
 }
 
 fn quotient<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -128,6 +120,18 @@ fn quotient<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error>
 }
 fn remainder<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     division(cx, args, "remainder", true)
+}
+
+/// `modulo`: the remainder of division rounding towards negative infinity,
+/// with the sign of the divisor.
+fn modulo<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let r = division(cx, args, "modulo", true)?;
+    let (r_sign, divisor_sign) = (sign(cx, "modulo", r)?, sign(cx, "modulo", args[1])?);
+    if r_sign != 0 && r_sign != divisor_sign {
+        cx.arith(Arith::Add, r, args[1])
+    } else {
+        Ok(r)
+    }
 }
 
 fn cons<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -856,6 +860,7 @@ impl<S: Strategy> Cx<S> {
             (">=", at_least(1), ge),
             ("quotient", Arity::exactly(2), quotient),
             ("remainder", Arity::exactly(2), remainder),
+            ("modulo", Arity::exactly(2), modulo),
             ("cons", Arity::exactly(2), cons),
             ("car", Arity::exactly(1), car),
             ("cdr", Arity::exactly(1), cdr),

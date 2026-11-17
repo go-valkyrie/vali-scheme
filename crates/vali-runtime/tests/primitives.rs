@@ -315,3 +315,30 @@ fn number_and_type_predicates() {
     let yes = cx.call(&procedure, &[car]).unwrap();
     assert_eq!(yes.as_boolean(), Some(true));
 }
+
+#[test]
+fn integer_division() {
+    let mut cx = cx();
+    let cases = [
+        ("quotient", "17 5", "3"),
+        ("quotient", "-17 5", "-3"),
+        ("remainder", "-17 5", "-2"),
+        ("modulo", "-17 5", "3"),
+        ("modulo", "17 -5", "-3"),
+        ("modulo", "-15 5", "0"),
+        (
+            "quotient",
+            "123456789012345678901234567890 1000000000000",
+            "123456789012345678",
+        ),
+        (
+            "remainder",
+            "123456789012345678901234567890 1000000000000",
+            "901234567890",
+        ),
+        ("quotient", "-1152921504606846976 -1", "1152921504606846976"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+}

@@ -112,4 +112,4 @@ macro_rules! arithmetic {
     )*};
 }
 
-arithmetic!(Add add, Sub sub, Mul mul);
+arithmetic!(Add add, Sub sub, Mul mul, Div div, Rem rem);
