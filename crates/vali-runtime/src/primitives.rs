@@ -542,6 +542,11 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("%record?", Arity::exactly(2), records::is_record),
         ("%record-ref", Arity::exactly(3), records::record_ref),
         ("%record-set!", Arity::exactly(4), records::record_set),
+        (
+            "%native-procedure",
+            Arity::exactly(2),
+            crate::bridge::native_procedure,
+        ),
     ];
     table.extend(crate::numbers::table());
     table.extend(crate::strings::table());

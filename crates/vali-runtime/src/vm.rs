@@ -950,13 +950,22 @@ impl<S: Strategy> Cx<S> {
         }
     }
 
-    /// Binds each function of `library` as a global, by its name.
+    /// A procedure calling `f`.
+    pub(crate) fn bridge_procedure(
+        &mut self,
+        f: std::sync::Arc<crate::bridge::NativeFunction>,
+    ) -> Result<Value, Error> {
+        let code = Box::new(Code::bridge(f));
+        let pointer = &*code as *const Code<S>;
+        self.natives.push(code);
+        Ok(self.closure_raw(pointer, &[])?)
+    }
+
+    /// Binds each function of `library` as a global, by its name, for
+    /// programs that import nothing: otherwise, serve it through the loader.
     pub fn define_globals(&mut self, library: &crate::bridge::NativeLibrary) -> Result<(), Error> {
         for f in library.functions() {
-            let code = Box::new(Code::bridge(std::sync::Arc::clone(f)));
-            let pointer = &*code as *const Code<S>;
-            self.natives.push(code);
-            let closure = self.closure_raw(pointer, &[])?;
+            let closure = self.bridge_procedure(std::sync::Arc::clone(f))?;
             // SAFETY: the cell belongs to this isolate.
             unsafe {
                 let cell = self.global_cell(f.name());

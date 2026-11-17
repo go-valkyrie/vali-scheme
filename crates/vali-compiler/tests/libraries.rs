@@ -24,10 +24,7 @@ impl Loader for Map {
             .0
             .iter()
             .find(|(n, _)| *n == wanted)
-            .map(|(n, text)| Source {
-                identity: Identity::new(&format!("lib:{n}")),
-                text: (*text).to_owned(),
-            }))
+            .map(|(n, text)| Source::scheme(Identity::new(&format!("lib:{n}")), *text)))
     }
 }
 

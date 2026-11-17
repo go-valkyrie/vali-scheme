@@ -66,6 +66,9 @@ pub struct Program {
     /// What syntax objects at run time need, if the program or a library
     /// uses them: [`load`] gives it to the isolate.
     pub syntax: Option<SyntaxData>,
+    /// The native libraries among `libraries`, which [`load`] registers
+    /// with the isolate before their modules run (ADR 0016 #8).
+    pub natives: Vec<(Identity, std::sync::Arc<vali_runtime::NativeLibrary>)>,
 }
 
 /// The scopes, bindings and compiled patterns and templates that syntax
@@ -185,6 +188,11 @@ fn build(
         names[i].push(name);
     }
     let mut libraries = Vec::new();
+    let natives = graph
+        .libraries
+        .iter()
+        .filter_map(|l| Some((l.identity.clone(), l.native.clone()?)))
+        .collect();
     for (library, names) in graph.libraries.iter().zip(names) {
         for name in names {
             expander.name_next(name);
@@ -204,6 +212,7 @@ fn build(
         libraries,
         body,
         syntax,
+        natives,
     })
 }
 
@@ -217,6 +226,9 @@ pub fn load<S: vali_runtime::Strategy>(
     phase::install(cx)?;
     if let Some(SyntaxData(shared)) = program.syntax {
         cx.set_expander_data(Some(Box::new(shared)));
+    }
+    for (identity, library) in program.natives {
+        cx.register_native_library(identity.as_str(), library);
     }
     for (identity, module) in program.libraries {
         if cx.library(identity.as_str()).is_some() {

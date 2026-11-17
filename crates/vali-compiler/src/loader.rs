@@ -44,13 +44,71 @@ impl fmt::Display for Identity {
     }
 }
 
-/// A library's source, as a loader serves it.
+/// A library as a loader serves it: Scheme source, or a native library of
+/// Rust functions (ADR 0016).
 #[derive(Clone, Debug)]
 pub struct Source {
     /// The library's identity.
     pub identity: Identity,
-    /// Its text, holding one library form.
+    /// Its text, holding one library form; empty for a native library.
     pub text: String,
+    /// The native library, if it is one.
+    pub native: Option<Arc<vali_runtime::NativeLibrary>>,
+}
+
+impl Source {
+    /// A library's Scheme source.
+    pub fn scheme(identity: Identity, text: impl Into<String>) -> Source {
+        Source {
+            identity,
+            text: text.into(),
+            native: None,
+        }
+    }
+
+    /// A native library. The compiled program carries it, and loading the
+    /// program into an isolate binds its functions there.
+    pub fn native(identity: Identity, library: Arc<vali_runtime::NativeLibrary>) -> Source {
+        Source {
+            identity,
+            text: String::new(),
+            native: Some(library),
+        }
+    }
+}
+
+/// A native library's form: a library whose variables are its functions,
+/// as `%native-procedure` finds them in the isolate (ADR 0016 #8).
+fn native_form(identity: &Identity, library: &vali_runtime::NativeLibrary) -> String {
+    let symbol = |s: &str| format!("|{}|", s.replace('\\', "\\\\").replace('|', "\\|"));
+    let string = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let name: Vec<String> = library
+        .name()
+        .iter()
+        .map(|part| match part.parse::<u64>() {
+            Ok(_) => part.clone(),
+            Err(_) => symbol(part),
+        })
+        .collect();
+    let functions = library.functions();
+    let exports: Vec<String> = functions.iter().map(|f| symbol(f.name())).collect();
+    let definitions: Vec<String> = functions
+        .iter()
+        .map(|f| {
+            format!(
+                "(define {} (%native-procedure {} {}))",
+                symbol(f.name()),
+                string(identity.as_str()),
+                string(f.name())
+            )
+        })
+        .collect();
+    format!(
+        "(define-library ({}) (import (vali core) (vali primitive)) (export {}) (begin {}))",
+        name.join(" "),
+        exports.join(" "),
+        definitions.join(" ")
+    )
 }
 
 /// Why a loader could not load a library: one it has, but cannot read.
@@ -165,10 +223,10 @@ fn standard(name: &LibraryName) -> Option<Source> {
     let (parts, text) = STANDARD
         .iter()
         .find(|(parts, _)| *name == LibraryName::new(parts.iter().copied()))?;
-    Some(Source {
-        identity: Identity::new(&format!("vali:{}", parts.join("/"))),
-        text: (*text).to_owned(),
-    })
+    Some(Source::scheme(
+        Identity::new(&format!("vali:{}", parts.join("/"))),
+        *text,
+    ))
 }
 
 /// A library in the import graph.
@@ -176,6 +234,8 @@ fn standard(name: &LibraryName) -> Option<Source> {
 pub(crate) struct Library {
     pub(crate) identity: Identity,
     pub(crate) form: LibraryForm,
+    /// The native library, if it is one.
+    pub(crate) native: Option<Arc<vali_runtime::NativeLibrary>>,
 }
 
 /// A program, read: the libraries it defines itself, its imports, and its
@@ -257,7 +317,11 @@ pub(crate) async fn fetch_async(
 
 /// Reads one library form, named `name`, from a loader's source.
 fn read_library(name: &LibraryName, source: &Source) -> Result<LibraryForm> {
-    let read = vali_syntax::read(&source.text, SourceId(0));
+    let text = match &source.native {
+        Some(library) => native_form(&source.identity, library),
+        None => source.text.clone(),
+    };
+    let read = vali_syntax::read(&text, SourceId(0));
     if let Some(e) = read.errors.first() {
         return Err(error(
             format!("{}: read: {}", source.identity, e.kind),
@@ -307,10 +371,11 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
             continue;
         }
         // Standard libraries come first, so no loader can replace them.
-        let (library_identity, form) = match local.get(&name) {
+        let (library_identity, form, native) = match local.get(&name) {
             Some(form) => (
                 Identity::new(&format!("{identity}#{name}")),
                 (*form).clone(),
+                None,
             ),
             None => {
                 let source = match standard(&name) {
@@ -331,7 +396,7 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
                     continue;
                 }
                 let form = read_library(&name, &source)?;
-                (source.identity, form)
+                (source.identity, form, source.native)
             }
         };
         for set in form.imports.iter().rev() {
@@ -343,6 +408,7 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
         found.push(Library {
             identity: library_identity,
             form,
+            native,
         });
     }
     order(found, by_name)
@@ -441,10 +507,7 @@ mod tests {
                 .0
                 .iter()
                 .find(|(n, _)| *n == wanted)
-                .map(|(n, text)| Source {
-                    identity: Identity::new(&format!("test:{n}")),
-                    text: (*text).to_owned(),
-                }))
+                .map(|(n, text)| Source::scheme(Identity::new(&format!("test:{n}")), *text)))
         }
     }
 

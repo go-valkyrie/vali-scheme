@@ -664,6 +664,13 @@ impl<T: RustObject> IntoScheme for Obj<T> {
 }
 
 impl<S: Strategy> Cx<S> {
+    /// Registers `library` under `identity`, so the library's compiled form
+    /// finds its functions (ADR 0016 #8). Loading a compiled program does
+    /// this for the native libraries it imports.
+    pub fn register_native_library(&mut self, identity: &str, library: Arc<NativeLibrary>) {
+        self.native_libraries.insert(identity.into(), library);
+    }
+
     /// Calls `f` with the Rust object `obj` refers to.
     pub fn with<T: RustObject, R>(
         &mut self,
@@ -900,6 +907,43 @@ unsafe fn receiver(
         ),
         BorrowError::Borrowed => Error::scheme(format!("{name} is already borrowed")),
     })
+}
+
+/// `(%native-procedure identity name)`: the function `name` of the native
+/// library registered under `identity`, as a procedure. Where no such
+/// library is registered, as in the expander's isolate, a stub that raises
+/// when called: native functions cannot run at expansion time (ADR 0009
+/// #17).
+pub(crate) fn native_procedure<S: Strategy>(
+    cx: &mut Cx<S>,
+    args: &[Value],
+) -> Result<Value, Error> {
+    // SAFETY: the arguments are valid values.
+    let (identity, name) = unsafe { (Isolate::string(cx, args[0]), Isolate::string(cx, args[1])) };
+    let (Some(identity), Some(name)) = (identity, name) else {
+        return Err(Error::scheme("%native-procedure: expected two strings"));
+    };
+    let function = match cx.native_libraries.get(&*identity) {
+        Some(library) => library
+            .functions()
+            .iter()
+            .find(|f| *f.name == *name)
+            .cloned()
+            .ok_or_else(|| Error::scheme(format!("{identity} has no function {name}")))?,
+        None => {
+            let message = format!("{name}: cannot be called at expansion time");
+            Arc::new(NativeFunction {
+                name: name.into(),
+                arity: Arity {
+                    required: 0,
+                    optional: 0,
+                    rest: true,
+                },
+                call: Box::new(move |_, _| Err(Error::scheme(message.clone()))),
+            })
+        }
+    };
+    cx.bridge_procedure(function)
 }
 
 /// A library of Rust functions and methods, built once and bound into any

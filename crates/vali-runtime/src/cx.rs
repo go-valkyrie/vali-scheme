@@ -77,6 +77,9 @@ pub struct Cx<S: Strategy> {
     pub(crate) output: String,
     /// The Rust objects Scheme holds (ADR 0016).
     pub(crate) objects: crate::rust_objects::Objects,
+    /// The native libraries loaded programs brought, by identity, which
+    /// `%native-procedure` finds functions in.
+    pub(crate) native_libraries: HashMap<Box<str>, Arc<crate::bridge::NativeLibrary>>,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -144,6 +147,7 @@ impl<S: Strategy> Cx<S> {
             values_type: None,
             output: String::new(),
             objects: Default::default(),
+            native_libraries: HashMap::new(),
         }
     }
 

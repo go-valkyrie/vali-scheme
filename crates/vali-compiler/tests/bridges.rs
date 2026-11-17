@@ -148,3 +148,74 @@ fn errors_name_the_procedure_and_argument() {
         Ok("7")
     );
 }
+
+/// Serves the native library as `(test bridges)`, and a Scheme library
+/// that uses it as `(test wrapper)`.
+struct Natives(std::sync::Arc<NativeLibrary>);
+
+impl Loader for Natives {
+    fn load(
+        &self,
+        name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        Ok(match name.to_string().as_str() {
+            "(test bridges)" => Some(Source::native(
+                Identity::new("native:test/bridges"),
+                std::sync::Arc::clone(&self.0),
+            )),
+            "(test wrapper)" => Some(Source::scheme(
+                Identity::new("lib:test/wrapper"),
+                "(define-library (test wrapper)
+                   (import (scheme base) (test bridges))
+                   (export twice)
+                   (begin (define (twice n) (counter-value (make-counter (* 2 n))))))",
+            )),
+            _ => None,
+        })
+    }
+}
+
+fn run_imported(source: &str) -> Result<String, String> {
+    let loader = Natives(std::sync::Arc::new(library()));
+    let program = vali_compiler::compile_program(source, &Identity::new("main"), &loader)
+        .map_err(|e| e.message)?;
+    let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+    cx.install_primitives().map_err(|e| e.to_string())?;
+    let id = vali_compiler::load(&mut cx, program).map_err(|e| e.to_string())?;
+    let result = cx.run(id).map_err(|e| e.to_string())?;
+    cx.write_string(&result).map_err(|e| e.to_string())
+}
+
+#[test]
+fn native_libraries_come_through_the_loader() {
+    assert_eq!(
+        run_imported(
+            "(import (scheme base) (test bridges))
+             (define c (make-counter 1))
+             (counter-add! c 41)
+             (list (counter-value c) (counter? c) (sum 1 2 3))"
+        )
+        .as_deref(),
+        Ok("(42 #t 6)")
+    );
+    assert_eq!(
+        run_imported("(import (scheme base) (prefix (test bridges) b:)) (b:sum 4 5)").as_deref(),
+        Ok("9")
+    );
+    assert_eq!(
+        run_imported("(import (scheme base) (test wrapper)) (twice 21)").as_deref(),
+        Ok("42")
+    );
+    // Native functions cannot run at expansion time (ADR 0009 #17).
+    let error = run_imported(
+        "(import (scheme base) (test bridges))
+         (define-syntax m (lambda (stx) (sum 1 2) (syntax 1)))
+         (m)",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("sum: cannot be called at expansion time"),
+        "{error}"
+    );
+}
