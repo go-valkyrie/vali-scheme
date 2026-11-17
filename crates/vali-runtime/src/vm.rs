@@ -36,7 +36,7 @@ use vali_num::Integer;
 
 /// The bytecode position stored in the entry frame's header: returning to
 /// it leaves the VM.
-const ENTRY: u64 = u64::MAX;
+pub(crate) const ENTRY: u64 = u64::MAX;
 
 /// Set in a frame's position word when the frame is the first in its
 /// segment, so returning from it drops back to the previous segment.
@@ -297,7 +297,18 @@ impl<S: Strategy> Cx<S> {
         let closure = self.closure_raw(body, &[])?;
         let result = self.execute(closure, &[])?;
         // SAFETY: the VM returns valid values.
-        Ok(unsafe { self.root(result) })
+        let result = unsafe { self.root(result) };
+        // Every return to the host is a safepoint.
+        if S::COUNTS {
+            self.epoch(&[]);
+        }
+        Ok(result)
+    }
+
+    /// The handlers of the `%catch`es waiting for their thunks, which an
+    /// epoch counts as the stack's.
+    pub(crate) fn catch_handlers(&self) -> impl Iterator<Item = Value> + '_ {
+        self.catches.iter().map(|c| c.handler)
     }
 
     /// The value of a loaded module's variable, if it has one.
@@ -392,7 +403,11 @@ impl<S: Strategy> Cx<S> {
             .collect::<Result<Vec<_>, _>>()?;
         let result = self.execute(procedure, &args)?;
         // SAFETY: the VM returns valid values.
-        Ok(unsafe { self.root(result) })
+        let result = unsafe { self.root(result) };
+        if S::COUNTS {
+            self.epoch(&[]);
+        }
+        Ok(result)
     }
 
     /// The interned symbol named `name`.
@@ -480,7 +495,7 @@ impl<S: Strategy> Cx<S> {
     /// # Safety
     ///
     /// `v` must be a valid value.
-    unsafe fn procedure_code<'a>(&self, v: Value) -> Result<&'a Code<S>, Error> {
+    pub(crate) unsafe fn procedure_code<'a>(&self, v: Value) -> Result<&'a Code<S>, Error> {
         if v.tag() != Tag::Closure {
             return Err(Error::scheme(format!("not a procedure: {v:?}")));
         }
@@ -1017,6 +1032,11 @@ impl<S: Strategy> Cx<S> {
                         continue;
                     }
                     Next::Call { base, argc, resume } => {
+                        // A call is a safepoint.
+                        if S::COUNTS && fp != top && S::epoch_due(self.heap()) {
+                            let roots = self.stack_roots(fp);
+                            self.epoch(&roots);
+                        }
                         let procedure = slot(fp, base + 3);
                         let callee = attempt!(self.procedure_code(procedure));
                         match callee.kind {
@@ -1215,6 +1235,13 @@ impl<S: Strategy> Cx<S> {
                         let caller = *fp as *mut u64;
                         let base = ((position >> 32) & 0xFFFF) as usize;
                         set(caller, base + 3, value);
+                        if S::COUNTS {
+                            // The callee's header, in the caller's slots,
+                            // is not values: an epoch scans those slots.
+                            set(caller, base, Value::UNSPECIFIED);
+                            set(caller, base + 1, Value::UNSPECIFIED);
+                            set(caller, base + 2, Value::UNSPECIFIED);
+                        }
                         if position & BOUNDARY != 0 {
                             limit = self.pop_segment();
                         }
@@ -1370,7 +1397,13 @@ impl<S: Strategy> Cx<S> {
                             pc += 1;
                         }
                         Opcode::Jump => {
-                            pc = (pc + 1).wrapping_add_signed(field_e_signed(word) as isize);
+                            let offset = field_e_signed(word);
+                            // A loop's backward jump is a safepoint.
+                            if S::COUNTS && offset < 0 && S::epoch_due(self.heap()) {
+                                let roots = self.stack_roots(fp);
+                                self.epoch(&roots);
+                            }
+                            pc = (pc + 1).wrapping_add_signed(offset as isize);
                         }
                         Opcode::If => branch!(slot(fp, a).is_true()),
                         Opcode::IfEq => branch!(slot(fp, a) == slot(fp, b)),

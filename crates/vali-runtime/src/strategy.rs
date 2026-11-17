@@ -76,6 +76,53 @@ pub trait References: Allocate {
     /// cell: the store hook (ADR 0003). Either may be any value.
     #[inline(always)]
     fn write(_heap: &mut Self::Heap, _old: crate::Value, _new: crate::Value) {}
+
+    // Epochs, for counting strategies: the runtime runs them, scanning the
+    // stack and walking what it frees.
+
+    /// Whether the strategy counts references, so the runtime runs epochs
+    /// and keeps every frame slot a valid value.
+    const COUNTS: bool = false;
+
+    /// Whether an epoch is due at the next safepoint.
+    #[inline(always)]
+    fn epoch_due(_heap: &Self::Heap) -> bool {
+        false
+    }
+
+    /// The zero-count table, taken: objects whose count reached zero.
+    fn take_zct(_heap: &mut Self::Heap) -> Vec<crate::Value> {
+        Vec::new()
+    }
+
+    /// Whether `v` waits in the zero-count table.
+    fn in_zct(_heap: &Self::Heap, _v: crate::Value) -> bool {
+        false
+    }
+
+    /// `v`, taken from the zero-count table, no longer waits there.
+    fn leave_zct(_heap: &mut Self::Heap, _v: crate::Value) {}
+
+    /// `v`'s count.
+    fn count(_heap: &Self::Heap, _v: crate::Value) -> usize {
+        1
+    }
+
+    /// Counts `v` down as a reference from an object being freed goes,
+    /// returning whether its count reached zero.
+    fn decrement(_heap: &mut Self::Heap, _v: crate::Value) -> bool {
+        false
+    }
+
+    /// Frees `v`, of `words` words.
+    ///
+    /// # Safety
+    ///
+    /// Nothing may refer to `v`, and nothing may use it afterwards.
+    unsafe fn free(_heap: &mut Self::Heap, _v: crate::Value, _words: usize) {}
+
+    /// An epoch has finished.
+    fn epoch_done(_heap: &mut Self::Heap) {}
 }
 
 /// A memory strategy: every capability trait together.

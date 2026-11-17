@@ -1,7 +1,9 @@
 //! Compiling Scheme and running it on the tier-0 VM.
 
 use vali_compiler::{Identity, LibraryName, LoadError, Loader, Source, compile};
-use vali_runtime::{Cx, Error, HeapConfig, NoCollection};
+use vali_runtime::{
+    Cx, DeferredHeadered, DeferredSideCounts, Error, HeapConfig, NoCollection, Strategy,
+};
 
 /// Only the standard libraries.
 struct NoLibraries;
@@ -16,15 +18,37 @@ impl Loader for NoLibraries {
     }
 }
 
-/// Compiles and runs `source`, returning its value as `write` prints it.
-fn run(source: &str) -> Result<String, Error> {
+/// Compiles and runs `source` under strategy `S`, returning its value as
+/// `write` prints it.
+fn run_under<S: Strategy>(source: &str) -> Result<String, Error> {
     let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
         .unwrap_or_else(|e| panic!("{source}\n{e}"));
-    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    let mut cx = Cx::<S>::new(&HeapConfig::default());
     cx.install_primitives()?;
     let id = vali_compiler::load(&mut cx, program)?;
     let result = cx.run(id)?;
     cx.write_string(&result)
+}
+
+/// Compiles and runs `source` under every strategy, which must agree: a
+/// strategy never changes what a program means (ADR 0003 #3).
+fn run(source: &str) -> Result<String, Error> {
+    let result = run_under::<NoCollection>(source);
+    let describe = |r: &Result<String, Error>| match r {
+        Ok(s) => s.clone(),
+        Err(e) => format!("error: {e}"),
+    };
+    for (name, other) in [
+        ("deferred", run_under::<DeferredHeadered>(source)),
+        ("deferred-side", run_under::<DeferredSideCounts>(source)),
+    ] {
+        assert_eq!(
+            describe(&other),
+            describe(&result),
+            "{source}\nunder {name}"
+        );
+    }
+    result
 }
 
 fn check(cases: &[(&str, &str)]) {
@@ -891,4 +915,47 @@ fn syntax_objects_at_run_time() {
             "(made up)",
         ),
     ]);
+}
+
+/// Builds and sums a 20,000-element structure ten times: about 2 MiB each
+/// time, so epochs run mid-program, at calls and loops' backward jumps.
+const CHURN: &str = "
+    (define (build n)
+      (let loop ((i 0) (acc '()))
+        (if (= i n) acc (loop (+ i 1) (cons (vector i (list i i)) acc)))))
+    (define (sum xs)
+      (let loop ((xs xs) (t 0))
+        (if (null? xs) t (loop (cdr xs) (+ t (vector-ref (car xs) 0))))))
+    (let loop ((k 0) (total 0))
+      (if (= k 10) total (loop (+ k 1) (+ total (sum (build 20000))))))";
+
+#[test]
+fn epochs_run_mid_program() {
+    check(&[(CHURN, "1999900000")]);
+}
+
+/// The heap a program leaves behind under strategy `S`.
+fn bytes_after<S: Strategy>(source: &str) -> usize {
+    let program =
+        vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+    let mut cx = Cx::<S>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    let id = vali_compiler::load(&mut cx, program).unwrap();
+    cx.run(id).unwrap();
+    cx.bytes_used()
+}
+
+#[test]
+fn deferred_counting_reclaims_memory() {
+    let none = bytes_after::<NoCollection>(CHURN);
+    for (name, used) in [
+        ("deferred", bytes_after::<DeferredHeadered>(CHURN)),
+        ("deferred-side", bytes_after::<DeferredSideCounts>(CHURN)),
+    ] {
+        // Only one structure lives at a time, plus an epoch's garbage.
+        assert!(
+            used * 3 < none,
+            "{name}: {used} bytes, against {none} without collection"
+        );
+    }
 }

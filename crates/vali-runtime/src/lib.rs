@@ -11,6 +11,8 @@
 
 mod code;
 mod cx;
+mod deferred;
+mod epoch;
 mod handle;
 mod no_collection;
 mod objects;
@@ -31,6 +33,7 @@ mod vm;
 
 pub use code::{Code, ModuleId, NativeFn};
 pub use cx::Cx;
+pub use deferred::{Deferred, DeferredHeadered, DeferredHeap, DeferredSideCounts};
 pub use handle::{Error, Handle, SchemeError};
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};

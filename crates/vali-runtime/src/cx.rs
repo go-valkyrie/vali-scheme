@@ -149,6 +149,11 @@ impl<S: Strategy> Cx<S> {
         &self.heap
     }
 
+    /// The strategy's state, to change.
+    pub(crate) fn heap_mut(&mut self) -> &mut S::Heap {
+        &mut self.heap
+    }
+
     /// How many bytes the heap has taken from the system.
     pub fn bytes_used(&self) -> usize {
         S::bytes_used(&self.heap)

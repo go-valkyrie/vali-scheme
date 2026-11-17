@@ -16,9 +16,6 @@
 //! Objects larger than `LARGE_OBJECT_BYTES` are allocated and freed one by
 //! one.
 
-// The counting strategies, which use this heap, come next.
-#![allow(dead_code, reason = "used by the counting strategies")]
-
 use std::fmt;
 use std::ptr::{self, NonNull};
 
@@ -68,8 +65,9 @@ struct Page {
     block_bytes: usize,
     /// Where the blocks start.
     blocks: *mut u8,
-    /// The side table, one byte per block, or null.
+    /// The side table, `stride` bytes per block, or null.
     side: *mut u8,
+    stride: usize,
     /// Blocks in use.
     used: usize,
     /// Freed blocks, each holding the next in its first word.
@@ -293,6 +291,7 @@ impl PageHeap {
                     } else {
                         side_table
                     },
+                    stride: side,
                     used: 0,
                     free: ptr::null_mut(),
                     bump: blocks,
@@ -344,7 +343,8 @@ impl PageHeap {
         }
     }
 
-    /// The side-table byte of `object`, on a pair page that has one.
+    /// The first side-table byte of `object`, on a pair page that has a
+    /// side table; the object's others follow it.
     ///
     /// # Safety
     ///
@@ -355,7 +355,7 @@ impl PageHeap {
         unsafe {
             let p = &*page;
             let index = (object as usize - p.blocks as usize) / p.block_bytes;
-            p.side.add(index)
+            p.side.add(index * p.stride)
         }
     }
 }
@@ -423,15 +423,18 @@ mod tests {
     }
 
     #[test]
-    fn side_tables_have_a_byte_per_block() {
-        let mut heap = PageHeap::new(PageSource::new(&HeapConfig::default()), 1);
+    fn side_tables_have_bytes_per_block() {
+        // Two bytes each: neighbours' bytes must not overlap.
+        let mut heap = PageHeap::new(PageSource::new(&HeapConfig::default()), 2);
         let a = heap.allocate(Space::Pair, 2).unwrap();
         let b = heap.allocate(Space::Pair, 2).unwrap();
         // SAFETY: both live on a pair page with a side table.
         unsafe {
             *PageHeap::side_byte(a.as_ptr()) = 7;
+            *PageHeap::side_byte(a.as_ptr()).add(1) = 8;
             *PageHeap::side_byte(b.as_ptr()) = 9;
             assert_eq!(*PageHeap::side_byte(a.as_ptr()), 7);
+            assert_eq!(*PageHeap::side_byte(a.as_ptr()).add(1), 8);
             assert_eq!(*PageHeap::side_byte(b.as_ptr()), 9);
         }
     }

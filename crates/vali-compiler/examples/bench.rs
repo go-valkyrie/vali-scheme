@@ -1,10 +1,14 @@
 //! The tier-0 benchmarks of `vali-runtime`'s `bench` example, compiled
 //! from Scheme source instead of assembled by hand. Run with
-//! `cargo run --release -p vali-compiler --example bench`.
+//! `cargo run --release -p vali-compiler --example bench`, with
+//! `--strategy deferred` or `--strategy deferred-side` for a counting
+//! strategy.
 
 use std::time::Instant;
 
-use vali_runtime::{Cx, Handle, HeapConfig, NoCollection};
+use vali_runtime::{
+    Cx, DeferredHeadered, DeferredSideCounts, Handle, HeapConfig, NoCollection, Strategy,
+};
 
 const SOURCE: &str = "
 (define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
@@ -30,11 +34,11 @@ const SOURCE: &str = "
 
 /// Runs `run` once to warm up, then five times, and prints the best time
 /// and the time per Scheme call.
-fn time(
-    cx: &mut Cx<NoCollection>,
+fn time<S: Strategy>(
+    cx: &mut Cx<S>,
     label: &str,
     expected: i64,
-    mut run: impl FnMut(&mut Cx<NoCollection>) -> Option<i64>,
+    mut run: impl FnMut(&mut Cx<S>) -> Option<i64>,
 ) {
     let before = cx.fuel_used();
     assert_eq!(run(cx), Some(expected), "{label}");
@@ -56,12 +60,29 @@ fn time(
 
 fn main() {
     let module = vali_compiler::compile(SOURCE, "bench").unwrap();
-    if std::env::args().any(|a| a == "--listing") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--listing") {
         for function in &module.functions {
             println!("{}", vali_bytecode::disassemble(function));
         }
     }
-    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    // `--strategy none|deferred|deferred-side`: the memory strategy.
+    let strategy = args
+        .iter()
+        .position(|a| a == "--strategy")
+        .and_then(|i| args.get(i + 1))
+        .map_or("none", String::as_str);
+    println!("strategy: {strategy}");
+    match strategy {
+        "none" => bench::<NoCollection>(module),
+        "deferred" => bench::<DeferredHeadered>(module),
+        "deferred-side" => bench::<DeferredSideCounts>(module),
+        other => panic!("no strategy {other}"),
+    }
+}
+
+fn bench<S: Strategy>(module: vali_bytecode::Module) {
+    let mut cx = Cx::<S>::new(&HeapConfig::default());
     cx.install_primitives().unwrap();
     let id = cx.load(module).unwrap();
     cx.run(id).unwrap();

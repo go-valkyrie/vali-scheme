@@ -2,9 +2,6 @@
 //! fields that hold values. Freeing an object, cycle collection and tracing
 //! all walk this one description.
 
-// Freeing, which uses all of this, comes with the counting strategies.
-#![allow(dead_code, reason = "used by the counting strategies")]
-
 use vali_abi::{Header, Tag, TypeCode};
 
 use crate::cx::{Cx, get};
