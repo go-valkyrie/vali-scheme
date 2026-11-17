@@ -1286,6 +1286,110 @@ fn reading_and_writing() {
 }
 
 #[test]
+fn continuations() {
+    let prelude = "(import (scheme base) (only (vali primitive) %call/cc %continue %catch))";
+    let cases = [
+        // Returning normally, through the sealed caller.
+        "(+ 1 (%call/cc (lambda (k) 41)))",
+        // Escaping.
+        "(define (find-first pred xs)
+           (%call/cc (lambda (k) (for-each (lambda (x) (if (pred x) (%continue k x))) xs) #f)))
+         (find-first even? '(1 3 4 5))",
+        // In tail position, the continuation is the caller's.
+        "(define (f) (%call/cc (lambda (k) (%continue k 5) 6))) (list (f) (f))",
+        // Re-entered, many times.
+        "(define saved #f)
+         (define n 0)
+         (let ((v (%call/cc (lambda (k) (set! saved k) 0))))
+           (set! n (+ n 1))
+           (if (< v 3) (%continue saved (+ v 1)) (list v n)))",
+        // A local assigned after the capture keeps its value when the
+        // continuation is re-entered: it is one location.
+        "(let ((n 0))
+           (let ((k (%call/cc (lambda (k) k))))
+             (set! n (+ n 1))
+             (if (< n 3) (%continue k k) n)))",
+        // Captured deep enough to chain segments, then re-entered.
+        "(define r '())
+         (define k2 #f)
+         (define (deep n) (if (= n 0) (%call/cc (lambda (k) (set! k2 k) 0)) (+ 1 (deep (- n 1)))))
+         (let ((x (deep 20000)))
+           (set! r (cons x r))
+           (if (< (length r) 3) (%continue k2 (length r)) r))",
+        // Captured inside a capture's receiver.
+        "(define outer #f)
+         (define count 0)
+         (let ((v (%call/cc (lambda (k1) (+ 10 (%call/cc (lambda (k2) (set! outer k1) (%continue k2 1))))))))
+           (set! count (+ count 1))
+           (if (= count 1) (%continue outer 100) (list v count)))",
+        // A catch whose thunk was re-entered is waiting again.
+        "(define k3 #f)
+         (define count 0)
+         (define result
+           (%catch (lambda ()
+                     (let ((v (%call/cc (lambda (k) (set! k3 k) 0))))
+                       (if (> v 0) (raise v) v)))
+                   (lambda (c) (list 'caught c))))
+         (set! count (+ count 1))
+         (if (= count 1) (%continue k3 7) (list result count))",
+        // Raising inside a receiver reaches a catch whose frame is sealed.
+        "(list (%catch (lambda () (+ 1 (%call/cc (lambda (k) (raise 'up))))) (lambda (c) (list 'caught c))))",
+        // A generator: two loops passing control back and forth.
+        "(define (make-gen xs)
+           (define return #f)
+           (define resume #f)
+           (define (start)
+             (for-each (lambda (x) (%call/cc (lambda (k) (set! resume k) (%continue return x)))) xs)
+             (%continue return 'done))
+           (lambda ()
+             (%call/cc (lambda (r)
+               (set! return r)
+               (if resume (%continue resume #f) (start))))))
+         (define g (make-gen '(a b c)))
+         (let loop ((acc '()))
+           (let ((x (g)))
+             (if (eq? x 'done) (reverse acc) (loop (cons x acc)))))",
+    ];
+    let expected = [
+        "42",
+        "4",
+        "(5 5)",
+        "(3 4)",
+        "3",
+        "(20002 20001 20000)",
+        "(100 2)",
+        "((caught 7) 2)",
+        "((caught up))",
+        "(a b c)",
+    ];
+    for (source, expected) in cases.iter().zip(expected) {
+        let source = format!("{prelude}{source}");
+        match run(&source) {
+            Ok(result) => assert_eq!(result, expected, "{source}"),
+            Err(e) => panic!("{source}\n{e}"),
+        }
+    }
+    let errors = [
+        (
+            "(%call/cc car)",
+            "%call/cc: expected a Scheme procedure of one argument",
+        ),
+        (
+            "(%call/cc (lambda () 1))",
+            "%call/cc: expected a Scheme procedure of one argument",
+        ),
+        ("(%continue 1 2)", "%continue: expected a continuation"),
+    ];
+    for (source, message) in errors {
+        let source = format!("{prelude}{source}");
+        match run(&source) {
+            Ok(result) => panic!("{source}: expected an error, got {result}"),
+            Err(e) => assert!(e.to_string().contains(message), "{source}: {e}"),
+        }
+    }
+}
+
+#[test]
 fn console_ports() {
     let program = vali_compiler::compile_program(
         "(import (scheme base) (scheme write))
@@ -1610,11 +1714,16 @@ fn frames_leave_nothing_counted() {
     // Constants live as long as their module, so these programs quote
     // nothing that is allocated.
     let prelude = "
+        (import (scheme base) (only (vali primitive) %call/cc %continue %catch))
         (define (ring) (let ((p (list 1 2 3))) (set-cdr! (cdr (cdr p)) p) p))
         (define (rep f n) (let loop ((i 0)) (if (< i n) (begin (f) (loop (+ i 1))))))
         (define (deep n) (if (= n 0) (list (ring)) (cons (ring) (deep (- n 1)))))
         (define (rest . xs) (cons (ring) xs))
         (define (tail-native x) (list x (ring)))
+        (define (deep-k n)
+          (if (= n 0)
+              (%call/cc (lambda (k) (list (ring) k)))
+              (cons (ring) (deep-k (- n 1)))))
     ";
     let repeated = [
         "(ring)",
@@ -1626,6 +1735,16 @@ fn frames_leave_nothing_counted() {
         "(tail-native (ring))",
         "(guard (e (#t (ring))) (raise (ring)))",
         "(guard (e (#t e)) (car (ring)) (vector-ref (vector (ring)) 5))",
+        // Continuations: returned to, escaped through, re-entered, in a
+        // cycle with what holds them, and sealing frames deep enough to
+        // chain segments, all copied back.
+        "(%call/cc (lambda (k) (ring)))",
+        "(list (%call/cc (lambda (k) (%continue k (ring)))))",
+        "(let ((p (list 1))) (%call/cc (lambda (k) (set-car! p k))) (cons p (ring)))",
+        "(let ((n 0)) (let ((k (%call/cc (lambda (k) k)))) (set! n (+ n 1)) (if (< n 3) (%continue k k) (ring))))",
+        "(length (deep-k 30000))",
+        "(%catch (lambda () (%call/cc (lambda (k) (%continue k (ring))))) (lambda (c) c))",
+        "(%catch (lambda () (list (%call/cc (lambda (k) (raise (ring)))))) (lambda (c) c))",
     ];
     for body in repeated {
         // Each must run, or it would check nothing.

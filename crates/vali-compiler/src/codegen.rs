@@ -8,8 +8,7 @@
 //!
 //! Variables follow ADR 0005 #4: module variables for top-level
 //! definitions, frame slots for locals, closure free variables for captured
-//! locals that are never assigned, and boxes only for captured locals that
-//! are.
+//! locals that are never assigned, and boxes for locals that are.
 
 use std::collections::{HashMap, HashSet};
 

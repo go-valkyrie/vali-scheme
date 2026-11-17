@@ -6,6 +6,7 @@
 - **Amended:** 2026-11-16, bindings that are never assigned are constants or direct slots; cells only for assigned locals captured by closures
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
 - **Amended:** 2026-11-17, variables are defined or imported, and belong to library instances (item 4)
+- **Amended:** 2026-11-17, every assigned local is boxed, captured or not, so re-entering a continuation shares it (item 4)
 - **Related:** 0001 (artifacts), 0002 (values), 0004 (frames), 0006 (versioning), 0009 (untrusted code), 0012 (distribution format)
 
 ## Context
@@ -43,7 +44,7 @@ Options **B and D**, as follows.
    **Bindings are cells only when they must be.** The compiler knows which bindings are ever `set!`:
    - **A binding that is never assigned** is a constant, read straight from the constant pool or inlined. Calls to a known procedure that is never assigned are direct calls. The interface records which exports are constant (ADR 0001), so this holds across libraries.
    - **An assigned library variable** is a plain slot in its module's variable table, read and written with ordinary loads and stores.
-   - **Only an assigned local variable captured by a closure** lives in a heap-allocated box (assignment conversion).
+   - **An assigned local variable** lives in a heap-allocated box (assignment conversion). At first only captured ones did, but re-entering a continuation copies the frames it sealed (ADR 0004 #8), and a variable in a slot would be copied with them, so a `set!` after the capture would be undone by re-entering it. Loops rebind rather than assign, so their variables stay in slots. Flow analysis in the optimising compiler can unbox again what no continuation can copy.
 
    No variable access takes a lock. scheme-rs kept every global behind a lock and cloned it on each read, which cost a quarter of `fib`'s run time in our profiling.
 5. **Fast paths are in the instruction set** for what dominates Scheme loops: fixnum arithmetic with an overflow fallback, fixnum compare-and-branch, `car`, `cdr`, `null?`, `pair?`, `eq?`-and-branch, and vector access with a fixnum index. Generic operations call into the runtime function table, which the JIT shares.

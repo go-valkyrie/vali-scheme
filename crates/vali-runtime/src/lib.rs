@@ -11,6 +11,7 @@
 
 pub mod bridge;
 mod code;
+mod continuations;
 mod counting;
 mod cx;
 mod cycles;

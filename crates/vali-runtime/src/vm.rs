@@ -27,7 +27,7 @@ use crate::code::{Cell, Code, Instance, Kind, Loaded, ModuleId, NativeFn};
 use crate::cx::{Cx, get, put};
 use crate::handle::{Error, Handle, SchemeError};
 use crate::page::OutOfMemory;
-use crate::stack::{SEGMENT_WORDS, Segment};
+use crate::stack::{SEGMENT_WORDS, Segment, View};
 use crate::strategy::Strategy;
 use crate::trampoline::{self, Link};
 use crate::value::Value;
@@ -47,17 +47,32 @@ const BOUNDARY: u64 = 1 << 63;
 /// removes the innermost catch.
 const CATCH: u64 = 1 << 62;
 
+/// Set in a frame's position word when its caller is sealed in a
+/// continuation (`continuations`): returning from it copies the caller into
+/// the live stack first. Such a frame is the outermost live one, and the
+/// first in its segment.
+pub(crate) const UNDERFLOW: u64 = 1 << 61;
+
+/// Set in the resume word of the call `%call/cc` makes: once the
+/// receiver's frame is set up, the stack from its caller out is sealed.
+/// Never stored in a frame.
+const CAPTURE: u64 = 1 << 60;
+
 /// A `%catch` waiting for its thunk to return: where to call the handler
 /// if something is raised first.
+#[derive(Clone, Copy)]
 pub(crate) struct Catch {
     /// The frame that called `%catch`, and the `base` of that call.
-    fp: *mut u64,
-    base: usize,
+    pub(crate) fp: *mut u64,
+    pub(crate) base: usize,
     /// Where that frame resumes.
-    resume: u64,
-    /// How many stack segments there were.
-    segments: usize,
-    handler: Value,
+    pub(crate) resume: u64,
+    /// How many stack segments there were, while the frame is live.
+    pub(crate) segments: usize,
+    pub(crate) handler: Value,
+    /// The continuation whose own frames hold the frame, once it is
+    /// sealed; `#f` while it is live.
+    pub(crate) record: Value,
 }
 
 // SAFETY: the frame pointer points into this isolate's own stack, which
@@ -72,7 +87,7 @@ unsafe impl Send for Catch {}
 /// scans them, as the saved frame pointer and the 8-aligned return address
 /// beside it aren't either.
 fn position(resume: u64, base: usize) -> u64 {
-    ((resume & 0xFFFF_FFFF) << 3) | (base as u64) << 35 | (resume & (CATCH | BOUNDARY))
+    ((resume & 0xFFFF_FFFF) << 3) | (base as u64) << 35 | (resume & (CATCH | BOUNDARY | UNDERFLOW))
 }
 
 /// The `base` a position word records.
@@ -81,7 +96,7 @@ pub(crate) fn position_base(position: u64) -> usize {
 }
 
 /// Where the caller resumes, from a position word.
-fn position_resume(position: u64) -> u64 {
+pub(crate) fn position_resume(position: u64) -> u64 {
     (position >> 3) & 0xFFFF_FFFF
 }
 
@@ -140,7 +155,7 @@ unsafe extern "C-unwind" fn body<S: Strategy>(state: *mut c_void) {
 }
 
 #[inline(always)]
-unsafe fn slot(fp: *mut u64, i: usize) -> Value {
+pub(crate) unsafe fn slot(fp: *mut u64, i: usize) -> Value {
     // SAFETY: the caller guarantees slot `i` is inside the frame.
     Value::from_raw(unsafe { *fp.sub(i + 1) })
 }
@@ -207,6 +222,14 @@ enum Next {
         argc: usize,
     },
     Return(Value),
+    /// A frame whose position word is `position` returned `value` to
+    /// `caller`, which is sealed in a continuation: copy it in and resume
+    /// it.
+    Underflow {
+        caller: *mut u64,
+        position: u64,
+        value: Value,
+    },
     /// Something was raised.
     Raise(Error),
 }
@@ -338,10 +361,15 @@ impl<S: Strategy> Cx<S> {
         Ok(result)
     }
 
-    /// The handlers of the `%catch`es waiting for their thunks, which an
-    /// epoch counts as the stack's.
-    pub(crate) fn catch_handlers(&self) -> impl Iterator<Item = Value> + '_ {
-        self.catches.iter().map(|c| c.handler)
+    /// The values the VM holds besides the frames, which an epoch counts as
+    /// the stack's: the handlers of the `%catch`es waiting for their thunks
+    /// and the continuations that hold their frames, and the continuation
+    /// below the stack.
+    pub(crate) fn control_values(&self) -> impl Iterator<Item = Value> + '_ {
+        self.catches
+            .iter()
+            .flat_map(|c| [c.handler, c.record])
+            .chain([self.below])
     }
 
     /// The value of a loaded module's variable, if it has one.
@@ -393,16 +421,20 @@ impl<S: Strategy> Cx<S> {
         Some(unsafe { self.root(value) })
     }
 
-    /// `%catch`, bound to the global of that name.
-    pub(crate) fn define_catch(&mut self) -> Result<(), Error> {
-        let code = Box::new(Code::catch());
-        let pointer = &*code as *const Code<S>;
-        self.natives.push(code);
-        let closure = self.closure_raw(pointer, &[])?;
-        // SAFETY: the cell belongs to this isolate.
-        unsafe {
-            let cell = self.global_cell("%catch");
-            self.write_cell(cell, closure);
+    /// `%catch`, `%call/cc` and `%continue`, bound to the globals of those
+    /// names.
+    pub(crate) fn define_control(&mut self) -> Result<(), Error> {
+        for code in Code::control() {
+            let code = Box::new(code);
+            let pointer = &*code as *const Code<S>;
+            let name = code.name().to_owned();
+            self.natives.push(code);
+            let closure = self.closure_raw(pointer, &[])?;
+            // SAFETY: the cell belongs to this isolate.
+            unsafe {
+                let cell = self.global_cell(&name);
+                self.write_cell(cell, closure);
+            }
         }
         Ok(())
     }
@@ -613,15 +645,17 @@ impl<S: Strategy> Cx<S> {
             && S::PRECISE
         {
             S::release(self.heap_mut(), catch.handler);
+            S::release(self.heap_mut(), catch.record);
         }
     }
 
     /// A `%catch` now waits for its thunk: under precise counting, it
     /// holds its handler as a reference of its own, since the thunk's frame
-    /// overwrites the slot the handler came from.
+    /// overwrites the slot the handler came from, and its record.
     fn push_catch(&mut self, catch: Catch) {
         if S::PRECISE {
             S::retain(self.heap_mut(), catch.handler);
+            S::retain(self.heap_mut(), catch.record);
         }
         self.catches.push(catch);
     }
@@ -682,8 +716,9 @@ impl<S: Strategy> Cx<S> {
 
     /// Under precise counting, counts out and clears the slots of every
     /// frame from the innermost, at `fp` with `slots` slots, out to `to`
-    /// (exclusive), or to the entry frame (inclusive) if `to` is null. A
-    /// frame's slots overlap its caller's, which are cleared after it.
+    /// (exclusive), or to the outermost live frame (inclusive) if `to` is
+    /// null. A frame's slots overlap its caller's, which are cleared after
+    /// it.
     ///
     /// # Safety
     ///
@@ -698,7 +733,8 @@ impl<S: Strategy> Cx<S> {
         unsafe {
             while fp != to {
                 self.release_slots(fp, 0, slots);
-                if *fp.add(2) == ENTRY {
+                let position = *fp.add(2);
+                if position == ENTRY || position & UNDERFLOW != 0 {
                     break;
                 }
                 fp = *fp as *mut u64;
@@ -799,11 +835,17 @@ impl<S: Strategy> Cx<S> {
         while let Some(catch) = self.catches.pop() {
             if S::PRECISE {
                 S::release(self.heap_mut(), catch.handler);
+                S::release(self.heap_mut(), catch.record);
             }
         }
-        // An error can leave segments chained; only the first is kept.
+        self.set_below(Value::FALSE);
+        // An error can leave segments chained; only the first is kept, and
+        // only if it is whole, since the next run starts at its top.
         while self.stack.len() > 1 {
             self.pop_segment();
+        }
+        if !self.stack[0].is_whole() {
+            self.drop_view();
         }
         result
     }
@@ -829,18 +871,163 @@ impl<S: Strategy> Cx<S> {
             }
         };
         let ends = (segment.top(), segment.limit());
-        self.stack.push(segment);
+        self.stack.push(View::whole(segment));
         Ok(ends)
     }
 
-    /// Drops the current segment, keeping it as the spare, and returns the
-    /// previous segment's limit.
+    /// Drops the current segment, keeping it as the spare if it can be
+    /// reused, and returns the previous segment's limit.
     fn pop_segment(&mut self) -> *mut u64 {
-        let segment = self.stack.pop().expect("a segment to pop");
-        if let Some(old) = self.spare.replace(segment) {
-            self.stack_words -= old.words();
-        }
+        self.drop_view();
         self.stack.last().expect("the first segment stays").limit()
+    }
+
+    /// Drops the current segment from the stack, keeping it as the spare if
+    /// it can be reused.
+    fn drop_view(&mut self) {
+        let view = self.stack.pop().expect("a segment to drop");
+        let words = view.words();
+        match view.reclaim() {
+            Some(segment) => {
+                if let Some(old) = self.spare.replace(segment) {
+                    self.stack_words -= old.words();
+                }
+            }
+            None => self.stack_words -= words,
+        }
+    }
+
+    /// Copies the sealed frame at `f`, whose own slots are the first `own`,
+    /// to the top of the current segment, or of a new one if it does not
+    /// fit, with a header that returns to its caller where that is. Returns
+    /// the copy and its segment's limit.
+    ///
+    /// # Safety
+    ///
+    /// `f` must be a frame of the continuation below the stack, and the
+    /// current segment must hold no live frame.
+    unsafe fn materialize(
+        &mut self,
+        link: &Link,
+        f: *mut u64,
+        own: usize,
+    ) -> Result<(*mut u64, *mut u64), Error> {
+        // SAFETY: passed on to the caller; the sealed frame is intact.
+        unsafe {
+            let position = *f.add(2);
+            let slots = self.suspended_slots(f).max(own + 4);
+            let header = if position == ENTRY { 4 } else { 3 };
+            let view = self.stack.last().expect("a segment");
+            let (mut top, mut limit) = (view.top(), view.limit());
+            let mut flags = 0;
+            if !fits(top.sub(header), slots, limit) {
+                (top, limit) = self.push_segment(slots + 4)?;
+                flags = BOUNDARY;
+            }
+            let copy = top.sub(header);
+            if position == ENTRY {
+                // Returning to the host returns to whichever host runs the
+                // VM now.
+                *copy = link.host_fp;
+                *copy.add(1) = link.host_return;
+                *copy.add(2) = ENTRY;
+                *copy.add(3) = link.host_cfa;
+            } else {
+                *copy = *f;
+                *copy.add(1) = *f.add(1);
+                *copy.add(2) = (position & !BOUNDARY) | UNDERFLOW | flags;
+            }
+            // The copy is on the stack: precise counting counts its values
+            // in, while the continuation keeps its own.
+            for i in 0..own {
+                let v = slot(f, i);
+                set(copy, i, v);
+                if S::PRECISE {
+                    S::retain(self.heap_mut(), v);
+                }
+            }
+            for i in own..slots {
+                set(copy, i, Value::UNSPECIFIED);
+            }
+            if position == ENTRY {
+                self.set_below(Value::FALSE);
+            } else if position & UNDERFLOW != 0 {
+                // The caller is the parent's.
+                let parent = Self::sealed(self.below).expect("a continuation").parent;
+                self.set_below(parent);
+            }
+            Ok((copy, limit))
+        }
+    }
+
+    /// Checks that `%call/cc`, called with `argc` arguments, has a receiver
+    /// it can call: a Scheme procedure that takes the continuation as a
+    /// parameter of its own, so setting up its frame never fails once the
+    /// stack is sealed.
+    fn receiver(&self, receiver: Value, argc: usize) -> Result<(), Error> {
+        // SAFETY: a valid value.
+        let ok = argc == 1
+            && matches!(unsafe { self.procedure_code(receiver) }, Ok(code)
+                if matches!(code.kind, Kind::Bytecode { .. })
+                    && code.arity.accepts(1)
+                    && code.arity.required + code.arity.optional >= 1);
+        if ok {
+            Ok(())
+        } else {
+            Err(wrong_type(
+                self,
+                "%call/cc",
+                "a Scheme procedure of one argument",
+                receiver,
+            ))
+        }
+    }
+
+    /// What returning `value` to the continuation `k` comes to, once the
+    /// live stack is dropped: copying its first frame in, or returning to
+    /// the host. Under precise counting, `k` and `value` come counted in,
+    /// and leave counted out.
+    fn resume_into(&mut self, k: Value, value: Value) -> Next {
+        let target = self.reinstate(k);
+        if S::PRECISE {
+            S::release(self.heap_mut(), k);
+            S::release(self.heap_mut(), value);
+        }
+        match target {
+            None => Next::Return(value),
+            Some((caller, position)) => {
+                if position & CATCH != 0 {
+                    self.catch_returned();
+                }
+                Next::Underflow {
+                    caller,
+                    position,
+                    value,
+                }
+            }
+        }
+    }
+
+    /// Drops the live stack, the innermost frame at `fp` with `slots`
+    /// slots, or only the entry frame's values if `fp` is `top`, the entry
+    /// frame. Returns the one segment left's limit.
+    ///
+    /// # Safety
+    ///
+    /// `fp` must be the innermost live frame.
+    unsafe fn discard(&mut self, fp: *mut u64, slots: usize, top: *mut u64) -> *mut u64 {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            if fp == top {
+                self.release_slots(top, 3, 3 + slots);
+            } else {
+                self.release_frames(fp, slots, std::ptr::null_mut());
+            }
+        }
+        while self.stack.len() > 1 {
+            self.drop_view();
+        }
+        self.stack[0].limit()
     }
 
     /// How many Scheme procedures have been entered so far: the fuel used
@@ -1056,7 +1243,8 @@ impl<S: Strategy> Cx<S> {
                     let position = $position;
                     if position == ENTRY {
                         entry_resume_address
-                    } else if position & BOUNDARY != 0 {
+                    } else if position & (BOUNDARY | UNDERFLOW) != 0 {
+                        // Its caller sits anywhere in memory.
                         boundary_resume_address
                     } else {
                         $code.stub
@@ -1093,6 +1281,27 @@ impl<S: Strategy> Cx<S> {
                 }
                 // The call machinery: set up the frame `next` asks for.
                 match next {
+                    Next::Underflow {
+                        caller,
+                        position,
+                        value,
+                    } => {
+                        // The caller is sealed: copy it in, the stack's
+                        // outermost frame now, and resume it. Failing to
+                        // find room ends the run: the stack is empty.
+                        let base = position_base(position);
+                        (fp, limit) = self.materialize(link, caller, base)?;
+                        self.store(fp, base + 3, value);
+                        pc = position_resume(position) as usize;
+                        let caller = attempt!(self.procedure_code(slot(fp, 0)));
+                        if S::PRECISE
+                            && let Kind::Bytecode { slots, .. } = caller.kind
+                        {
+                            frame_slots = usize::from(slots).max(base + 4);
+                        }
+                        link_to!(fp, stub_of!(*fp.add(2), caller));
+                        switch_to!(caller);
+                    }
                     Next::Raise(error) => {
                         // Unwind to the innermost `%catch` and call its
                         // handler with the condition in place of the `%catch`
@@ -1107,14 +1316,26 @@ impl<S: Strategy> Cx<S> {
                             return Err(error);
                         };
                         let condition = self.condition(error)?;
-                        if fp != catch.fp {
-                            self.release_frames(fp, frame_slots, catch.fp);
+                        if catch.record == Value::FALSE {
+                            if fp != catch.fp {
+                                self.release_frames(fp, frame_slots, catch.fp);
+                            }
+                            while self.stack.len() > catch.segments {
+                                self.pop_segment();
+                            }
+                            limit = self.stack.last().expect("a segment").limit();
+                            fp = catch.fp;
+                        } else {
+                            // The frame is sealed: drop the whole live
+                            // stack, and copy the frame in from the
+                            // continuation that holds it.
+                            self.discard(fp, frame_slots, top);
+                            self.set_below(catch.record);
+                            if S::PRECISE {
+                                S::release(self.heap_mut(), catch.record);
+                            }
+                            (fp, limit) = self.materialize(link, catch.fp, catch.base)?;
                         }
-                        while self.stack.len() > catch.segments {
-                            self.pop_segment();
-                        }
-                        limit = self.stack.last().expect("a segment").limit();
-                        fp = catch.fp;
                         self.store(fp, catch.base + 3, catch.handler);
                         self.store(fp, catch.base + 4, condition);
                         if S::PRECISE {
@@ -1156,6 +1377,7 @@ impl<S: Strategy> Cx<S> {
                                     resume,
                                     segments: self.stack.len(),
                                     handler: slot(fp, base + 5),
+                                    record: Value::FALSE,
                                 });
                                 self.store(fp, base + 3, slot(fp, base + 4));
                                 next = Next::Call {
@@ -1165,7 +1387,53 @@ impl<S: Strategy> Cx<S> {
                                 };
                                 continue;
                             }
+                            Kind::Capture => {
+                                // `(%call/cc receiver)`: call the receiver,
+                                // which takes the continuation in its
+                                // frame; once that frame is set up, the
+                                // stack from here out is sealed.
+                                if resume == ENTRY {
+                                    fail!(Error::scheme("%call/cc: cannot be called from Rust"));
+                                }
+                                let receiver = slot(fp, base + 4);
+                                attempt!(self.receiver(receiver, argc));
+                                // What this frame holds past the call is
+                                // dead, and soon not this frame's.
+                                self.release_slots(fp, base + 5, frame_slots);
+                                self.store(fp, base + 3, receiver);
+                                self.store(fp, base + 4, Value::FALSE);
+                                next = Next::Call {
+                                    base,
+                                    argc: 1,
+                                    resume: resume | CAPTURE,
+                                };
+                                continue;
+                            }
+                            Kind::Resume => {
+                                // `(%continue k value)`: drop the stack and
+                                // return `value` to `k`.
+                                if resume == ENTRY {
+                                    fail!(Error::scheme("%continue: cannot be called from Rust"));
+                                }
+                                let (k, value) = (slot(fp, base + 4), slot(fp, base + 5));
+                                if argc != 2 || Self::sealed(k).is_none() {
+                                    fail!(wrong_type(self, "%continue", "a continuation", k));
+                                }
+                                if S::PRECISE {
+                                    S::retain(self.heap_mut(), k);
+                                    S::retain(self.heap_mut(), value);
+                                }
+                                self.discard(fp, frame_slots, top);
+                                next = self.resume_into(k, value);
+                                if let Next::Return(value) = next {
+                                    return Ok(value);
+                                }
+                                continue;
+                            }
                             Kind::Native(_) | Kind::Bridge(_) => {
+                                debug_assert!(
+                                    resume == ENTRY || resume & (CAPTURE | UNDERFLOW) == 0
+                                );
                                 let result = attempt!(self.call_native(callee, fp, base + 4, argc));
                                 if let Some((procedure, args)) = self.tail_call.take() {
                                     // The Rust procedure asked for a tail
@@ -1249,6 +1517,22 @@ impl<S: Strategy> Cx<S> {
                                     frame_slots = needed;
                                 }
                                 fp = callee_fp;
+                                if resume != ENTRY && resume & CAPTURE != 0 {
+                                    // Seal the stack from the caller out,
+                                    // keeping the receiver's segment if it
+                                    // got one of its own.
+                                    let caller = *fp as *mut u64;
+                                    let k = attempt!(self.capture(
+                                        caller,
+                                        (position & !BOUNDARY) | UNDERFLOW,
+                                        true,
+                                        caller.sub(base),
+                                        usize::from(position & BOUNDARY != 0),
+                                    ));
+                                    position |= UNDERFLOW;
+                                    *fp.add(2) = position;
+                                    self.store(fp, 1, k);
+                                }
                                 link_to!(fp, stub_of!(position, callee));
                                 pc = 0;
                                 switch_to!(callee);
@@ -1271,16 +1555,68 @@ impl<S: Strategy> Cx<S> {
                                 } else {
                                     self.stack.len()
                                 };
+                                // A sealed caller is held by the
+                                // continuation below the stack.
+                                let record = if position & UNDERFLOW != 0 {
+                                    self.below
+                                } else {
+                                    Value::FALSE
+                                };
                                 self.push_catch(Catch {
                                     fp: *fp as *mut u64,
                                     base: position_base(position),
                                     resume: position_resume(position),
                                     segments,
                                     handler: slot(fp, 2),
+                                    record,
                                 });
                                 self.store(fp, 0, slot(fp, 1));
                                 *fp.add(2) = position | CATCH;
                                 next = Next::TailCall { argc: 0 };
+                                continue;
+                            }
+                            Kind::Capture => {
+                                // The continuation is this frame's: what
+                                // its caller does with its result. The
+                                // receiver runs in this frame.
+                                let receiver = slot(fp, 1);
+                                attempt!(self.receiver(receiver, argc));
+                                let position = *fp.add(2);
+                                let k = if position == ENTRY || position & UNDERFLOW != 0 {
+                                    // Its caller is the host, or sealed
+                                    // already.
+                                    attempt!(self.capture(*fp as *mut u64, position, false, fp, 0))
+                                } else {
+                                    let position = (position & !BOUNDARY) | UNDERFLOW;
+                                    let k = attempt!(self.capture(
+                                        *fp as *mut u64,
+                                        position,
+                                        true,
+                                        fp.add(3),
+                                        0
+                                    ));
+                                    *fp.add(2) = position;
+                                    k
+                                };
+                                self.store(fp, 0, receiver);
+                                self.store(fp, 1, k);
+                                next = Next::TailCall { argc: 1 };
+                                continue;
+                            }
+                            Kind::Resume => {
+                                let (k, value) = (slot(fp, 1), slot(fp, 2));
+                                if argc != 2 || Self::sealed(k).is_none() {
+                                    fail!(wrong_type(self, "%continue", "a continuation", k));
+                                }
+                                if S::PRECISE {
+                                    S::retain(self.heap_mut(), k);
+                                    S::retain(self.heap_mut(), value);
+                                }
+                                self.discard(fp, frame_slots, top);
+                                next = self.resume_into(k, value);
+                                if let Next::Return(value) = next {
+                                    return Ok(value);
+                                }
                                 continue;
                             }
                             Kind::Native(_) | Kind::Bridge(_) => {
@@ -1329,6 +1665,10 @@ impl<S: Strategy> Cx<S> {
                                     } else if old & BOUNDARY != 0 {
                                         self.pop_segment();
                                         old
+                                    } else if old & UNDERFLOW != 0 {
+                                        // The first frame of the segment
+                                        // under the live stack, left empty.
+                                        old | BOUNDARY
                                     } else {
                                         let base = (saved as usize - fp as usize) / 8 - 3;
                                         position(position_resume(old), base)
@@ -1371,10 +1711,24 @@ impl<S: Strategy> Cx<S> {
                         if position == ENTRY {
                             return Ok(value);
                         }
-                        if position & CATCH != 0 {
-                            self.catch_returned();
-                        }
                         let caller = *fp as *mut u64;
+                        // One test for both rare cases.
+                        if position & (CATCH | UNDERFLOW) != 0 {
+                            if position & CATCH != 0 {
+                                self.catch_returned();
+                            }
+                            if position & UNDERFLOW != 0 {
+                                if position & BOUNDARY != 0 {
+                                    self.pop_segment();
+                                }
+                                next = Next::Underflow {
+                                    caller,
+                                    position,
+                                    value,
+                                };
+                                continue;
+                            }
+                        }
                         let base = position_base(position);
                         self.store(caller, base + 3, value);
                         if position & BOUNDARY != 0 {

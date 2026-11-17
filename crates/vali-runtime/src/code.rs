@@ -51,6 +51,11 @@ pub(crate) enum Kind<S: Strategy> {
     /// `%catch`, which the VM handles itself: it calls a thunk, and calls a
     /// handler in its place if anything is raised inside (ADR 0004).
     Catch,
+    /// `%call/cc`, which the VM handles itself: it seals the stack into a
+    /// continuation and calls a procedure with it (ADR 0004).
+    Capture,
+    /// `%continue`, which returns a value to a continuation.
+    Resume,
 }
 
 // SAFETY: the raw pointers point into the `Loaded` module that owns this
@@ -67,6 +72,8 @@ impl<S: Strategy> fmt::Debug for Code<S> {
             Kind::Native(_) => "native",
             Kind::Bridge(_) => "bridge",
             Kind::Catch => "catch",
+            Kind::Capture => "capture",
+            Kind::Resume => "resume",
         };
         f.debug_struct("Code")
             .field("name", &self.name)
@@ -99,15 +106,21 @@ impl<S: Strategy> Code<S> {
         }
     }
 
-    /// `%catch`.
-    pub(crate) fn catch() -> Code<S> {
-        Code {
-            name: "%catch".into(),
-            arity: Arity::exactly(2),
-            kind: Kind::Catch,
+    /// `%catch`, `%call/cc` and `%continue`: procedures the VM handles
+    /// itself, since they work on the stack.
+    pub(crate) fn control() -> [Code<S>; 3] {
+        let code = |name: &str, arity, kind| Code {
+            name: name.into(),
+            arity: Arity::exactly(arity),
+            kind,
             calls: AtomicU32::new(0),
             stub: crate::trampoline::resume(),
-        }
+        };
+        [
+            code("%catch", 2, Kind::Catch),
+            code("%call/cc", 1, Kind::Capture),
+            code("%continue", 2, Kind::Resume),
+        ]
     }
 
     /// The procedure's name.

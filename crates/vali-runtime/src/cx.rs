@@ -17,7 +17,7 @@ use vali_abi::{Header, Layout, TypeCode, data};
 use crate::code::{Code, Instance};
 use crate::handle::{Error, Handle, RootTable};
 use crate::page::{HeapConfig, OutOfMemory};
-use crate::stack::Segment;
+use crate::stack::{Segment, View};
 use crate::strategy::{Space, Strategy};
 use crate::value::Value;
 
@@ -44,7 +44,11 @@ pub struct Cx<S: Strategy> {
     pub(crate) natives: Vec<Box<Code<S>>>,
     /// The stack: a chain of segments, the current one last, created on
     /// first use.
-    pub(crate) stack: Vec<Segment>,
+    pub(crate) stack: Vec<View>,
+    /// The continuation the outermost live frame returns into, when that
+    /// frame's caller is sealed: the one whose own frames hold the caller.
+    /// `#f` otherwise.
+    pub(crate) below: Value,
     /// A segment kept after the stack shrinks, so a call that keeps
     /// crossing a segment boundary does not allocate each time.
     pub(crate) spare: Option<Segment>,
@@ -137,6 +141,7 @@ impl<S: Strategy> Cx<S> {
             symbols: HashMap::new(),
             natives: Vec::new(),
             stack: Vec::new(),
+            below: Value::FALSE,
             spare: None,
             stack_words: 0,
             max_stack_words: crate::stack::MAX_STACK_WORDS,

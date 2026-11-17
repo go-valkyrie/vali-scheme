@@ -83,7 +83,13 @@ pub(crate) fn may_cycle(v: Value) -> bool {
             let header = Header(unsafe { *(v.address() as *const u64) });
             matches!(
                 header.type_code(),
-                Some(TypeCode::Vector | TypeCode::Record | TypeCode::Box | TypeCode::RecordType)
+                Some(
+                    TypeCode::Vector
+                        | TypeCode::Record
+                        | TypeCode::Box
+                        | TypeCode::RecordType
+                        | TypeCode::Continuation
+                )
             )
         }
         _ => false,

@@ -577,7 +577,7 @@ pub fn primitive_names() -> Vec<&'static str> {
     table::<crate::NoCollection>()
         .into_iter()
         .map(|(name, _, _)| name)
-        .chain(["%catch"])
+        .chain(["%catch", "%call/cc", "%continue"])
         .collect()
 }
 
@@ -589,7 +589,7 @@ impl<S: Strategy> Cx<S> {
         for (name, arity, f) in table::<S>() {
             self.define_native(name, arity, f)?;
         }
-        self.define_catch()?;
+        self.define_control()?;
         self.register_native_library(crate::ports::PORTS_IDENTITY, crate::ports::library());
         Ok(())
     }

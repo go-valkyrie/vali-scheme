@@ -59,6 +59,8 @@ impl<S: Strategy> Cx<S> {
                 TypeCode::Ratnum | TypeCode::ExactComplex | TypeCode::InexactComplex => 2,
                 // Its index in the isolate's table, not a value.
                 TypeCode::RustObject => 1,
+                // Its index, and a pointer to its record.
+                TypeCode::Continuation => 2,
                 TypeCode::Flonum | TypeCode::Box | TypeCode::Syntax => 1,
                 TypeCode::Symbol => 2,
                 TypeCode::String => 4,
@@ -103,6 +105,12 @@ impl<S: Strategy> Cx<S> {
             TypeCode::String => {
                 f(field(2));
                 f(field(3));
+            }
+            // What its frames hold, and more, kept in its record.
+            TypeCode::Continuation => {
+                let sealed = Self::sealed(v).expect("a continuation");
+                // SAFETY: a live continuation keeps its frames.
+                unsafe { sealed.for_each_value(f) };
             }
             _ => {}
         }

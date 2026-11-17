@@ -109,7 +109,7 @@ impl fmt::Debug for Objects {
 }
 
 impl Objects {
-    fn insert(&mut self, value: Box<dyn ErasedObject>) -> usize {
+    pub(crate) fn insert(&mut self, value: Box<dyn ErasedObject>) -> usize {
         let entry = Some(Entry {
             value,
             borrow: Borrow::Free,
@@ -163,6 +163,25 @@ impl<S: Strategy> Cx<S> {
         }
     }
 
+    /// The table index of `v`, if it is a Rust object or a continuation,
+    /// whose record the table holds too.
+    pub(crate) fn table_index(v: Value) -> Option<usize> {
+        if v.tag() != Tag::Other {
+            return None;
+        }
+        let header = Self::LAYOUT.header(TypeCode::RustObject)?;
+        // SAFETY: a valid value tagged "other" is a live object starting
+        // with its header; both types keep the index in their first field.
+        unsafe {
+            match Header(get(v, header)).type_code() {
+                Some(t @ (TypeCode::RustObject | TypeCode::Continuation)) => {
+                    Some(get(v, Self::LAYOUT.field(t, 0)) as usize)
+                }
+                _ => None,
+            }
+        }
+    }
+
     /// A new Rust object holding `value`.
     pub(crate) fn object_raw(
         &mut self,
@@ -176,10 +195,10 @@ impl<S: Strategy> Cx<S> {
         Ok(v)
     }
 
-    /// Drops the Rust value `v` stands for, if it is a Rust object: the
-    /// strategy is freeing it.
+    /// Drops the Rust value `v` stands for, if it is a Rust object, or its
+    /// record, if it is a continuation: the strategy is freeing it.
     pub(crate) fn finalize(&mut self, v: Value) {
-        if let Some(i) = Self::rust_object_index(v) {
+        if let Some(i) = Self::table_index(v) {
             self.objects.remove(i);
         }
     }

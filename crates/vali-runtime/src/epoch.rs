@@ -40,8 +40,10 @@ impl<S: Strategy> Cx<S> {
                         roots.push(v);
                     }
                 }
+                // Frames past the outermost live one are sealed: the
+                // continuation below the stack holds their values.
                 let position = *fp.add(2);
-                if position == crate::vm::ENTRY {
+                if position == crate::vm::ENTRY || position & crate::vm::UNDERFLOW != 0 {
                     break;
                 }
                 // The caller's slots from the call's base on hold this
@@ -50,7 +52,7 @@ impl<S: Strategy> Cx<S> {
                 fp = *fp as *mut u64;
             }
         }
-        roots.extend(self.catch_handlers().filter(|v| v.is_pointer()));
+        roots.extend(self.control_values().filter(|v| v.is_pointer()));
         roots
     }
 
@@ -106,10 +108,11 @@ impl<S: Strategy> Cx<S> {
                 self.free_all(&mut work);
             }
         }
-        // A Rust object in a garbage cycle drops its value as it is freed.
+        // A Rust object or a continuation in a garbage cycle drops what it
+        // holds in the table as it is freed.
         let (heap, objects) = self.heap_and_objects();
         let mut finalize = |v| {
-            if let Some(i) = Self::rust_object_index(v) {
+            if let Some(i) = Self::table_index(v) {
                 objects.remove(i);
             }
         };

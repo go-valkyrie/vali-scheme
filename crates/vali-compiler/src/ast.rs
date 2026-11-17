@@ -22,9 +22,12 @@ pub(crate) struct VarInfo {
 }
 
 impl VarInfo {
-    /// Whether it lives in a box: assigned and captured (ADR 0005 #4).
+    /// Whether it lives in a box: whenever it is assigned (ADR 0005 #4).
+    /// A captured variable shares its box with closures; any other shares
+    /// it with the copies of its frame that re-entering a continuation
+    /// makes, so a variable stays one location.
     pub(crate) fn boxed(&self) -> bool {
-        self.assigned && self.captured
+        self.assigned
     }
 }
 
