@@ -70,6 +70,9 @@ pub(crate) enum Core {
     QuoteSyntax,
     SyntaxCase,
     Syntax,
+    Include,
+    IncludeCi,
+    CondExpand,
 }
 
 const CORE: &[(&str, Core)] = &[
@@ -89,6 +92,9 @@ const CORE: &[(&str, Core)] = &[
     ("quote-syntax", Core::QuoteSyntax),
     ("syntax-case", Core::SyntaxCase),
     ("syntax", Core::Syntax),
+    ("include", Core::Include),
+    ("include-ci", Core::IncludeCi),
+    ("cond-expand", Core::CondExpand),
 ];
 
 /// What an identifier can be bound to.
@@ -209,6 +215,8 @@ pub(crate) struct Expander {
     /// The native libraries the program imports, which the phase-1
     /// isolate registers, so their expansion-safe functions run there.
     natives: Vec<(String, std::sync::Arc<vali_runtime::NativeLibrary>)>,
+    /// The files bodies include, fetched with the import graph.
+    includes: crate::loader::Includes,
 }
 
 impl Expander {
@@ -247,12 +255,82 @@ impl Expander {
             compiled: Compiled::default(),
             floors: Vec::new(),
             natives: Vec::new(),
+            includes: crate::loader::Includes::new(),
         };
         Ok(expander)
     }
 
     /// Notes a native library the program imports, for the phase-1
     /// isolate to register.
+    /// The files the program and its libraries include, fetched with the
+    /// import graph.
+    pub(crate) fn set_includes(&mut self, includes: crate::loader::Includes) {
+        self.includes = includes;
+    }
+
+    /// The forms `(include path ...)`, or `include-ci`, stands for: each
+    /// file's data, in the lexical context of the `include` keyword
+    /// (R7RS 4.1.7).
+    fn included(&self, items: &[Syntax], ci: bool, span: Span) -> Result<Vec<Syntax>> {
+        let keyword = if ci { "include-ci" } else { "include" };
+        let identity = &self.units.last().expect("a unit being expanded").identity;
+        let scopes = items[0].scopes();
+        let mut forms = Vec::new();
+        for item in &items[1..] {
+            let DatumKind::String(path) = item.to_datum().kind else {
+                return Err(error(
+                    format!("{keyword}: expected file names as strings"),
+                    item.span(),
+                ));
+            };
+            let text = match self.includes.get(&(identity.clone(), path.clone())) {
+                Some(Ok(text)) => text,
+                Some(Err(why)) => return Err(error(format!("{keyword}: {why}"), span)),
+                None => {
+                    return Err(error(
+                        format!(
+                            "{keyword}: {path} was not read: only an include written out in the source is"
+                        ),
+                        span,
+                    ));
+                }
+            };
+            for datum in crate::loader::read_included(text, ci, &path)? {
+                forms.push(Syntax::from_datum(&datum, scopes));
+            }
+        }
+        Ok(forms)
+    }
+
+    /// The forms of the first `cond-expand` clause whose requirement holds
+    /// (R7RS 4.2.1), or none. A `(library name)` requirement holds for
+    /// Vali's libraries and those compiled so far.
+    fn cond_expand(&mut self, items: &[Syntax], span: Span) -> Result<Vec<Syntax>> {
+        for clause in &items[1..] {
+            let Exposed::List {
+                items: parts,
+                tail: None,
+            } = self.expose(clause)?
+            else {
+                return Err(error("cond-expand: expected a clause", clause.span()));
+            };
+            let Some((requirement, body)) = parts.split_first() else {
+                return Err(error("cond-expand: expected a clause", clause.span()));
+            };
+            let requirement = requirement.to_datum();
+            let by_name = &self.by_name;
+            if crate::features::is_else(&requirement)
+                || crate::features::satisfied(&requirement, &mut |n| {
+                    crate::loader::is_standard(n) || by_name.contains_key(n)
+                })?
+            {
+                return Ok(body.to_vec());
+            }
+        }
+        let _ = span;
+        Ok(Vec::new())
+    }
+
     pub(crate) fn add_native(
         &mut self,
         identity: &str,
@@ -1060,6 +1138,18 @@ impl Expander {
                         queue.push_front((part, chain));
                     }
                 }
+                // Spliced into the body, as `begin` is.
+                Some((Binding::Core(core @ (Core::Include | Core::IncludeCi)), parts)) => {
+                    let forms = self.included(&parts, core == Core::IncludeCi, form.span())?;
+                    for part in forms.into_iter().rev() {
+                        queue.push_front((part, chain));
+                    }
+                }
+                Some((Binding::Core(Core::CondExpand), parts)) => {
+                    for part in self.cond_expand(&parts, form.span())?.into_iter().rev() {
+                        queue.push_front((part, chain));
+                    }
+                }
                 Some((Binding::Macro(m), _)) => {
                     let use_site = self.scope(ScopeKind::UseSite)?;
                     use_sites.push(use_site);
@@ -1360,6 +1450,18 @@ impl Expander {
                 Ok(Expr::If(Box::new(c), Box::new(t), Box::new(e)))
             }
             Core::Begin => self.sequence(args, span),
+            Core::Include | Core::IncludeCi => {
+                let forms = self.included(items, form == Core::IncludeCi, span)?;
+                self.sequence(&forms, span)
+            }
+            Core::CondExpand => {
+                let forms = self.cond_expand(items, span)?;
+                if forms.is_empty() {
+                    Ok(Expr::Unspecified)
+                } else {
+                    self.sequence(&forms, span)
+                }
+            }
             Core::Lambda => self.lambda(None, items, span),
             Core::Let => self.let_(keyword, args, span),
             Core::Letrec => self.letrec(keyword, args, span),

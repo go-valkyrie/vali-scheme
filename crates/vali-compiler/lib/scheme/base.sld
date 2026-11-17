@@ -70,6 +70,8 @@
    eof-object eof-object?
    apply error raise raise-continuable with-exception-handler
    call-with-current-continuation call/cc dynamic-wind
+   ;; Features and inclusion (R7RS 4.1.7, 4.2.1).
+   cond-expand features include include-ci
    guard error-object? error-object-message error-object-irritants
    values call-with-values
    ;; The syntax procedures, for transformers.

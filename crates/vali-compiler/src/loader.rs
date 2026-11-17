@@ -6,14 +6,14 @@
 //! its whole import graph, awaiting the loader as it goes, then expands and
 //! compiles with everything in memory, so the expander never awaits.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use vali_syntax::{Datum, SourceId, Span};
+use vali_syntax::{Datum, DatumKind, SourceId, Span};
 
 use crate::CompileError;
 use crate::library::{self, ImportSet, LibraryForm, LibraryName};
@@ -135,6 +135,20 @@ pub trait Loader {
         name: &LibraryName,
         importer: Option<&Identity>,
     ) -> std::result::Result<Option<Source>, LoadError>;
+
+    /// The text of the file at `path`, which the library or program
+    /// `from` includes (R7RS 4.1.7 and 5.6.1), or `None` if `from` may not
+    /// read it. A relative path is relative to `from` (ADR 0009 #12); what
+    /// each identity may read is the host's to decide, and by default
+    /// nothing may be (ADR 0009 #8).
+    fn include(
+        &self,
+        path: &str,
+        from: &Identity,
+    ) -> std::result::Result<Option<String>, LoadError> {
+        let _ = (path, from);
+        Ok(None)
+    }
 }
 
 /// Finds libraries, asynchronously: the same shape as [`Loader`], with the
@@ -147,6 +161,16 @@ pub trait AsyncLoader {
         name: &LibraryName,
         importer: Option<&Identity>,
     ) -> impl Future<Output = std::result::Result<Option<Source>, LoadError>> + Send;
+
+    /// As [`Loader::include`].
+    fn include(
+        &self,
+        path: &str,
+        from: &Identity,
+    ) -> impl Future<Output = std::result::Result<Option<String>, LoadError>> + Send {
+        let _ = (path, from);
+        std::future::ready(Ok(None))
+    }
 }
 
 impl<L: Loader + Sync> AsyncLoader for L {
@@ -157,6 +181,14 @@ impl<L: Loader + Sync> AsyncLoader for L {
     ) -> impl Future<Output = std::result::Result<Option<Source>, LoadError>> + Send {
         std::future::ready(Loader::load(self, name, importer))
     }
+
+    fn include(
+        &self,
+        path: &str,
+        from: &Identity,
+    ) -> impl Future<Output = std::result::Result<Option<String>, LoadError>> + Send {
+        std::future::ready(Loader::include(self, path, from))
+    }
 }
 
 /// What fetching needs from a loader of either kind.
@@ -166,6 +198,12 @@ trait Fetch {
         name: &LibraryName,
         importer: Option<&Identity>,
     ) -> impl Future<Output = std::result::Result<Option<Source>, LoadError>>;
+
+    fn include(
+        &self,
+        path: &str,
+        from: &Identity,
+    ) -> impl Future<Output = std::result::Result<Option<String>, LoadError>>;
 }
 
 /// A synchronous loader, which needn't be `Sync`.
@@ -179,6 +217,14 @@ impl<L: Loader> Fetch for Sync_<'_, L> {
     ) -> impl Future<Output = std::result::Result<Option<Source>, LoadError>> {
         std::future::ready(self.0.load(name, importer))
     }
+
+    fn include(
+        &self,
+        path: &str,
+        from: &Identity,
+    ) -> impl Future<Output = std::result::Result<Option<String>, LoadError>> {
+        std::future::ready(self.0.include(path, from))
+    }
 }
 
 struct Async<'a, L>(&'a L);
@@ -190,6 +236,14 @@ impl<L: AsyncLoader> Fetch for Async<'_, L> {
         importer: Option<&Identity>,
     ) -> impl Future<Output = std::result::Result<Option<Source>, LoadError>> {
         AsyncLoader::load(self.0, name, importer)
+    }
+
+    fn include(
+        &self,
+        path: &str,
+        from: &Identity,
+    ) -> impl Future<Output = std::result::Result<Option<String>, LoadError>> {
+        AsyncLoader::include(self.0, path, from)
     }
 }
 
@@ -228,6 +282,15 @@ const STANDARD: &[(&[&str], &str)] = &[
 
 /// The source of the standard library `name`, if it is one: Scheme
 /// source, or one of Vali's own native libraries.
+/// Whether `name` is one of Vali's own libraries.
+pub(crate) fn is_standard(name: &LibraryName) -> bool {
+    library::is_builtin(name)
+        || *name == LibraryName::new(["vali", "ports"])
+        || STANDARD
+            .iter()
+            .any(|(parts, _)| *name == LibraryName::new(parts.iter().copied()))
+}
+
 fn standard(name: &LibraryName) -> Option<Source> {
     if *name == LibraryName::new(["vali", "ports"]) {
         return Some(Source::native(
@@ -253,11 +316,11 @@ pub(crate) struct Library {
     pub(crate) native: Option<Arc<vali_runtime::NativeLibrary>>,
 }
 
-/// A program, read: the libraries it defines itself, its imports, and its
-/// body.
+/// A program, read: the libraries it defines itself, as read, its
+/// imports, and its body.
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
-    pub(crate) libraries: Vec<LibraryForm>,
+    pub(crate) libraries: Vec<Datum>,
     pub(crate) imports: Vec<ImportSet>,
     /// Whether the imports are the implicit `(scheme base)` of a program
     /// with no `import` form.
@@ -270,13 +333,11 @@ pub(crate) fn program(datums: &[Datum]) -> Result<Program> {
     let mut libraries = Vec::new();
     let mut rest = datums;
     while let Some((first, more)) = rest.split_first() {
-        match library::library_form(first)? {
-            Some(form) => {
-                libraries.push(form);
-                rest = more;
-            }
-            None => break,
+        if !library::is_library_form(first) {
+            break;
         }
+        libraries.push(first.clone());
+        rest = more;
     }
     let (mut imports, body) = library::program_imports(rest)?;
     let implicit = imports.is_empty();
@@ -299,7 +360,15 @@ pub(crate) struct Graph {
     /// Each name, to its library's place in `libraries`. Two names with
     /// the same identity are the same library.
     pub(crate) by_name: HashMap<LibraryName, usize>,
+    /// The files bodies include, by the identity including them and the
+    /// path: their text, or why it could not be read.
+    pub(crate) includes: Includes,
 }
+
+/// Included files' texts, by including identity and path, fetched before
+/// expansion so the expander never awaits, and each read once (ADR 0009
+/// #13).
+pub(crate) type Includes = HashMap<(String, String), std::result::Result<String, String>>;
 
 fn error(message: impl Into<String>, span: Option<Span>) -> CompileError {
     CompileError {
@@ -330,8 +399,236 @@ pub(crate) async fn fetch_async(
     walk(program, identity, &loader).await
 }
 
+fn list(items: Vec<Datum>, span: Span) -> Datum {
+    Datum {
+        kind: DatumKind::List { items, tail: None },
+        span,
+    }
+}
+
+/// A list's head symbol and the rest, if it has one.
+fn head(d: &Datum) -> Option<(&str, &[Datum])> {
+    match &d.kind {
+        DatumKind::List { items, tail: None } => match items.split_first() {
+            Some((
+                Datum {
+                    kind: DatumKind::Symbol(h),
+                    ..
+                },
+                rest,
+            )) => Some((h, rest)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Reads the text of an included file as data, case-folded for
+/// `include-ci`.
+pub(crate) fn read_included(text: &str, ci: bool, path: &str) -> Result<Vec<Datum>> {
+    let text = if ci {
+        format!("#!fold-case\n{text}")
+    } else {
+        text.to_owned()
+    };
+    let read = vali_syntax::read(&text, SourceId(0));
+    if let Some(e) = read.errors.first() {
+        return Err(error(format!("include: {path}: read: {}", e.kind), None));
+    }
+    Ok(read.datums)
+}
+
+/// The paths an `include` or `include-ci` form names.
+fn include_paths<'a>(keyword: &str, args: &'a [Datum], span: Span) -> Result<Vec<&'a str>> {
+    args.iter()
+        .map(|a| match &a.kind {
+            DatumKind::String(s) => Ok(s.as_str()),
+            _ => Err(error(
+                format!("{keyword}: expected file names as strings"),
+                Some(span),
+            )),
+        })
+        .collect()
+}
+
+/// Reads the files an include declaration names, for `from`.
+async fn read_includes(
+    keyword: &str,
+    args: &[Datum],
+    span: Span,
+    from: &Identity,
+    loader: &impl Fetch,
+) -> Result<Vec<Datum>> {
+    let mut forms = Vec::new();
+    for path in include_paths(keyword, args, span)? {
+        let text = loader
+            .include(path, from)
+            .await
+            .map_err(|e| error(format!("{keyword}: {path}: {e}"), Some(span)))?
+            .ok_or_else(|| error(format!("{keyword}: {from} may not read {path}"), Some(span)))?;
+        forms.extend(read_included(&text, keyword == "include-ci", path)?);
+    }
+    Ok(forms)
+}
+
+/// Resolves a `define-library` form's `include`, `include-ci`,
+/// `include-library-declarations` and `cond-expand` declarations into the
+/// declarations they stand for (R7RS 5.6.1), reading files for `identity`.
+async fn resolve_library(
+    datum: &Datum,
+    identity: &Identity,
+    loader: &impl Fetch,
+    local: &HashSet<LibraryName>,
+) -> Result<Datum> {
+    let Some(("define-library", [name, declarations @ ..])) = head(datum) else {
+        return Ok(datum.clone());
+    };
+    let mut work: std::collections::VecDeque<Datum> = declarations.iter().cloned().collect();
+    let mut resolved = vec![
+        Datum {
+            kind: DatumKind::Symbol("define-library".to_owned()),
+            span: datum.span,
+        },
+        name.clone(),
+    ];
+    while let Some(d) = work.pop_front() {
+        match head(&d) {
+            Some((keyword @ ("include" | "include-ci"), args)) => {
+                let mut forms = vec![Datum {
+                    kind: DatumKind::Symbol("begin".to_owned()),
+                    span: d.span,
+                }];
+                forms.extend(read_includes(keyword, args, d.span, identity, loader).await?);
+                resolved.push(list(forms, d.span));
+            }
+            Some(("include-library-declarations", args)) => {
+                let forms = read_includes(
+                    "include-library-declarations",
+                    args,
+                    d.span,
+                    identity,
+                    loader,
+                )
+                .await?;
+                for form in forms.into_iter().rev() {
+                    work.push_front(form);
+                }
+            }
+            Some(("cond-expand", clauses)) => {
+                let chosen = cond_expand(clauses, d.span, identity, loader, local).await?;
+                for form in chosen.into_iter().rev() {
+                    work.push_front(form);
+                }
+            }
+            _ => resolved.push(d),
+        }
+    }
+    Ok(list(resolved, datum.span))
+}
+
+/// The declarations of the first `cond-expand` clause whose requirement
+/// holds, or none. A `(library name)` requirement holds if the library is
+/// Vali's, the program's own, or one the loader has.
+async fn cond_expand(
+    clauses: &[Datum],
+    span: Span,
+    identity: &Identity,
+    loader: &impl Fetch,
+    local: &HashSet<LibraryName>,
+) -> Result<Vec<Datum>> {
+    fn clause(c: &Datum, span: Span) -> Result<(&Datum, &[Datum])> {
+        match &c.kind {
+            DatumKind::List { items, tail: None } if !items.is_empty() => {
+                Ok((&items[0], &items[1..]))
+            }
+            _ => Err(error("cond-expand: expected a clause", Some(span))),
+        }
+    }
+    let mut asked = Vec::new();
+    for c in clauses {
+        crate::features::libraries(clause(c, span)?.0, &mut asked)?;
+    }
+    let mut available = HashSet::new();
+    for name in asked {
+        let found = is_standard(&name)
+            || local.contains(&name)
+            || loader
+                .fetch(&name, Some(identity))
+                .await
+                .map_err(|e| error(format!("{name}: {e}"), Some(span)))?
+                .is_some();
+        if found {
+            available.insert(name);
+        }
+    }
+    for c in clauses {
+        let (requirement, body) = clause(c, span)?;
+        if crate::features::is_else(requirement)
+            || crate::features::satisfied(requirement, &mut |n| available.contains(n))?
+        {
+            return Ok(body.to_vec());
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// Fetches every file that `forms` include literally, and those files
+/// include in turn, for `from`, into `includes`. A file that cannot be read
+/// is recorded as such: it is an error only if expansion reaches it.
+async fn fetch_includes(
+    forms: &[Datum],
+    from: &Identity,
+    loader: &impl Fetch,
+    includes: &mut Includes,
+) {
+    let mut work: Vec<Datum> = forms.to_vec();
+    while let Some(d) = work.pop() {
+        match &d.kind {
+            DatumKind::List { items, tail } => {
+                match head(&d) {
+                    Some(("quote" | "quasiquote" | "quote-syntax", _)) => continue,
+                    Some((keyword @ ("include" | "include-ci"), args)) => {
+                        let Ok(paths) = include_paths(keyword, args, d.span) else {
+                            continue;
+                        };
+                        for path in paths {
+                            let key = (from.as_str().to_owned(), path.to_owned());
+                            if includes.contains_key(&key) {
+                                continue;
+                            }
+                            let text = match loader.include(path, from).await {
+                                Ok(Some(text)) => Ok(text),
+                                Ok(None) => Err(format!("{from} may not read {path}")),
+                                Err(e) => Err(format!("{path}: {e}")),
+                            };
+                            if let Ok(text) = &text
+                                && let Ok(datums) =
+                                    read_included(text, keyword == "include-ci", path)
+                            {
+                                work.extend(datums);
+                            }
+                            includes.insert(key, text);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                work.extend(items.iter().cloned());
+                work.extend(tail.iter().map(|t| (**t).clone()));
+            }
+            DatumKind::Vector(items) => work.extend(items.iter().cloned()),
+            _ => {}
+        }
+    }
+}
+
 /// Reads one library form, named `name`, from a loader's source.
-fn read_library(name: &LibraryName, source: &Source) -> Result<LibraryForm> {
+async fn read_library(
+    name: &LibraryName,
+    source: &Source,
+    loader: &impl Fetch,
+    local: &HashSet<LibraryName>,
+) -> Result<LibraryForm> {
     let text = match &source.native {
         Some(library) => native_form(&source.identity, library),
         None => source.text.clone(),
@@ -349,6 +646,7 @@ fn read_library(name: &LibraryName, source: &Source) -> Result<LibraryForm> {
             None,
         ));
     };
+    let datum = &resolve_library(datum, &source.identity, loader, local).await?;
     let form = library::library_form(datum)?.ok_or_else(|| {
         error(
             format!("{}: expected a library form", source.identity),
@@ -368,9 +666,22 @@ fn read_library(name: &LibraryName, source: &Source) -> Result<LibraryForm> {
 }
 
 async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Result<Graph> {
-    // Libraries the program defines itself need no loader.
-    let local: HashMap<&LibraryName, &LibraryForm> =
-        program.libraries.iter().map(|l| (&l.name, l)).collect();
+    // Libraries the program defines itself need no loader, beyond what
+    // they include.
+    let mut names = HashSet::new();
+    for d in &program.libraries {
+        names.insert(library::form_name(d)?);
+    }
+    let mut forms = Vec::new();
+    for d in &program.libraries {
+        let name = library::form_name(d)?;
+        let local_identity = Identity::new(&format!("{identity}#{name}"));
+        let resolved = resolve_library(d, &local_identity, loader, &names).await?;
+        forms.push(library::library_form(&resolved)?.expect("a library form"));
+    }
+    let local: HashMap<&LibraryName, &LibraryForm> = forms.iter().map(|l| (&l.name, l)).collect();
+    let mut includes = Includes::new();
+    fetch_includes(&program.body, identity, loader, &mut includes).await;
     // Found libraries, unordered, and each name's place among them.
     let mut found: Vec<Library> = Vec::new();
     let mut by_name: HashMap<LibraryName, usize> = HashMap::new();
@@ -410,13 +721,14 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
                     by_name.insert(name, index);
                     continue;
                 }
-                let form = read_library(&name, &source)?;
+                let form = read_library(&name, &source, loader, &names).await?;
                 (source.identity, form, source.native)
             }
         };
         for set in form.imports.iter().rev() {
             work.push((set.library().clone(), Some(library_identity.clone())));
         }
+        fetch_includes(&form.body, &library_identity, loader, &mut includes).await;
         let index = found.len();
         by_identity.insert(library_identity.clone(), index);
         by_name.insert(name, index);
@@ -426,7 +738,9 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
             native,
         });
     }
-    order(found, by_name)
+    let mut graph = order(found, by_name)?;
+    graph.includes = includes;
+    Ok(graph)
 }
 
 /// Orders libraries so each comes after those it imports, refusing cycles.
@@ -499,7 +813,11 @@ fn order(found: Vec<Library>, by_name: HashMap<LibraryName, usize>) -> Result<Gr
         .into_iter()
         .map(|(name, old)| (name, place[old]))
         .collect();
-    Ok(Graph { libraries, by_name })
+    Ok(Graph {
+        libraries,
+        by_name,
+        includes: Includes::new(),
+    })
 }
 
 #[cfg(test)]

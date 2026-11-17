@@ -241,6 +241,20 @@ fn export_spec(d: &Datum) -> Result<ExportSpec> {
     }
 }
 
+/// Whether `d` is a library form: `(define-library ...)` or R6RS
+/// `(library ...)`.
+pub(crate) fn is_library_form(d: &Datum) -> bool {
+    matches!(items(d), Some([head, _, ..]) if matches!(symbol(head), Some("define-library" | "library")))
+}
+
+/// The name a library form gives its library.
+pub(crate) fn form_name(d: &Datum) -> Result<LibraryName> {
+    match items(d) {
+        Some([_, name, ..]) => library_name(name),
+        _ => Err(error("expected a library form", d.span)),
+    }
+}
+
 /// The library form `d` is, if it is `(define-library ...)` or R6RS
 /// `(library ...)`.
 pub(crate) fn library_form(d: &Datum) -> Result<Option<LibraryForm>> {

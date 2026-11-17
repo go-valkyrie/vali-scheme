@@ -568,8 +568,32 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
     ];
     table.extend(crate::numbers::table());
     table.extend(crate::strings::table());
+    table.push(("features", Arity::exactly(0), features));
     table.extend(crate::continuations::dynamic_table());
     table
+}
+
+/// The features `cond-expand` tests for and `features` lists (R7RS
+/// appendix B).
+pub const FEATURES: &[&str] = &[
+    "r7rs",
+    "exact-closed",
+    "exact-complex",
+    "ieee-float",
+    "full-unicode",
+    "ratios",
+    "vali",
+];
+
+/// `(features)`: a fresh list of the features, as symbols.
+fn features<S: Strategy>(cx: &mut Cx<S>, _args: &[Value]) -> Result<Value, Error> {
+    let mut list = Value::EMPTY_LIST;
+    for name in FEATURES.iter().rev() {
+        let symbol = cx.intern(name)?;
+        // SAFETY: valid values; nothing is collected meanwhile.
+        list = unsafe { cx.cons_raw(symbol, list) }?;
+    }
+    Ok(list)
 }
 
 /// The names of the standard procedures implemented in Rust, which

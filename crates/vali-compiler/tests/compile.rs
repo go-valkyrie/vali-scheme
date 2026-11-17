@@ -1685,6 +1685,122 @@ fn continuations() {
     }
 }
 
+/// Serves `(lib a)` and lets everything read the files it holds, except
+/// `secret.scm`.
+struct Files;
+
+impl Files {
+    const FILES: &[(&str, &str)] = &[
+        ("defs.scm", "(define included 42)"),
+        (
+            "nested.scm",
+            "(include \"defs.scm\") (define nested (+ included 1))",
+        ),
+        ("CI.scm", "(DEFINE Shout 'LOUD)"),
+        ("a-exports.scm", "(export extra)"),
+        (
+            "a-body.scm",
+            "(define value 1) (define both 2) (define extra 3)",
+        ),
+        ("secret.scm", "(define secret 'leaked)"),
+    ];
+}
+
+impl Loader for Files {
+    fn load(
+        &self,
+        name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        Ok((*name == LibraryName::new(["lib", "a"])).then(|| {
+            Source::scheme(
+                Identity::new("test:lib/a"),
+                "(define-library (lib a)
+                   (import (scheme base))
+                   (export value both)
+                   (cond-expand
+                     ((library (lib missing)) (export missing))
+                     ((and vali (library (scheme base)))
+                      (include-library-declarations \"a-exports.scm\")))
+                   (include \"a-body.scm\"))",
+            )
+        }))
+    }
+
+    fn include(&self, path: &str, _from: &Identity) -> Result<Option<String>, LoadError> {
+        Ok(Self::FILES
+            .iter()
+            .find(|(p, _)| *p == path && path != "secret.scm")
+            .map(|(_, text)| (*text).to_owned()))
+    }
+}
+
+fn run_with_files(source: &str) -> Result<String, String> {
+    let program = vali_compiler::compile_program(source, &Identity::new("test"), &Files)
+        .map_err(|e| e.message)?;
+    let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+    cx.install_primitives().map_err(|e| e.to_string())?;
+    let id = vali_compiler::load(&mut cx, program).map_err(|e| e.to_string())?;
+    let result = cx.run(id).map_err(|e| e.to_string())?;
+    cx.write_string(&result).map_err(|e| e.to_string())
+}
+
+#[test]
+fn cond_expand_and_features() {
+    check(&[
+        ("(cond-expand (r7rs 'yes) (else 'no))", "yes"),
+        (
+            "(cond-expand ((not vali) 1) ((and r7rs (library (scheme base))) 2))",
+            "2",
+        ),
+        (
+            "(cond-expand ((library (no such library)) 1) (else 2))",
+            "2",
+        ),
+        (
+            "(cond-expand ((or full-unicode no-such-feature) 'or))",
+            "or",
+        ),
+        // In a body, the chosen clause's definitions are the body's.
+        ("(let () (cond-expand (vali (define x 5))) (+ x 1))", "6"),
+        ("(if (memq 'r7rs (features)) #t #f)", "#t"),
+    ]);
+}
+
+#[test]
+fn including_files() {
+    let cases = [
+        ("(include \"defs.scm\") included", "42"),
+        // A file can include another.
+        ("(include \"nested.scm\") nested", "43"),
+        ("(include-ci \"CI.scm\") shout", "loud"),
+        // In a body, and as an expression.
+        ("(let () (include \"defs.scm\") (* included 2))", "84"),
+        // Declarations: cond-expand, include-library-declarations, include.
+        (
+            "(import (scheme base) (lib a)) (list value both extra)",
+            "(1 2 3)",
+        ),
+    ];
+    for (source, expected) in cases {
+        match run_with_files(source) {
+            Ok(result) => assert_eq!(result, expected, "{source}"),
+            Err(e) => panic!("{source}\n{e}"),
+        }
+    }
+    // The host decides what may be read; by default, nothing.
+    let error = run_with_files("(include \"secret.scm\") secret").unwrap_err();
+    assert!(error.contains("test may not read secret.scm"), "{error}");
+    let error = vali_compiler::compile_program(
+        "(include \"defs.scm\") included",
+        &Identity::new("test"),
+        &NoLibraries,
+    )
+    .unwrap_err()
+    .message;
+    assert!(error.contains("may not read defs.scm"), "{error}");
+}
+
 #[test]
 fn console_ports() {
     let program = vali_compiler::compile_program(

@@ -16,6 +16,7 @@ mod analyze;
 mod ast;
 mod codegen;
 mod expand;
+mod features;
 mod library;
 mod loader;
 mod pattern;
@@ -183,6 +184,7 @@ fn build(
     identity: &Identity,
 ) -> Result<Program, CompileError> {
     let mut expander = expand::Expander::new()?;
+    expander.set_includes(graph.includes);
     let mut names: Vec<Vec<LibraryName>> = vec![Vec::new(); graph.libraries.len()];
     for (name, i) in graph.by_name {
         names[i].push(name);
