@@ -6,6 +6,7 @@
 - **Amended:** 2026-11-16, the strategy is a type parameter of the runtime and a target of the code generator
 - **Amended:** 2026-11-16, objects shared between tasks: the share operation, atomic stores, handle kinds, concurrent cycle collection (semantics in ADR 0008)
 - **Amended:** 2026-11-16, the frame-return hook becomes a return barrier, now that compiled frames are native (ADR 0004)
+- **Amended:** 2026-11-17, the strategy owns half of the header word (ADR 0002), chooses whether pairs and flonums carry a header, and may keep side metadata on pair pages; M1 measures both pair layouts under counting
 - **Related:** 0002 (values), 0004 (frames), 0006 (ABI version), 0008 (threads), 0009 (resource limits), 0012 (distribution format)
 
 ## Context
@@ -44,9 +45,10 @@ Designed for the most demanding strategy under evaluation, which is concurrent c
 | **Two kinds of handle:** a *local* handle (`!Send`), which never shares its object, and a *shared* handle (`Send`), which shares its object when created | Counting strategies, which must know before another thread can touch a count | None: Rust code that never crosses tasks uses local handles and pays nothing |
 | **A pinning API** for Rust code that needs a stable address, such as a bytevector passed to I/O | Moving collectors | Small |
 | **Bridged Rust objects hold handles, not Scheme values the collector must trace** | Concurrent collectors, whose tracing would otherwise run Rust code concurrently with its owner | None |
-| **A header word owned by the strategy:** a count, mark bits or a forwarding pointer, plus the *shared* mark (Lean 4 keeps it in the sign of the count) | All | None |
+| **The upper 32 bits of every header word belong to the strategy** (ADR 0002 #7): a count, mark bits, age, the identity hash's state, plus the *shared* mark (Lean 4 keeps it in the sign of the count). A moving strategy may replace the whole header with a forwarding pointer | All | None |
+| **The strategy chooses whether pairs and flonums carry a header** (ADR 0002 #8), and may keep metadata for them in tables on their pages, such as count bytes and shared bits | Counting strategies, which need a count for every pair | None: tracing strategies leave pairs at two words |
 | **A share operation,** which the runtime calls when an object becomes reachable from a second task (ADR 0008). It marks the object and everything reachable from it | Counting strategies: shared objects take atomic count updates from then on | None: tracing strategies leave it empty |
-| **The runtime describes objects to the strategy:** size, where its pointers are, how to copy it | Tracing and cycle collection | Moderate: headerless pairs (ADR 0002) need a forwarding scheme, such as Chez's marker in the `car` |
+| **The runtime describes objects to the strategy:** size, where its pointers are, how to copy it | Tracing and cycle collection | Moderate: pairs without a header need a forwarding scheme, such as Chez's marker in the `car` |
 | **A store hook on every write of a pointer into the heap, given the old and new values** | Counting (increment and decrement), generational and concurrent tracing (write barriers), and sharing: a value stored into a shared object is shared | None when empty |
 | **A pointer store into a shared object is an atomic exchange** | Counting strategies, so that two racing writers cannot both decrement the old value | Only on shared objects; stores into local objects stay plain |
 | **A load hook on every read of a pointer from the heap** | Concurrent compaction (a Shenandoah-style load barrier) | None when empty |
@@ -75,7 +77,7 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 
 ## Plan for deciding
 
-1. **Milestone M1:** no collection, plus both counting strategies, measured against that baseline on the benchmark set. The faster counting strategy becomes the default.
+1. **Milestone M1:** no collection, plus both counting strategies, measured against that baseline on the benchmark set. The faster counting strategy becomes the default. Each counting strategy is measured with both pair layouts: a header word per pair, and count bytes on pair pages whose counts stick at 255 and are recovered by the cycle collector. The faster layout is kept.
 2. **Later, when a host needs it:** an MMTk binding for tracing, and either concurrent strategy.
 
 ## Questions to settle before accepting
