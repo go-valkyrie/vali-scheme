@@ -286,6 +286,15 @@ impl Syntax {
         matches!(&*self.content, Content::List { .. })
     }
 
+    /// For a list, how many elements it has before any `.`, and whether
+    /// it has a dotted tail, without taking it apart.
+    pub fn list_shape(&self) -> Option<(usize, bool)> {
+        match &*self.content {
+            Content::List { items, tail } => Some((items.len(), tail.is_some())),
+            _ => None,
+        }
+    }
+
     /// Takes the syntax object apart one level, giving the children their
     /// share of the pending scope changes.
     pub fn expose(&self, context: &mut ScopeContext) -> Result<Exposed<'_>, TooManyScopes> {
@@ -327,10 +336,17 @@ impl Syntax {
         for &(scope, effect) in pending.iter() {
             scopes = effect.apply(context, scopes, scope)?;
         }
+        // A leaf has nothing below it to pend for; a child with nothing
+        // pending of its own shares its parent's list.
+        let pending = match (&*child.content, &child.pending) {
+            (Content::Identifier(_) | Content::Atom(_), _) => None,
+            (_, None) => Some(Arc::clone(pending)),
+            (_, Some(own)) => compose(Some(own), pending),
+        };
         Ok(Syntax {
             content: Arc::clone(&child.content),
             scopes,
-            pending: compose(child.pending.as_ref(), pending),
+            pending,
             span: child.span,
             origin: child.origin.clone(),
         })

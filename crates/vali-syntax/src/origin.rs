@@ -17,6 +17,22 @@ pub struct Origin {
     pub parent: Option<Arc<Origin>>,
 }
 
+impl Drop for Origin {
+    /// Unlinks the chain one origin at a time: a macro that expands into
+    /// itself thousands of times builds a chain that long, and the default
+    /// drop would recurse once per link.
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(origin) = parent {
+            match Arc::try_unwrap(origin) {
+                Ok(mut origin) => parent = origin.parent.take(),
+                // Shared: whoever else holds it drops the rest.
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 impl Origin {
     /// This origin, then its parent, and so on: innermost macro use first.
     pub fn chain(&self) -> impl Iterator<Item = &Origin> {
