@@ -11,6 +11,7 @@
 - **Amended:** 2026-11-17, single-threaded heaps (ADR 0008): the share operation, the shared mark, atomic stores into shared objects and concurrent cycle collection are gone; handles belong to an isolate
 - **Amended:** 2026-11-17, how M1 builds and measures the counting strategies: both now, precise counting first without inference; epochs by allocation volume; trial deletion; a per-page allocator
 - **Amended:** 2026-11-17, how deferred counting finds cycle candidates, when trial deletion runs, and that sticky side counts are never recovered by it
+- **Amended:** 2026-11-17, how naive precise counting counts frames and when it frees, the first measurements of every strategy and layout, and the aim of deterministic deallocation once flow analysis exists
 - **Related:** 0002 (values), 0004 (frames), 0006 (ABI version), 0008 (threads), 0009 (resource limits), 0012 (distribution format)
 
 ## Context
@@ -87,6 +88,10 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
 ### How M1 builds them
 
 - **Both counting strategies are built in M1, on the baseline compiler.** Precise counting starts without ownership inference: every reference from a frame slot is counted too, which is its worst case. The inference passes (owned and borrowed parameters, decrements at last use, drop-reuse) come with the CPS compiler, and precise counting is measured again then.
+  - **Naive precise counting counts every slot store,** the new value in and the old one out, and counts a frame's slots out and clears them as the frame returns, unwinds, tail-calls into a smaller frame or moves to a new stack segment. The words of a callee's header are cleared the same way before it is written over its caller's slots. So every stack word holds a counted value or a non-pointer, and stack segments start zeroed. A waiting `%catch` holds its handler as a reference of its own.
+  - **Under M1, precise counting frees at epochs too.** An object whose count reaches zero waits in the zero-count table until the next epoch, which needs no stack scan. A Rust procedure can then hold a value whose count drops while it runs, so no primitive has to order its stores. Freeing is no more prompt than under deferred counting, but M1 measures what counting costs, and prompt reuse needs inference anyway.
+  - **The aim, once the CPS compiler's flow analysis exists, is deterministic deallocation:** free each object at its last use, and count only where the analysis cannot prove ownership, instead of counting every store.
+  - **Its cycle candidates are the objects whose count drops but not to zero.** A new object that drops while it waits in the zero-count table is marked instead, and buffered as it leaves still referred to.
 - **A deferred-counting epoch runs at a safepoint once a set volume has been allocated since the last, and whenever Scheme returns to the host.** Safepoints are calls, returns and a loop's backward jumps. Triggering by allocation volume keeps expansion deterministic (ADR 0001 #4), and returning to the host bounds how long garbage waits after a call. An epoch scans the stacks of every task of the isolate, frees what has a zero count and no reference from a stack, and decrements what those objects referred to.
 - **Cycles are collected by trial deletion** (Bacon and Rajan, synchronous): an object whose count drops without reaching zero becomes a candidate root, and at an epoch the collector trial-deletes the candidates' internal references to find garbage cycles. It touches only the candidates' subgraphs, never the whole heap.
   - **Under deferred counting, candidates also come from the stack.** A stack reference is never counted down, so an object can become cyclic garbage without a decrement. Two more cases make candidates: an object that leaves the zero-count table still referred to, such as a new pair closed into a loop by `set-cdr!` and then dropped; and an object whose count drops when the epoch counts the stack's references out again. An object still waiting in the zero-count table is not buffered, because it is looked at as it leaves.
@@ -96,6 +101,20 @@ Rejected outright: ZGC-style coloured pointers, which put metadata in a pointer'
   - **Colours and the buffered flag live beside the count:** in the strategy's half of the header, or in a side-counted pair's flags byte.
 - **The allocator keeps a free list per page,** as mimalloc does. Pages are aligned, so an object's page header is its address masked. Each page holds one size class, and allocation drains the current page of a class before taking the next page with free blocks. Freed objects go back on their own page's list, and a page whose objects are all free can take another size class. The side-count pair layout keeps its count bytes in the pair page's header, which this layout already has.
 - **Objects describe their pointers to the strategy** by type: which fields hold values. Freeing an object, cycle collection and, later, tracing all walk the same description.
+
+### First measurements
+
+On the baseline compiler and VM, best of five runs, in milliseconds; the heap is what the benchmark process holds at its end, in MiB. `fib` and `tak` only call; `churn` allocates short-lived structures; `rings` makes a million garbage cycles; `sum` walks a million-element list; `build` makes one.
+
+| Strategy | fib | tak | churn | rings | sum | build | Heap |
+|---|---|---|---|---|---|---|---|
+| None | 83 | 94 | 113 | 76 | 30 | 38 | 793 |
+| Deferred, headered | 82 | 94 | 189 | 213 | 28 | 66 | 69 |
+| Deferred, side counts | 89 | 95 | 215 | 283 | 28 | 82 | 51 |
+| Precise, headered | 142 | 139 | 208 | 231 | 44 | 78 | 69 |
+| Precise, side counts | 146 | 148 | 263 | 322 | 67 | 109 | 51 |
+
+Deferred counting costs nothing on code that only calls, and is faster than naive precise counting on every benchmark. Side counts take about a quarter less heap, but are slower under both strategies. Absolute times vary by about half between machines; the comparisons within one run hold.
 
 ## Questions to settle before accepting
 

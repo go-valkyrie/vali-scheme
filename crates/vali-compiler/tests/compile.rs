@@ -2,8 +2,8 @@
 
 use vali_compiler::{Identity, LibraryName, LoadError, Loader, Source, compile};
 use vali_runtime::{
-    Cx, DeferredHeadered, DeferredHeap, DeferredSideCounts, Error, HeapConfig, NoCollection,
-    Strategy,
+    CountingHeap, Cx, DeferredHeadered, DeferredSideCounts, Error, HeapConfig, NoCollection,
+    PreciseHeadered, PreciseSideCounts, Strategy,
 };
 
 /// Only the standard libraries.
@@ -44,6 +44,8 @@ fn run(source: &str) -> Result<String, Error> {
     for (name, other) in [
         ("deferred", run_under::<DeferredHeadered>(source)),
         ("deferred-side", run_under::<DeferredSideCounts>(source)),
+        ("precise", run_under::<PreciseHeadered>(source)),
+        ("precise-side", run_under::<PreciseSideCounts>(source)),
     ] {
         assert_eq!(
             describe(&other),
@@ -981,7 +983,7 @@ const CYCLES: &str = "
 #[test]
 fn cycles_are_collected() {
     check(&[(CYCLES, "((150000 #t) 1 1)")]);
-    fn live_after<S: Strategy<Heap = DeferredHeap>>(source: &str) -> (usize, usize) {
+    fn live_after<S: Strategy<Heap = CountingHeap>>(source: &str) -> (usize, usize) {
         let program =
             vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
         let mut cx = Cx::<S>::new(&HeapConfig::default());
@@ -995,6 +997,8 @@ fn cycles_are_collected() {
     for (name, (before, after)) in [
         ("deferred", live_after::<DeferredHeadered>(CYCLES)),
         ("deferred-side", live_after::<DeferredSideCounts>(CYCLES)),
+        ("precise", live_after::<PreciseHeadered>(CYCLES)),
+        ("precise-side", live_after::<PreciseSideCounts>(CYCLES)),
     ] {
         // Collections mid-program keep the heap near their 4 MiB
         // threshold, and a last one leaves only what the program's
@@ -1008,16 +1012,85 @@ fn cycles_are_collected() {
 }
 
 #[test]
-fn deferred_counting_reclaims_memory() {
+fn counting_reclaims_memory() {
     let none = bytes_after::<NoCollection>(CHURN);
     for (name, used) in [
         ("deferred", bytes_after::<DeferredHeadered>(CHURN)),
         ("deferred-side", bytes_after::<DeferredSideCounts>(CHURN)),
+        ("precise", bytes_after::<PreciseHeadered>(CHURN)),
+        ("precise-side", bytes_after::<PreciseSideCounts>(CHURN)),
     ] {
         // Only one structure lives at a time, plus an epoch's garbage.
         assert!(
             used * 3 < none,
             "{name}: {used} bytes, against {none} without collection"
         );
+    }
+}
+
+/// Under a counting strategy, every frame path leaves the stack counted
+/// out: after a collection, repeating a program's work leaves no more
+/// behind, however it called, returned, unwound or chained stack segments.
+#[test]
+fn frames_leave_nothing_counted() {
+    fn live_after<S: Strategy<Heap = CountingHeap>>(source: &str) -> usize {
+        let program =
+            vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        // Some of these fail on purpose; what they leave is what counts.
+        drop(cx.run(id));
+        cx.collect_garbage();
+        cx.heap().bytes_live()
+    }
+    fn each_strategy(check: impl Fn(&str, fn(&str) -> usize)) {
+        check("deferred", live_after::<DeferredHeadered>);
+        check("precise", live_after::<PreciseHeadered>);
+        check("precise-side", live_after::<PreciseSideCounts>);
+    }
+    // Constants live as long as their module, so these programs quote
+    // nothing that is allocated.
+    let prelude = "
+        (define (ring) (let ((p (list 1 2 3))) (set-cdr! (cdr (cdr p)) p) p))
+        (define (rep f n) (let loop ((i 0)) (if (< i n) (begin (f) (loop (+ i 1))))))
+        (define (deep n) (if (= n 0) (list (ring)) (cons (ring) (deep (- n 1)))))
+        (define (rest . xs) (cons (ring) xs))
+        (define (tail-native x) (list x (ring)))
+    ";
+    let repeated = [
+        "(ring)",
+        "(list (ring) (ring))",
+        // Recursion deep enough to chain stack segments.
+        "(length (deep 30000))",
+        "(rest (ring) (ring) (ring) (ring))",
+        "(apply rest (map (lambda (i) (ring)) (list 1 2 3 4 5 6 7 8 9 10)))",
+        "(tail-native (ring))",
+        "(guard (e (#t (ring))) (raise (ring)))",
+        "(guard (e (#t e)) (car (ring)) (vector-ref (vector (ring)) 5))",
+    ];
+    for body in repeated {
+        each_strategy(|name, live| {
+            let times = |n: usize| live(&format!("{prelude}(rep (lambda () {body}) {n})"));
+            assert_eq!(times(4), times(2), "{name}: {body}");
+        });
+    }
+    // Raised to the host: the same program raising a number instead of
+    // allocating leaves the same behind.
+    let raised = [
+        ("(let ((r (ring))) (raise r))", "(let ((r 5)) (raise r))"),
+        (
+            "(define (fail n) (if (= n 0) (car (ring) 5) (list (ring) (fail (- n 1))))) (fail 100)",
+            "(define (fail n) (if (= n 0) (car 5 5) (list 5 (fail (- n 1))))) (fail 100)",
+        ),
+    ];
+    for (program, control) in raised {
+        each_strategy(|name, live| {
+            assert_eq!(
+                live(&format!("{prelude}{program}")),
+                live(&format!("{prelude}{control}")),
+                "{name}: {program}"
+            );
+        });
     }
 }

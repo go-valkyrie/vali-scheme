@@ -349,6 +349,7 @@ impl PageHeap {
     /// # Safety
     ///
     /// `object` must be a live block on a page with a side table.
+    #[inline(always)]
     pub unsafe fn side_byte(object: *const u64) -> *mut u8 {
         let page = page_of(object);
         // SAFETY: passed on to the caller.

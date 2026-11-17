@@ -1,13 +1,14 @@
 //! The tier-0 benchmarks of `vali-runtime`'s `bench` example, compiled
 //! from Scheme source instead of assembled by hand. Run with
 //! `cargo run --release -p vali-compiler --example bench`, with
-//! `--strategy deferred` or `--strategy deferred-side` for a counting
-//! strategy.
+//! `--strategy deferred`, `deferred-side`, `precise` or `precise-side` for
+//! a counting strategy.
 
 use std::time::Instant;
 
 use vali_runtime::{
-    Cx, DeferredHeadered, DeferredSideCounts, Handle, HeapConfig, NoCollection, Strategy,
+    Cx, DeferredHeadered, DeferredSideCounts, Handle, HeapConfig, NoCollection, PreciseHeadered,
+    PreciseSideCounts, Strategy,
 };
 
 const SOURCE: &str = "
@@ -74,7 +75,8 @@ fn main() {
             println!("{}", vali_bytecode::disassemble(function));
         }
     }
-    // `--strategy none|deferred|deferred-side`: the memory strategy.
+    // `--strategy none|deferred|deferred-side|precise|precise-side`: the
+    // memory strategy.
     let strategy = args
         .iter()
         .position(|a| a == "--strategy")
@@ -85,6 +87,8 @@ fn main() {
         "none" => bench::<NoCollection>(module),
         "deferred" => bench::<DeferredHeadered>(module),
         "deferred-side" => bench::<DeferredSideCounts>(module),
+        "precise" => bench::<PreciseHeadered>(module),
+        "precise-side" => bench::<PreciseSideCounts>(module),
         other => panic!("no strategy {other}"),
     }
 }

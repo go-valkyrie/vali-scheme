@@ -659,18 +659,107 @@ impl<S: Strategy> Cx<S> {
         })
     }
 
-    /// Adds a backtrace, read from the frames starting at `fp`, to a Scheme
-    /// error.
-    ///
-    /// # Safety
-    ///
-    /// `fp` must be the frame pointer of a live frame.
     /// A `%catch`'s thunk returned: its catch is done. Out of line, so the
     /// return path it sits on stays small; inlined, it cost fib 10%.
     #[cold]
     #[inline(never)]
     fn catch_returned(&mut self) {
-        self.catches.pop();
+        if let Some(catch) = self.catches.pop()
+            && S::PRECISE
+        {
+            S::release(self.heap_mut(), catch.handler);
+        }
+    }
+
+    /// A `%catch` now waits for its thunk: under precise counting, it
+    /// holds its handler as a reference of its own, since the thunk's frame
+    /// overwrites the slot the handler came from.
+    fn push_catch(&mut self, catch: Catch) {
+        if S::PRECISE {
+            S::retain(self.heap_mut(), catch.handler);
+        }
+        self.catches.push(catch);
+    }
+
+    /// Stores `v` in slot `i` of the frame at `fp`. Under precise counting,
+    /// `v` is counted in and the value it replaces out.
+    ///
+    /// # Safety
+    ///
+    /// Slot `i` must be inside the stack, holding a value counted under
+    /// precise counting, or a word that reads as a fixnum.
+    #[inline(always)]
+    unsafe fn store(&mut self, fp: *mut u64, i: usize, v: Value) {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            if S::PRECISE {
+                let old = slot(fp, i);
+                S::write(self.heap_mut(), old, v);
+            }
+            set(fp, i, v);
+        }
+    }
+
+    /// Under precise counting, counts slots `from` to `to` (exclusive) of
+    /// the frame at `fp` out and clears them: they are dead. Every stack
+    /// word outside a live frame is cleared this way, so a store over it
+    /// counts nothing out.
+    ///
+    /// # Safety
+    ///
+    /// As `store`, for each slot.
+    #[inline(always)]
+    unsafe fn release_slots(&mut self, fp: *mut u64, from: usize, to: usize) {
+        if S::PRECISE {
+            for i in from..to {
+                // SAFETY: passed on to the caller.
+                unsafe {
+                    let old = slot(fp, i);
+                    set(fp, i, Value::UNSPECIFIED);
+                    S::release(self.heap_mut(), old);
+                }
+            }
+        }
+    }
+
+    /// How many slots the suspended bytecode frame at `fp` has.
+    ///
+    /// # Safety
+    ///
+    /// `fp` must be a bytecode function's frame.
+    unsafe fn suspended_slots(&self, fp: *mut u64) -> usize {
+        // SAFETY: passed on to the caller: slot 0 holds the frame's closure.
+        match unsafe { self.procedure_code(slot(fp, 0)) }.map(|c| &c.kind) {
+            Ok(Kind::Bytecode { slots, .. }) => usize::from(*slots),
+            _ => 0,
+        }
+    }
+
+    /// Under precise counting, counts out and clears the slots of every
+    /// frame from the innermost, at `fp` with `slots` slots, out to `to`
+    /// (exclusive), or to the entry frame (inclusive) if `to` is null. A
+    /// frame's slots overlap its caller's, which are cleared after it.
+    ///
+    /// # Safety
+    ///
+    /// `fp` must be the innermost frame, `to` one of its callers or null.
+    unsafe fn release_frames(&mut self, mut fp: *mut u64, mut slots: usize, to: *mut u64) {
+        if !S::PRECISE {
+            return;
+        }
+        // SAFETY: frames link to their callers up to the entry frame, and
+        // a frame's header lies in its caller's slots, released only after
+        // it is read.
+        unsafe {
+            while fp != to {
+                self.release_slots(fp, 0, slots);
+                if *fp.add(2) == ENTRY {
+                    break;
+                }
+                fp = *fp as *mut u64;
+                slots = self.suspended_slots(fp);
+            }
+        }
     }
 
     /// What a handler sees for `error`: what Scheme code raised, or for an
@@ -692,6 +781,12 @@ impl<S: Strategy> Cx<S> {
         }
     }
 
+    /// Adds a backtrace, read from the frames starting at `fp`, to a Scheme
+    /// error.
+    ///
+    /// # Safety
+    ///
+    /// `fp` must be the frame pointer of a live frame.
     unsafe fn with_backtrace(&self, mut fp: *mut u64, error: Error) -> Error {
         let Error::Scheme(mut e) = error else {
             return error;
@@ -733,9 +828,9 @@ impl<S: Strategy> Cx<S> {
         let (entry, limit) = unsafe { (segment.top().sub(1), segment.limit()) };
         // SAFETY: as above.
         unsafe {
-            set(entry, 3, procedure);
+            self.store(entry, 3, procedure);
             for (i, &arg) in args.iter().enumerate() {
-                set(entry, 4 + i, arg);
+                self.store(entry, 4 + i, arg);
             }
         }
         self.running = true;
@@ -756,7 +851,11 @@ impl<S: Strategy> Cx<S> {
             std::panic::resume_unwind(panic);
         }
         let result = state.result.expect("the VM ran");
-        self.catches.clear();
+        while let Some(catch) = self.catches.pop() {
+            if S::PRECISE {
+                S::release(self.heap_mut(), catch.handler);
+            }
+        }
         // An error can leave segments chained; only the first is kept.
         while self.stack.len() > 1 {
             self.pop_segment();
@@ -844,17 +943,20 @@ impl<S: Strategy> Cx<S> {
         // caller inside its own frame, or copied with it to a new segment.
         unsafe {
             for i in argc + 1..=fixed {
-                set(fp, i, Value::DEFAULT);
+                self.store(fp, i, Value::DEFAULT);
             }
             if arity.rest {
                 let mut list = Value::EMPTY_LIST;
                 for i in (fixed + 1..=argc).rev() {
                     list = self.cons_raw(slot(fp, i), list)?;
                 }
-                set(fp, fixed + 1, list);
+                self.store(fp, fixed + 1, list);
+                // The rest of the arguments are in the list now; those
+                // past the frame's slots are cleared, the others below.
+                self.release_slots(fp, slots.max(fixed + 2), argc + 1);
             }
             for i in arity.parameter_slots() + 1..slots {
-                set(fp, i, Value::UNSPECIFIED);
+                self.store(fp, i, Value::UNSPECIFIED);
             }
         }
         self.fuel_used += 1;
@@ -944,6 +1046,10 @@ impl<S: Strategy> Cx<S> {
         // return to. The entry pseudo-frame has none: its callee returns to
         // the host.
         let mut current_stub = 0u64;
+        // Under precise counting, how many slots the innermost frame has,
+        // to count out as it leaves; while the entry pseudo-frame is the
+        // innermost, how many of its words from slot 3 hold values.
+        let mut frame_slots = argc + 1;
 
         // SAFETY (for the whole loop): the validator checked every slot,
         // constant, variable, function and branch operand; frames are set up
@@ -1019,20 +1125,29 @@ impl<S: Strategy> Cx<S> {
                         // handler with the condition in place of the `%catch`
                         // call; with none, return the error to the host.
                         let Some(catch) = self.catches.pop() else {
-                            return Err(if fp == top {
-                                error
-                            } else {
-                                self.with_backtrace(fp, error)
-                            });
+                            if fp == top {
+                                self.release_slots(top, 3, 3 + frame_slots);
+                                return Err(error);
+                            }
+                            let error = self.with_backtrace(fp, error);
+                            self.release_frames(fp, frame_slots, std::ptr::null_mut());
+                            return Err(error);
                         };
                         let condition = self.condition(error)?;
+                        if fp != catch.fp {
+                            self.release_frames(fp, frame_slots, catch.fp);
+                        }
                         while self.stack.len() > catch.segments {
                             self.pop_segment();
                         }
                         limit = self.stack.last().expect("a segment").limit();
                         fp = catch.fp;
-                        set(fp, catch.base + 3, catch.handler);
-                        set(fp, catch.base + 4, condition);
+                        self.store(fp, catch.base + 3, catch.handler);
+                        self.store(fp, catch.base + 4, condition);
+                        if S::PRECISE {
+                            S::release(self.heap_mut(), catch.handler);
+                            frame_slots = self.suspended_slots(fp);
+                        }
                         let caller = self
                             .procedure_code(slot(fp, 0))
                             .expect("a frame's slot 0 holds its procedure");
@@ -1062,14 +1177,14 @@ impl<S: Strategy> Cx<S> {
                                 if resume == ENTRY {
                                     fail!(Error::scheme("%catch: cannot be called from Rust"));
                                 }
-                                self.catches.push(Catch {
+                                self.push_catch(Catch {
                                     fp,
                                     base,
                                     resume,
                                     segments: self.stack.len(),
                                     handler: slot(fp, base + 5),
                                 });
-                                set(fp, base + 3, slot(fp, base + 4));
+                                self.store(fp, base + 3, slot(fp, base + 4));
                                 next = Next::Call {
                                     base,
                                     argc: 0,
@@ -1088,9 +1203,12 @@ impl<S: Strategy> Cx<S> {
                                             "too many arguments to fit in this stack segment"
                                         ));
                                     }
-                                    set(fp, base + 3, procedure);
+                                    self.store(fp, base + 3, procedure);
                                     for (i, &arg) in args.iter().enumerate() {
-                                        set(fp, base + 4 + i, arg);
+                                        self.store(fp, base + 4 + i, arg);
+                                    }
+                                    if S::PRECISE && resume == ENTRY {
+                                        frame_slots = frame_slots.max(args.len() + 1);
                                     }
                                     next = Next::Call {
                                         base,
@@ -1100,12 +1218,15 @@ impl<S: Strategy> Cx<S> {
                                     continue;
                                 }
                                 if resume == ENTRY {
+                                    self.release_slots(fp, base + 3, base + 3 + frame_slots);
                                     return Ok(result);
                                 }
                                 if resume & CATCH != 0 {
                                     self.catch_returned();
                                 }
-                                set(fp, base + 3, result);
+                                // The arguments are dead.
+                                self.release_slots(fp, base + 4, base + 4 + argc);
+                                self.store(fp, base + 3, result);
                                 pc = (resume & !CATCH) as usize;
                             }
                             Kind::Bytecode { slots, .. } => {
@@ -1125,7 +1246,11 @@ impl<S: Strategy> Cx<S> {
                                     // header.
                                     let new_fp = top.sub(if position == ENTRY { 4 } else { 3 });
                                     for i in 0..=argc {
+                                        // Moved, so counted as they were.
                                         set(new_fp, i, slot(callee_fp, i));
+                                        if S::PRECISE {
+                                            set(callee_fp, i, Value::UNSPECIFIED);
+                                        }
                                     }
                                     callee_fp = new_fp;
                                     limit = new_limit;
@@ -1138,11 +1263,19 @@ impl<S: Strategy> Cx<S> {
                                     *callee_fp.add(1) = link.host_return;
                                     *callee_fp.add(3) = link.host_cfa;
                                 } else {
+                                    if S::PRECISE && callee_fp == fp.sub(base + 3) {
+                                        // The header goes in the caller's
+                                        // slots, which may hold values.
+                                        self.release_slots(fp, base, base + 3);
+                                    }
                                     *callee_fp = fp as u64;
                                     *callee_fp.add(1) = current_stub;
                                 }
                                 *callee_fp.add(2) = position;
                                 attempt!(self.enter(callee, callee_fp, argc));
+                                if S::PRECISE {
+                                    frame_slots = needed;
+                                }
                                 fp = callee_fp;
                                 link_to!(fp, stub_of!(position, callee));
                                 pc = 0;
@@ -1166,14 +1299,14 @@ impl<S: Strategy> Cx<S> {
                                 } else {
                                     self.stack.len()
                                 };
-                                self.catches.push(Catch {
+                                self.push_catch(Catch {
                                     fp: *fp as *mut u64,
                                     base: position_base(position),
                                     resume: position_resume(position),
                                     segments,
                                     handler: slot(fp, 2),
                                 });
-                                set(fp, 0, slot(fp, 1));
+                                self.store(fp, 0, slot(fp, 1));
                                 *fp.add(2) = position | CATCH;
                                 next = Next::TailCall { argc: 0 };
                                 continue;
@@ -1186,9 +1319,12 @@ impl<S: Strategy> Cx<S> {
                                             "too many arguments to fit in this stack segment"
                                         ));
                                     }
-                                    set(fp, 0, procedure);
+                                    self.store(fp, 0, procedure);
                                     for (i, &arg) in args.iter().enumerate() {
-                                        set(fp, 1 + i, arg);
+                                        self.store(fp, 1 + i, arg);
+                                    }
+                                    if S::PRECISE {
+                                        frame_slots = frame_slots.max(args.len() + 1);
                                     }
                                     next = Next::TailCall { argc: args.len() };
                                     continue;
@@ -1205,8 +1341,17 @@ impl<S: Strategy> Cx<S> {
                                     let saved = *fp;
                                     let return_to = *fp.add(1);
                                     let old = *fp.add(2);
+                                    // The procedure and arguments move, so
+                                    // counted as they were; the rest of the
+                                    // old frame is dead.
+                                    self.release_slots(fp, argc + 1, frame_slots);
                                     let moved: Vec<Value> =
                                         (0..=argc).map(|i| slot(fp, i)).collect();
+                                    if S::PRECISE {
+                                        for i in 0..=argc {
+                                            set(fp, i, Value::UNSPECIFIED);
+                                        }
+                                    }
                                     let position = if old == ENTRY {
                                         ENTRY
                                     } else if old & BOUNDARY != 0 {
@@ -1233,6 +1378,12 @@ impl<S: Strategy> Cx<S> {
                                     *link.record = fp as u64;
                                 }
                                 attempt!(self.enter(callee, fp, argc));
+                                if S::PRECISE {
+                                    // What the old function's frame had
+                                    // past the new one's is dead.
+                                    self.release_slots(fp, needed, frame_slots);
+                                    frame_slots = needed;
+                                }
                                 // A different function now runs in this frame.
                                 link_to!(fp, stub_of!(*fp.add(2), callee));
                                 pc = 0;
@@ -1242,6 +1393,9 @@ impl<S: Strategy> Cx<S> {
                     }
                     Next::Return(value) => {
                         let position = *fp.add(2);
+                        // The returning frame is dead: its value is counted
+                        // out with it, and back in where it is stored.
+                        self.release_slots(fp, 0, frame_slots);
                         if position == ENTRY {
                             return Ok(value);
                         }
@@ -1250,13 +1404,18 @@ impl<S: Strategy> Cx<S> {
                         }
                         let caller = *fp as *mut u64;
                         let base = position_base(position);
-                        set(caller, base + 3, value);
+                        self.store(caller, base + 3, value);
                         if position & BOUNDARY != 0 {
                             limit = self.pop_segment();
                         }
                         fp = caller;
                         pc = position_resume(position) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
+                        if S::PRECISE
+                            && let Kind::Bytecode { slots, .. } = caller.kind
+                        {
+                            frame_slots = usize::from(slots);
+                        }
                         link_to!(fp, stub_of!(*fp.add(2), caller));
                         switch_to!(caller);
                     }
@@ -1307,16 +1466,16 @@ impl<S: Strategy> Cx<S> {
                     };
                     match op {
                         Opcode::Mov => {
-                            set(fp, a, slot(fp, b));
+                            self.store(fp, a, slot(fp, b));
                             pc += 1;
                         }
                         Opcode::LoadConstant => {
-                            set(fp, a, *constants.add(usize::from(field_d(word))));
+                            self.store(fp, a, *constants.add(usize::from(field_d(word))));
                             pc += 1;
                         }
                         Opcode::LoadInt => {
                             let n = field_d(word) as i16;
-                            set(fp, a, Value::fixnum(i64::from(n)).expect("16 bits fit"));
+                            self.store(fp, a, Value::fixnum(i64::from(n)).expect("16 bits fit"));
                             pc += 1;
                         }
                         Opcode::GetVariable => {
@@ -1333,7 +1492,7 @@ impl<S: Strategy> Cx<S> {
                                 let name = &loaded.module.variables[index].name;
                                 fail!(Error::scheme(format!("unbound variable: {name}")));
                             }
-                            set(fp, a, value);
+                            self.store(fp, a, value);
                             pc += 1;
                         }
                         Opcode::SetVariable => {
@@ -1359,12 +1518,12 @@ impl<S: Strategy> Cx<S> {
                             let loaded: &Loaded<S> = &*module;
                             let target = &loaded.functions[function] as *const Code<S>;
                             let closure = attempt!(self.closure_raw(target, &free));
-                            set(fp, a, closure);
+                            self.store(fp, a, closure);
                             pc += 2 + count.div_ceil(4);
                         }
                         Opcode::Free => {
                             let closure = slot(fp, 0);
-                            set(
+                            self.store(
                                 fp,
                                 a,
                                 Value::from_raw(get(closure, Self::LAYOUT.closure_free(b))),
@@ -1378,7 +1537,7 @@ impl<S: Strategy> Cx<S> {
                                 Self::LAYOUT.field(TypeCode::Box, 0),
                                 slot(fp, b),
                             );
-                            set(fp, a, cell);
+                            self.store(fp, a, cell);
                             pc += 1;
                         }
                         Opcode::Unbox => {
@@ -1386,7 +1545,7 @@ impl<S: Strategy> Cx<S> {
                             if !self.is_other(cell, TypeCode::Box) {
                                 fail!(type_error("unbox", "a box", cell));
                             }
-                            set(
+                            self.store(
                                 fp,
                                 a,
                                 Value::from_raw(get(cell, Self::LAYOUT.field(TypeCode::Box, 0))),
@@ -1438,19 +1597,19 @@ impl<S: Strategy> Cx<S> {
                         }
                         Opcode::TailCall => {
                             for i in 0..=b {
-                                set(fp, i, slot(fp, a + i));
+                                self.store(fp, i, slot(fp, a + i));
                             }
                             break Next::TailCall { argc: b };
                         }
                         Opcode::Return => break Next::Return(slot(fp, a)),
                         Opcode::Add => {
                             let v = arith!(Arith::Add, slot(fp, b), slot(fp, c), i64::checked_add);
-                            set(fp, a, v);
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::Sub => {
                             let v = arith!(Arith::Sub, slot(fp, b), slot(fp, c), i64::checked_sub);
-                            set(fp, a, v);
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::Mul => {
@@ -1458,47 +1617,47 @@ impl<S: Strategy> Cx<S> {
                                 arith!(Arith::Mul, slot(fp, b), slot(fp, c), |x: i64, y: i64| {
                                     (x >> 3).checked_mul(y)
                                 });
-                            set(fp, a, v);
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::AddImm => {
                             let imm = Value::fixnum(i64::from(c as u8 as i8)).expect("fits");
                             let v = arith!(Arith::Add, slot(fp, b), imm, i64::checked_add);
-                            set(fp, a, v);
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::SubImm => {
                             let imm = Value::fixnum(i64::from(c as u8 as i8)).expect("fits");
                             let v = arith!(Arith::Sub, slot(fp, b), imm, i64::checked_sub);
-                            set(fp, a, v);
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::Lt => {
                             let r = compare!(Compare::Lt, slot(fp, b), slot(fp, c), <);
-                            set(fp, a, Value::boolean(r));
+                            self.store(fp, a, Value::boolean(r));
                             pc += 1;
                         }
                         Opcode::Le => {
                             let r = compare!(Compare::Le, slot(fp, b), slot(fp, c), <=);
-                            set(fp, a, Value::boolean(r));
+                            self.store(fp, a, Value::boolean(r));
                             pc += 1;
                         }
                         Opcode::NumEq => {
                             let r = compare!(Compare::Eq, slot(fp, b), slot(fp, c), ==);
-                            set(fp, a, Value::boolean(r));
+                            self.store(fp, a, Value::boolean(r));
                             pc += 1;
                         }
                         Opcode::Eq => {
-                            set(fp, a, Value::boolean(slot(fp, b) == slot(fp, c)));
+                            self.store(fp, a, Value::boolean(slot(fp, b) == slot(fp, c)));
                             pc += 1;
                         }
                         Opcode::Not => {
-                            set(fp, a, Value::boolean(!slot(fp, b).is_true()));
+                            self.store(fp, a, Value::boolean(!slot(fp, b).is_true()));
                             pc += 1;
                         }
                         Opcode::Cons => {
                             let pair = attempt!(self.cons_raw(slot(fp, b), slot(fp, c)));
-                            set(fp, a, pair);
+                            self.store(fp, a, pair);
                             pc += 1;
                         }
                         Opcode::Car => {
@@ -1506,7 +1665,7 @@ impl<S: Strategy> Cx<S> {
                             if !pair.is_pair() {
                                 fail!(type_error("car", "a pair", pair));
                             }
-                            set(fp, a, self.car(pair));
+                            self.store(fp, a, self.car(pair));
                             pc += 1;
                         }
                         Opcode::Cdr => {
@@ -1514,7 +1673,7 @@ impl<S: Strategy> Cx<S> {
                             if !pair.is_pair() {
                                 fail!(type_error("cdr", "a pair", pair));
                             }
-                            set(fp, a, self.cdr(pair));
+                            self.store(fp, a, self.cdr(pair));
                             pc += 1;
                         }
                         Opcode::SetCar => {
@@ -1534,11 +1693,11 @@ impl<S: Strategy> Cx<S> {
                             pc += 1;
                         }
                         Opcode::IsNull => {
-                            set(fp, a, Value::boolean(slot(fp, b) == Value::EMPTY_LIST));
+                            self.store(fp, a, Value::boolean(slot(fp, b) == Value::EMPTY_LIST));
                             pc += 1;
                         }
                         Opcode::IsPair => {
-                            set(fp, a, Value::boolean(slot(fp, b).is_pair()));
+                            self.store(fp, a, Value::boolean(slot(fp, b).is_pair()));
                             pc += 1;
                         }
                         Opcode::MakeVector => {
@@ -1547,7 +1706,7 @@ impl<S: Strategy> Cx<S> {
                                 fail!(type_error("make-vector", "a non-negative fixnum", len));
                             };
                             let v = attempt!(self.make_vector_raw(n as usize, slot(fp, c)));
-                            set(fp, a, v);
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::VectorRef | Opcode::VectorSet => {
@@ -1572,7 +1731,7 @@ impl<S: Strategy> Cx<S> {
                                 )));
                             };
                             if op == Opcode::VectorRef {
-                                set(fp, a, self.vector_ref(vector, i as usize));
+                                self.store(fp, a, self.vector_ref(vector, i as usize));
                             } else {
                                 self.vector_set(vector, i as usize, slot(fp, c));
                             }
@@ -1584,7 +1743,7 @@ impl<S: Strategy> Cx<S> {
                                 fail!(type_error("vector-length", "a vector", vector));
                             }
                             let len = self.vector_length(vector) as i64;
-                            set(fp, a, Value::fixnum(len).expect("lengths fit"));
+                            self.store(fp, a, Value::fixnum(len).expect("lengths fit"));
                             pc += 1;
                         }
                         Opcode::SetFree => {

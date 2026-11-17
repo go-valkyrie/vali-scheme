@@ -1,18 +1,29 @@
-//! Deferred reference counting (Deutsch and Bobrow; ADR 0003): only
-//! references from the heap, variables' cells and the runtime's own tables
-//! are counted, never those from frames, so calls and returns cost nothing.
-//! An object whose count reaches zero waits in the zero-count table until
-//! the next epoch, which counts the stack's references in, frees what is
-//! still at zero, and counts them out again.
+//! The two counting strategies (ADR 0003), which share everything but how
+//! they treat the stack.
+//!
+//! Deferred counting (Deutsch and Bobrow) counts only references from the
+//! heap, variables' cells and the runtime's own tables, never those from
+//! frames, so calls and returns cost nothing. An object whose count reaches
+//! zero waits in the zero-count table until the next epoch, which counts
+//! the stack's references in, frees what is still at zero, and counts them
+//! out again.
+//!
+//! Precise counting also counts every reference from a frame slot: the VM
+//! counts each slot store, and counts a frame's slots out as it returns.
+//! This first version is naive, with no ownership inference, its worst
+//! case. An object whose count reaches zero still waits in the zero-count
+//! table until the next epoch, which needs no stack scan; so a Rust
+//! procedure can hold a value whose count drops while it runs.
 //!
 //! Cycles of garbage are found by trial deletion (`cycles`), inside an
-//! epoch while the stack's references are counted in, once the isolate has
-//! allocated as much as was live after the last collection. Its candidates
-//! are the objects whose count dropped but not to zero, including when an
-//! epoch counts the stack's references out, and the objects that leave the
-//! zero-count table still referred to. A new object starts out referred to
-//! only by the stack, so if it is then closed into a cycle and dropped
-//! between epochs, nothing ever counts it down.
+//! epoch while every reference is counted, once the isolate has allocated
+//! as much as was live after the last collection. Its candidates are the
+//! objects whose count dropped but not to zero: under deferred counting,
+//! including when an epoch counts the stack's references out. Deferred
+//! counting also takes the objects that leave the zero-count table still
+//! referred to. A new object starts out referred to only by the stack, so
+//! if it is then closed into a cycle and dropped between epochs, nothing
+//! ever counts it down.
 //!
 //! An object's count lives in the strategy's half of its header word (ADR
 //! 0002 #7), with its colour and flags. With side counts, a pair has no
@@ -30,16 +41,23 @@ use crate::page_heap::PageHeap;
 use crate::strategy::{Allocate, References, Space, Strategy};
 use crate::value::Value;
 
-/// Deferred counting. With `SIDE_COUNTS`, pairs carry no header and keep
-/// their counts in their pages' side tables.
+/// Reference counting: deferred, or with `PRECISE` counting frames' slots
+/// too. With `SIDE_COUNTS`, pairs carry no header and keep their counts in
+/// their pages' side tables.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Deferred<const SIDE_COUNTS: bool>;
+pub struct Counting<const SIDE_COUNTS: bool, const PRECISE: bool>;
 
 /// Deferred counting with every object headered.
-pub type DeferredHeadered = Deferred<false>;
+pub type DeferredHeadered = Counting<false, false>;
 
 /// Deferred counting with pairs' counts in side tables.
-pub type DeferredSideCounts = Deferred<true>;
+pub type DeferredSideCounts = Counting<true, false>;
+
+/// Precise counting with every object headered.
+pub type PreciseHeadered = Counting<false, true>;
+
+/// Precise counting with pairs' counts in side tables.
+pub type PreciseSideCounts = Counting<true, true>;
 
 /// How much an isolate allocates between epochs.
 const EPOCH_BYTES: usize = 1 << 20;
@@ -47,9 +65,9 @@ const EPOCH_BYTES: usize = 1 << 20;
 /// How much an isolate allocates between cycle collections, at least.
 const CYCLE_BYTES: usize = 4 << 20;
 
-/// A heap under deferred counting.
+/// A heap under a counting strategy.
 #[derive(Debug)]
-pub struct DeferredHeap {
+pub struct CountingHeap {
     pages: PageHeap,
     /// The zero-count table: objects whose count reached zero, to free at
     /// the next epoch unless a frame refers to them.
@@ -67,7 +85,7 @@ pub struct DeferredHeap {
     swept: usize,
 }
 
-impl DeferredHeap {
+impl CountingHeap {
     /// How many bytes live objects take, garbage still awaiting an epoch
     /// included.
     pub fn bytes_live(&self) -> usize {
@@ -97,7 +115,8 @@ const SIDE_BUFFERED: u8 = 1 << 3;
 /// What `count_down` returns for a sticky count.
 const STUCK: usize = usize::MAX;
 
-impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
+impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counting<SIDE_COUNTS, PRECISE> {
+    #[inline(always)]
     fn side(v: Value) -> bool {
         SIDE_COUNTS && v.is_pair()
     }
@@ -107,6 +126,7 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
     /// # Safety
     ///
     /// `v` must be a live object with a header.
+    #[inline(always)]
     unsafe fn half(v: Value) -> *mut u32 {
         let word = v.address() as *mut u32;
         // SAFETY: the header is the object's first word.
@@ -118,6 +138,7 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
     /// # Safety
     ///
     /// `v` must be a live pair on a page with a two-byte side table.
+    #[inline(always)]
     unsafe fn side_bytes(v: Value) -> (*mut u8, *mut u8) {
         // SAFETY: passed on to the caller; each pair has two bytes.
         unsafe {
@@ -171,6 +192,7 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
         }
     }
 
+    #[inline(always)]
     fn increment(v: Value) {
         if !v.is_pointer() {
             return;
@@ -190,6 +212,7 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
 
     /// Counts `v` down, returning its new count, or `STUCK` for a sticky
     /// side count, which stays.
+    #[inline(always)]
     fn count_down(v: Value) -> usize {
         // SAFETY: as above.
         unsafe {
@@ -210,7 +233,7 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
         }
     }
 
-    fn to_zct(heap: &mut DeferredHeap, v: Value) {
+    fn to_zct(heap: &mut CountingHeap, v: Value) {
         if !Self::in_zct(v) {
             Self::set_in_zct(v, true);
             heap.zct.push(v);
@@ -232,15 +255,25 @@ impl<const SIDE_COUNTS: bool> Deferred<SIDE_COUNTS> {
     /// An object waiting in the zero-count table is not buffered: it is
     /// looked at again as it leaves the table. So freeing a vector that
     /// holds a new pair twice does not buffer the pair on the way to zero.
-    #[inline]
-    fn survived(heap: &mut DeferredHeap, v: Value, count: usize) {
-        if count != STUCK && !(Self::side(v) && count == usize::from(STICKY)) && !Self::in_zct(v) {
-            heap.cycles.possible_root::<Self>(v);
+    #[inline(never)]
+    fn survived(heap: &mut CountingHeap, v: Value, count: usize) {
+        if count == STUCK || (Self::side(v) && count == usize::from(STICKY)) {
+            return;
         }
+        if Self::in_zct(v) {
+            // Precise counting marks it, to buffer if it leaves the table
+            // still referred to; deferred counting buffers every object
+            // that does.
+            if PRECISE {
+                Self::set_colour(v, Colour::Purple);
+            }
+            return;
+        }
+        heap.cycles.possible_root::<Self>(v);
     }
 }
 
-impl<const SIDE_COUNTS: bool> Counted for Deferred<SIDE_COUNTS> {
+impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counted for Counting<SIDE_COUNTS, PRECISE> {
     type Heap = PageHeap;
 
     fn count(v: Value) -> usize {
@@ -304,15 +337,17 @@ impl<const SIDE_COUNTS: bool> Counted for Deferred<SIDE_COUNTS> {
 // SAFETY: allocation comes from the page heap, whose blocks are 8-byte
 // aligned and unused until freed, and freed only by an epoch, when nothing
 // refers to them.
-unsafe impl<const SIDE_COUNTS: bool> Allocate for Deferred<SIDE_COUNTS> {
+unsafe impl<const SIDE_COUNTS: bool, const PRECISE: bool> Allocate
+    for Counting<SIDE_COUNTS, PRECISE>
+{
     const LAYOUT: StrategyLayout = StrategyLayout {
         pair_header: !SIDE_COUNTS,
         flonum_header: true,
     };
-    type Heap = DeferredHeap;
+    type Heap = CountingHeap;
 
-    fn new_heap(config: &HeapConfig) -> DeferredHeap {
-        DeferredHeap {
+    fn new_heap(config: &HeapConfig) -> CountingHeap {
+        CountingHeap {
             pages: PageHeap::new(PageSource::new(config), if SIDE_COUNTS { 2 } else { 0 }),
             zct: Vec::new(),
             since: 0,
@@ -325,7 +360,7 @@ unsafe impl<const SIDE_COUNTS: bool> Allocate for Deferred<SIDE_COUNTS> {
 
     #[inline]
     fn allocate(
-        heap: &mut DeferredHeap,
+        heap: &mut CountingHeap,
         space: Space,
         words: usize,
     ) -> Result<NonNull<u64>, OutOfMemory> {
@@ -333,21 +368,22 @@ unsafe impl<const SIDE_COUNTS: bool> Allocate for Deferred<SIDE_COUNTS> {
         heap.pages.allocate(space, words)
     }
 
-    fn bytes_used(heap: &DeferredHeap) -> usize {
+    fn bytes_used(heap: &CountingHeap) -> usize {
         heap.pages.bytes_used()
     }
 }
 
-impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
+impl<const SIDE_COUNTS: bool, const PRECISE: bool> References for Counting<SIDE_COUNTS, PRECISE> {
     const COUNTS: bool = true;
+    const PRECISE: bool = PRECISE;
 
-    #[inline]
-    fn retain(_heap: &mut DeferredHeap, v: Value) {
+    #[inline(always)]
+    fn retain(_heap: &mut CountingHeap, v: Value) {
         Self::increment(v);
     }
 
-    #[inline]
-    fn release(heap: &mut DeferredHeap, v: Value) {
+    #[inline(always)]
+    fn release(heap: &mut CountingHeap, v: Value) {
         if v.is_pointer() {
             match Self::count_down(v) {
                 0 => Self::to_zct(heap, v),
@@ -357,7 +393,7 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
     }
 
     #[inline]
-    fn allocated(heap: &mut DeferredHeap, v: Value) {
+    fn allocated(heap: &mut CountingHeap, v: Value) {
         if Self::side(v) {
             // SAFETY: a pair just allocated on a page with side bytes,
             // which may hold an earlier pair's.
@@ -372,40 +408,45 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
     }
 
     #[inline]
-    fn init(_heap: &mut DeferredHeap, new: Value) {
+    fn init(_heap: &mut CountingHeap, new: Value) {
         Self::increment(new);
     }
 
-    #[inline]
-    fn write(heap: &mut DeferredHeap, old: Value, new: Value) {
+    #[inline(always)]
+    fn write(heap: &mut CountingHeap, old: Value, new: Value) {
         Self::increment(new);
         Self::release(heap, old);
     }
 
-    fn epoch_due(heap: &DeferredHeap) -> bool {
+    fn epoch_due(heap: &CountingHeap) -> bool {
         heap.since >= EPOCH_BYTES
     }
 
-    fn take_zct(heap: &mut DeferredHeap) -> Vec<Value> {
+    fn take_zct(heap: &mut CountingHeap) -> Vec<Value> {
         std::mem::take(&mut heap.zct)
     }
 
-    fn in_zct(_heap: &DeferredHeap, v: Value) -> bool {
+    fn in_zct(_heap: &CountingHeap, v: Value) -> bool {
         Self::in_zct(v)
     }
 
-    fn leave_zct(heap: &mut DeferredHeap, v: Value) -> bool {
+    fn leave_zct(heap: &mut CountingHeap, v: Value) -> bool {
         Self::set_in_zct(v, false);
         match Self::count_of(v) {
             0 => true,
             count => {
-                Self::survived(heap, v, count);
+                // Under precise counting, the stack's reference to a new
+                // object was counted, so only one counted down while it
+                // waited, and marked purple, may be keeping a cycle alive.
+                if !PRECISE || Self::colour(v) == Colour::Purple {
+                    Self::survived(heap, v, count);
+                }
                 false
             }
         }
     }
 
-    fn release_child(heap: &mut DeferredHeap, v: Value) -> bool {
+    fn release_child(heap: &mut CountingHeap, v: Value) -> bool {
         match Self::count_down(v) {
             0 => !Self::in_zct(v),
             count => {
@@ -416,7 +457,7 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
     }
 
     #[inline]
-    unsafe fn free(heap: &mut DeferredHeap, v: Value, words: usize) {
+    unsafe fn free(heap: &mut CountingHeap, v: Value, words: usize) {
         if Self::buffered(v) {
             Self::free_buffered(v);
             return;
@@ -425,8 +466,8 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
         unsafe { Self::reclaim(&mut heap.pages, v, words) };
     }
 
-    unsafe fn collect_cycles(heap: &mut DeferredHeap, describe: Describe, force: bool) {
-        let DeferredHeap { pages, cycles, .. } = heap;
+    unsafe fn collect_cycles(heap: &mut CountingHeap, describe: Describe, force: bool) {
+        let CountingHeap { pages, cycles, .. } = heap;
         if force || heap.cycle_bytes + heap.since >= heap.cycle_threshold {
             // SAFETY: passed on to the caller: the stack's references are
             // counted in, so every count is exact.
@@ -440,16 +481,24 @@ impl<const SIDE_COUNTS: bool> References for Deferred<SIDE_COUNTS> {
         heap.swept = heap.cycles.candidates();
     }
 
-    fn epoch_done(heap: &mut DeferredHeap) {
+    fn epoch_done(heap: &mut CountingHeap) {
         heap.cycle_bytes += heap.since;
         heap.since = 0;
     }
 }
 
-impl Strategy for Deferred<false> {
+impl Strategy for Counting<false, false> {
     const NAME: &'static str = "deferred";
 }
 
-impl Strategy for Deferred<true> {
+impl Strategy for Counting<true, false> {
     const NAME: &'static str = "deferred-side";
+}
+
+impl Strategy for Counting<false, true> {
+    const NAME: &'static str = "precise";
+}
+
+impl Strategy for Counting<true, true> {
+    const NAME: &'static str = "precise-side";
 }

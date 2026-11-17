@@ -84,6 +84,12 @@ pub trait References: Allocate {
     /// and keeps every frame slot a valid value.
     const COUNTS: bool = false;
 
+    /// Whether the strategy counts references from frame slots too: the VM
+    /// counts each slot store in and the value it replaces out, counts a
+    /// frame's slots out and clears them as it leaves, and an epoch scans
+    /// no stack. Implies `COUNTS`.
+    const PRECISE: bool = false;
+
     /// Whether an epoch is due at the next safepoint.
     #[inline(always)]
     fn epoch_due(_heap: &Self::Heap) -> bool {

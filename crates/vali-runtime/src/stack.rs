@@ -36,11 +36,12 @@ impl Segment {
             .expect("a valid segment layout")
     }
 
-    /// A segment of `words` words.
+    /// A segment of `words` words, zeroed: every word reads as a fixnum
+    /// until it is stored to, which precise counting relies on.
     pub(crate) fn new(words: usize) -> Segment {
         let layout = Self::layout(words);
         // SAFETY: the layout is non-zero in size.
-        let base = unsafe { alloc::alloc(layout) } as *mut u64;
+        let base = unsafe { alloc::alloc_zeroed(layout) } as *mut u64;
         let base = NonNull::new(base).unwrap_or_else(|| alloc::handle_alloc_error(layout));
         Segment { base, words }
     }

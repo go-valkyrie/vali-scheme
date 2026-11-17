@@ -1,5 +1,7 @@
 //! Epochs, for the counting strategies (ADR 0003): count the stack's
 //! references in, free what has no references at all, and count them out.
+//! Precise counting has counted the stack's references all along, so its
+//! epochs scan no stack.
 //!
 //! An epoch runs only at a safepoint: a call, a loop's backward jump, or a
 //! return to the host. There, every frame slot holds a valid value, so the
@@ -23,6 +25,10 @@ impl<S: Strategy> Cx<S> {
     /// `fp` must be a bytecode function's frame at a safepoint.
     pub(crate) unsafe fn stack_roots(&self, mut fp: *mut u64) -> Vec<Value> {
         let mut roots = Vec::new();
+        // Precise counting counts the stack's references, and the handlers'.
+        if S::PRECISE {
+            return roots;
+        }
         // SAFETY: frames link to their callers up to the entry frame, and
         // each frame's slot 0 holds its closure.
         unsafe {

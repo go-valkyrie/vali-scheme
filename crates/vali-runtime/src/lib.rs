@@ -10,9 +10,9 @@
 //!   `Sync` and `'static`, and are used through their isolate's context.
 
 mod code;
+mod counting;
 mod cx;
 mod cycles;
-mod deferred;
 mod epoch;
 mod handle;
 mod no_collection;
@@ -33,8 +33,11 @@ mod value;
 mod vm;
 
 pub use code::{Code, ModuleId, NativeFn};
+pub use counting::{
+    Counting, CountingHeap, DeferredHeadered, DeferredSideCounts, PreciseHeadered,
+    PreciseSideCounts,
+};
 pub use cx::Cx;
-pub use deferred::{Deferred, DeferredHeadered, DeferredHeap, DeferredSideCounts};
 pub use handle::{Error, Handle, SchemeError};
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
