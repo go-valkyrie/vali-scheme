@@ -1,7 +1,6 @@
 ;;; requirement: Procedural macros can be exported from libraries
 ;;; found-in: Steel
 ;;; kind: scheme
-;;; expect: fail, needs the expander and libraries (M1)
 
 ;; Steel only exported syntax-rules macros, so a library could not offer a
 ;; macro that computes its expansion; hosts needed a separate expansion step.

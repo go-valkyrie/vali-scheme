@@ -1,7 +1,6 @@
 ;;; requirement: syntax-case templates are hygienic
 ;;; found-in: Steel
 ;;; kind: scheme
-;;; expect: fail, needs the expander (M1)
 
 ;; In Steel, a template's `tmp` captured the user's `tmp`, so swapping a
 ;; variable named `tmp` silently did the wrong thing.

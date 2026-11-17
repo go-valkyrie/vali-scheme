@@ -1,7 +1,6 @@
 ;;; requirement: _ matches inside a nested syntax-case
 ;;; found-in: scheme-rs
 ;;; kind: scheme
-;;; expect: fail, needs the expander (M1)
 
 ;; In scheme-rs, `_` in a syntax-case inside a transformer's helper
 ;; procedure failed with "No patterns match".

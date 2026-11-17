@@ -15,6 +15,6 @@ fn main() {
         "no regression tests in {}",
         dir.display()
     );
-    let trials = vali_test::trials(files, Arc::new(vali_test::ReadOnly));
+    let trials = vali_test::trials(files, Arc::new(vali_test::Evaluate));
     libtest_mimic::run(&args, trials).exit();
 }

@@ -6,8 +6,8 @@
 //! `expect: fail` passes while it fails, and fails the build the moment it
 //! passes, so a fixed regression can't stay marked as expected to fail.
 //!
-//! Until there is an evaluator, the only backend is [`ReadOnly`], which
-//! checks that each file reads as Scheme.
+//! [`Evaluate`] compiles and runs each file; [`ReadOnly`] only checks that
+//! each file reads as Scheme.
 
 mod header;
 
@@ -71,6 +71,52 @@ impl Backend for ReadOnly {
             })
             .collect();
         Outcome::Invalid(errors.join("\n"))
+    }
+}
+
+/// A backend that compiles and runs each `kind: scheme` file in a fresh
+/// isolate, with the standard libraries. A file passes if it runs to the
+/// end: SRFI 64's `test-end` raises an error when an assertion failed.
+/// Files that don't read are [`Outcome::Invalid`]; other kinds of test are
+/// [`Outcome::Unsupported`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Evaluate;
+
+impl Backend for Evaluate {
+    fn run(&self, file: &TestFile, header: &Header) -> Outcome {
+        if let outcome @ Outcome::Invalid(_) = ReadOnly.run(file, header) {
+            return outcome;
+        }
+        if header.kind != Kind::Scheme {
+            return Outcome::Unsupported(format!("cannot run {:?} tests yet", header.kind));
+        }
+        let identity = vali_compiler::Identity::new(&file.name);
+        let program = match vali_compiler::compile_program(&file.source, &identity, &NoLibraries) {
+            Ok(program) => program,
+            Err(e) => return Outcome::Failed(format!("compiling: {e}")),
+        };
+        let mut cx = vali_runtime::Cx::<vali_runtime::NoCollection>::new(&Default::default());
+        let result = cx
+            .install_primitives()
+            .and_then(|()| vali_compiler::load(&mut cx, program))
+            .and_then(|id| cx.run(id));
+        match result {
+            Ok(_) => Outcome::Passed,
+            Err(e) => Outcome::Failed(e.to_string()),
+        }
+    }
+}
+
+/// Test files import only the standard libraries.
+struct NoLibraries;
+
+impl vali_compiler::Loader for NoLibraries {
+    fn load(
+        &self,
+        _name: &vali_compiler::LibraryName,
+        _importer: Option<&vali_compiler::Identity>,
+    ) -> Result<Option<vali_compiler::Source>, vali_compiler::LoadError> {
+        Ok(None)
     }
 }
 

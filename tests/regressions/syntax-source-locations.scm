@@ -1,7 +1,7 @@
 ;;; requirement: Syntax objects expose source locations
 ;;; found-in: scheme-rs
 ;;; kind: scheme
-;;; expect: fail, needs the expander and (vali syntax) (M1)
+;;; expect: fail, needs (vali syntax) and syntax objects at run time (M1)
 
 ;; scheme-rs kept source locations on syntax objects, but Scheme code could
 ;; not read them. The names below are provisional until (vali syntax) is
