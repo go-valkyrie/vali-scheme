@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-17, the expander: written in Rust, syntax objects as Rust values behind one heap type, `syntax-case` matching in Rust, and the core forms (items 12 to 17)
+- **Amended:** 2026-11-17, `syntax-rules` stays built into the expander (item 14)
 - **Related:** 0001 (phasing, determinism, stable scope identities), 0007 (`syntax-case` and the syntax procedures), 0012 (distribution format), 0013 (standalone executables, `eval`), 0014 (spans and macro origins)
 
 ## Context
@@ -53,7 +54,7 @@ Syntax objects are values that macros manipulate. Most exist only at expansion t
     - Taking a syntax object apart pushes its pending changes one level down: each child gets a new scope set and the composed pending changes, at constant cost, sharing its content.
     - Scheme code sees a syntax object as a heap object of type `Syntax` that points to the Rust value, so `syntax?` and `identifier?` are a header test. Taking one apart from Scheme allocates a new such object per piece; matching (item 14) avoids most of that.
     - The compiler consumes the same Rust values, so expanded code never round-trips through the heap.
-14. **`syntax-case` and `syntax` are core forms, matched and built in Rust,** as psyntax does with `$syntax-dispatch`. The expander turns each pattern into a constant descriptor and a call to one primitive that returns `#f` or the pattern variables' matches, and each template into a call to one primitive that builds the output. Ellipsis depth and misused pattern variables are errors at expansion time. `syntax-rules`, `with-syntax`, `quasisyntax` and the derived forms are macros, written in Scheme on top.
+14. **`syntax-case` and `syntax` are core forms, matched and built in Rust,** as psyntax does with `$syntax-dispatch`. The expander turns each pattern into a constant descriptor and a call to one primitive that returns `#f` or the pattern variables' matches, and each template into a call to one primitive that builds the output. Ellipsis depth and misused pattern variables are errors at expansion time. `syntax-rules` is built into the expander on the same matcher and builder: a `syntax-rules` macro runs no Scheme code at all, so it needs no phase-1 instance and expands at Rust speed. `with-syntax`, `quasisyntax` and the derived forms are macros, written in Scheme on top.
 15. **The core forms are** `quote`, `quote-syntax`, `if`, `begin`, `lambda`, `let`, `letrec*`, `set!`, the procedure call, `define`, `define-syntax`, `let-syntax`, `letrec-syntax`, `syntax-case` and `syntax`, plus the library forms. `let` is core because the compiler wants it as a node, and a macro producing `((lambda ...) ...)` would only make the compiler rediscover it. `case-lambda`, multiple values and continuation marks join when the runtime has them. Everything else, `cond`, `case`, `do`, `and`, `or`, `let*`, named `let`, `define-record-type`, `parameterize` and the rest, is a macro.
 16. **The expander produces the compiler's tree, with every identifier resolved.** References carry their binding, not their name. The compiler inlines a call to a standard procedure only when the callee resolves to that procedure's own binding, which importers cannot assign, so inlining is sound by construction rather than by checking that the program didn't redefine the name.
 17. **The standard macros ship as Scheme source inside the binary,** expanded when a context first needs them, until cached artifacts (ADR 0001) make that a load.
@@ -77,6 +78,7 @@ Syntax objects are values that macros manipulate. Most exist only at expansion t
 - **Eager propagation everywhere:** simplest, and kept for the reference type, but it costs a walk of every subform at every macro step.
 - **An expander written in Scheme,** as Racket and Chez have: it would exercise the language and could later be compiled natively, but until then it runs on the interpreter during every cold build, and it needs hash tables and records before it can start. Porting to Scheme later remains possible, since the algorithm does not change.
 - **Syntax objects as native heap records:** Scheme code takes them apart without allocating, but the Rust expander would drive them through handles, which a moving collector makes costly, and the compiler would convert them back out of the heap.
+- **`syntax-rules` as a macro written with `syntax-case`,** as psyntax and Racket define it: one less built-in form, but every `syntax-rules` use would then run a Scheme transformer, and the matching is the same Rust code either way.
 - **`syntax-case` as a macro that expands into unwrapping calls,** as Racket does: no matcher primitive, but each match becomes many small Scheme calls on the interpreter.
 - **No syntax objects at run time:** smaller binaries, but `eval` and tools written in Scheme need them, and `syntax-case` lets any phase-0 code quote syntax.
 
