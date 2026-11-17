@@ -8,7 +8,7 @@ The instruction set the VM interprets and the JIT compiles from (ADR 0005). This
 
 A **module** is what one library's body compiles to:
 
-- a **constant pool**: integers, flonums, booleans, characters, the empty list, the unspecified value, and immutable strings, symbols, pairs and vectors of constants. Heap constants are created in each isolate when the module loads there;
+- a **constant pool**: integers of any size, flonums, booleans, characters, the empty list, the unspecified value, and immutable strings, symbols, pairs, vectors and bytevectors of constants. Heap constants are created in each isolate when the module loads there;
 - a **variable table**: the module's variables, named for linking and debugging. Code refers to them by index;
 - a **function table**;
 - the index of its **body**, a function of no arguments and no free variables.
@@ -121,6 +121,12 @@ Conditional branches continue to the next instruction when their condition holds
 | 41 | `vector-ref dst, v, i` | `a b c` | `dst ← (vector-ref v i)` |
 | 42 | `vector-set v, i, x` | `a b c` | `(vector-set! v i x)` |
 | 43 | `vector-length dst, v` | `a b` | `dst ← (vector-length v)` |
+
+### Closures, continued
+
+| Opcode | Mnemonic | Layout | Meaning |
+|---|---|---|---|
+| 44 | `set-free closure, i, src` | `a b c` | Free variable `i` of the closure in `closure` now holds `src`. `letrec` uses it to close the references between closures that refer to each other. The VM checks `i` against the closure's free-variable count |
 
 Everything else is a call to a procedure: primitives are procedures implemented in Rust, bound to variables like any other.
 

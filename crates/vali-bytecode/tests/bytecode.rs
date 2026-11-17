@@ -130,6 +130,11 @@ fn examples() -> Vec<I> {
             value: 3,
         },
         I::VectorLength { dst: 1, vector: 2 },
+        I::SetFree {
+            closure: 1,
+            index: 200,
+            src: 3,
+        },
     ]
 }
 

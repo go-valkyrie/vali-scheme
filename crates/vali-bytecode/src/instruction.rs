@@ -89,6 +89,7 @@ opcodes! {
     VectorRef = 41, "vector-ref";
     VectorSet = 42, "vector-set";
     VectorLength = 43, "vector-length";
+    SetFree = 44, "set-free";
 }
 
 /// A frame slot (a register).
@@ -201,6 +202,10 @@ pub enum Instruction {
     },
     /// `dst ← (vector-length vector)`.
     VectorLength { dst: Slot, vector: Slot },
+    /// Free variable `index` of the closure in `closure` now holds `src`:
+    /// how `letrec` closes the loops between closures that refer to each
+    /// other.
+    SetFree { closure: Slot, index: u8, src: Slot },
 }
 
 /// The range of a [`Instruction::Jump`] offset.
@@ -301,6 +306,7 @@ impl Instruction {
             I::VectorRef { .. } => Opcode::VectorRef,
             I::VectorSet { .. } => Opcode::VectorSet,
             I::VectorLength { .. } => Opcode::VectorLength,
+            I::SetFree { .. } => Opcode::SetFree,
         }
     }
 
@@ -416,6 +422,11 @@ impl Instruction {
                 index,
                 value,
             } => code.push(abc(op, vector, index, value)),
+            I::SetFree {
+                closure,
+                index,
+                src,
+            } => code.push(abc(op, closure, index, src)),
         }
     }
 
@@ -557,6 +568,11 @@ impl Instruction {
                 value: c,
             },
             Opcode::VectorLength => I::VectorLength { dst: a, vector: b },
+            Opcode::SetFree => I::SetFree {
+                closure: a,
+                index: b,
+                src: c,
+            },
         };
         let len = if instruction.offset().is_some() && op != Opcode::Jump {
             2
@@ -583,6 +599,11 @@ impl fmt::Display for Instruction {
             | I::IsPair { dst, src } => write!(f, "{m} r{dst}, r{src}"),
             I::Car { dst, pair } | I::Cdr { dst, pair } => write!(f, "{m} r{dst}, r{pair}"),
             I::VectorLength { dst, vector } => write!(f, "{m} r{dst}, r{vector}"),
+            I::SetFree {
+                closure,
+                index,
+                src,
+            } => write!(f, "{m} r{closure}, {index}, r{src}"),
             I::Free { dst, index } => write!(f, "{m} r{dst}, {index}"),
             I::SetBox { cell, src } => write!(f, "{m} r{cell}, r{src}"),
             I::SetCar { pair, value } | I::SetCdr { pair, value } => {

@@ -67,6 +67,16 @@ pub enum Constant {
     Pair(Box<Constant>, Box<Constant>),
     /// An immutable vector of constants.
     Vector(Vec<Constant>),
+    /// An exact integer beyond 64 bits: its sign and magnitude, least
+    /// significant limb first.
+    Bignum {
+        /// Whether it is negative.
+        negative: bool,
+        /// The magnitude's limbs.
+        limbs: Vec<u64>,
+    },
+    /// An immutable bytevector.
+    Bytevector(Vec<u8>),
 }
 
 /// One function's code and metadata.

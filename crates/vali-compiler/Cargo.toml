@@ -1,0 +1,19 @@
+[package]
+name = "vali-compiler"
+description = "Vali's compiler: core forms to run-format bytecode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vali-bytecode.workspace = true
+vali-num.workspace = true
+vali-syntax.workspace = true
+
+[dev-dependencies]
+vali-runtime.workspace = true
+
+[lints]
+workspace = true

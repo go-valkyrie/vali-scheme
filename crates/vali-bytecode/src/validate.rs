@@ -195,6 +195,9 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
                     index: a,
                     value: b,
                 } => slot(*dst) && slot(*a) && slot(*b),
+                // The closure's free-variable count is only known at run
+                // time, where the VM checks `index`.
+                Instruction::SetFree { closure, src, .. } => slot(*closure) && slot(*src),
                 Instruction::AddImm { dst, a, .. } | Instruction::SubImm { dst, a, .. } => {
                     slot(*dst) && slot(*a)
                 }

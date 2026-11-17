@@ -331,6 +331,10 @@ impl<S: Strategy> Cx<S> {
                 // SAFETY: both are valid values.
                 unsafe { self.cons_raw(car, cdr)? }
             }
+            Constant::Bignum { negative, limbs } => {
+                self.integer_raw(&Integer::from_limbs(*negative, limbs))?
+            }
+            Constant::Bytevector(bytes) => self.bytevector_raw(bytes)?,
             Constant::Vector(items) => {
                 // SAFETY: the fill is a valid value.
                 let v = unsafe { self.make_vector_raw(items.len(), Value::UNSPECIFIED)? };
@@ -1311,6 +1315,23 @@ impl<S: Strategy> Cx<S> {
                             }
                             let len = self.vector_length(vector) as i64;
                             set(fp, a, Value::fixnum(len).expect("lengths fit"));
+                            pc += 1;
+                        }
+                        Opcode::SetFree => {
+                            let closure = slot(fp, a);
+                            let count = if closure.tag() == Tag::Closure {
+                                self.header(closure, TypeCode::Closure)
+                                    .map_or(0, |h| h.data() as usize)
+                            } else {
+                                fail!(type_error("set-free", "a closure", closure));
+                            };
+                            if b >= count {
+                                fail!(Error::scheme(format!(
+                                    "set-free: the closure has {count} free variables, not {}",
+                                    b + 1
+                                )));
+                            }
+                            put(closure, Self::LAYOUT.closure_free(b), slot(fp, c).raw());
                             pc += 1;
                         }
                     }
