@@ -30,6 +30,23 @@ use crate::value::Value;
 /// it leaves the VM.
 const ENTRY: u64 = u64::MAX;
 
+/// Set in a frame's position word when the frame is the first in its
+/// segment, so returning from it drops back to the previous segment.
+const BOUNDARY: u64 = 1 << 63;
+
+/// A frame's position word: where the caller resumes, and the caller's
+/// `base`, so the result can be stored even when the frame was moved to a
+/// new segment.
+fn position(resume: u64, base: usize) -> u64 {
+    resume | (base as u64) << 32
+}
+
+/// Whether a frame of `words` slots fits below `fp` without crossing
+/// `limit`.
+fn fits(fp: *mut u64, words: usize, limit: *mut u64) -> bool {
+    (fp as usize).saturating_sub(limit as usize) / 8 >= words
+}
+
 /// The return address of interpreted frames, until each function has a
 /// marker stub of its own (ADR 0004 #6). A real code address, so native
 /// unwinders accept it.
@@ -402,9 +419,10 @@ impl<S: Strategy> Cx<S> {
         if args.len() > usize::from(u8::MAX) {
             return Err(Error::scheme("too many arguments"));
         }
-        let segment = self
-            .stack
-            .get_or_insert_with(|| Segment::new(SEGMENT_WORDS));
+        if self.stack.is_empty() {
+            self.push_segment(SEGMENT_WORDS)?;
+        }
+        let segment = &self.stack[0];
         let (top, limit) = (segment.top(), segment.limit());
         // The entry frame is a pseudo-frame at the top of the segment: its
         // slots 0 to 2 hold the callee's header, slot 3 the procedure, and
@@ -420,24 +438,63 @@ impl<S: Strategy> Cx<S> {
         // SAFETY: the entry frame is set up as `interpret` expects.
         let result = unsafe { self.interpret(top, limit, args.len()) };
         self.running = false;
+        // An error can leave segments chained; only the first is kept.
+        while self.stack.len() > 1 {
+            self.pop_segment();
+        }
         result
     }
 
-    /// Sets up a bytecode function's frame at `fp`: checks the arity and
-    /// the stack limit, fills omitted optional arguments, builds the rest
-    /// list, and clears the other slots.
+    /// Chains a segment that holds at least `words` words, reusing the
+    /// spare if it is big enough, and returns its top and limit.
+    fn push_segment(&mut self, words: usize) -> Result<(*mut u64, *mut u64), Error> {
+        let words = words.max(SEGMENT_WORDS);
+        let segment = match self.spare.take() {
+            Some(spare) if spare.words() >= words => spare,
+            spare => {
+                if let Some(spare) = spare {
+                    self.stack_words -= spare.words();
+                }
+                if self.stack_words + words > self.max_stack_words {
+                    return Err(Error::scheme(format!(
+                        "stack overflow: the stack would exceed {} bytes",
+                        self.max_stack_words * 8
+                    )));
+                }
+                self.stack_words += words;
+                Segment::new(words)
+            }
+        };
+        let ends = (segment.top(), segment.limit());
+        self.stack.push(segment);
+        Ok(ends)
+    }
+
+    /// Drops the current segment, keeping it as the spare, and returns the
+    /// previous segment's limit.
+    fn pop_segment(&mut self) -> *mut u64 {
+        let segment = self.stack.pop().expect("a segment to pop");
+        if let Some(old) = self.spare.replace(segment) {
+            self.stack_words -= old.words();
+        }
+        self.stack.last().expect("the first segment stays").limit()
+    }
+
+    /// Sets the most memory the stack may take, in bytes. Deep recursion
+    /// beyond it is an error.
+    pub fn set_max_stack_bytes(&mut self, bytes: usize) {
+        self.max_stack_words = bytes / 8;
+    }
+
+    /// Sets up a bytecode function's frame at `fp`, which the caller has
+    /// made sure fits: checks the arity, fills omitted optional arguments,
+    /// builds the rest list, and clears the other slots.
     ///
     /// # Safety
     ///
     /// `fp` must point to a frame whose slots 0 to `argc` hold the closure
     /// and arguments.
-    unsafe fn enter(
-        &mut self,
-        code: &Code<S>,
-        fp: *mut u64,
-        limit: *mut u64,
-        argc: usize,
-    ) -> Result<(), Error> {
+    unsafe fn enter(&mut self, code: &Code<S>, fp: *mut u64, argc: usize) -> Result<(), Error> {
         let Kind::Bytecode { slots, .. } = code.kind else {
             unreachable!("only bytecode functions are entered");
         };
@@ -456,15 +513,10 @@ impl<S: Strategy> Cx<S> {
             )));
         }
         let slots = usize::from(slots);
-        if (fp as usize).saturating_sub(limit as usize) / 8 < slots {
-            return Err(Error::scheme(
-                "stack overflow: segment chaining is not implemented yet",
-            ));
-        }
         let fixed = usize::from(arity.required) + usize::from(arity.optional);
-        // SAFETY: every slot written is inside the frame, which the check
-        // above keeps above the limit; arguments beyond the frame were
-        // written by the caller inside its own frame.
+        // SAFETY: every slot written is inside the frame, which the caller
+        // made sure fits; arguments beyond the frame were written by the
+        // caller inside its own frame, or copied with it to a new segment.
         unsafe {
             for i in argc + 1..=fixed {
                 set(fp, i, Value::DEFAULT);
@@ -501,7 +553,7 @@ impl<S: Strategy> Cx<S> {
     unsafe fn interpret(
         &mut self,
         top: *mut u64,
-        limit: *mut u64,
+        mut limit: *mut u64,
         argc: usize,
     ) -> Result<Value, Error> {
         let mut fp = top;
@@ -583,12 +635,32 @@ impl<S: Strategy> Cx<S> {
                                 set(fp, base + 3, result);
                                 pc = resume as usize;
                             }
-                            Kind::Bytecode { .. } => {
-                                let callee_fp = fp.sub(base + 3);
+                            Kind::Bytecode { slots, .. } => {
+                                let needed = usize::from(slots).max(argc + 1);
+                                let mut callee_fp = fp.sub(base + 3);
+                                let mut position = if resume == ENTRY {
+                                    ENTRY
+                                } else {
+                                    position(resume, base)
+                                };
+                                if !fits(callee_fp, needed, limit) {
+                                    // Chain a segment, and move the
+                                    // procedure and arguments into it.
+                                    let (top, new_limit) = attempt!(self.push_segment(needed + 3));
+                                    let new_fp = top.sub(3);
+                                    for i in 0..=argc {
+                                        set(new_fp, i, slot(callee_fp, i));
+                                    }
+                                    callee_fp = new_fp;
+                                    limit = new_limit;
+                                    if position != ENTRY {
+                                        position |= BOUNDARY;
+                                    }
+                                }
                                 *callee_fp = fp as u64;
                                 *callee_fp.add(1) = return_address;
-                                *callee_fp.add(2) = resume;
-                                attempt!(self.enter(callee, callee_fp, limit, argc));
+                                *callee_fp.add(2) = position;
+                                attempt!(self.enter(callee, callee_fp, argc));
                                 fp = callee_fp;
                                 pc = 0;
                                 switch_to!(callee);
@@ -610,22 +682,54 @@ impl<S: Strategy> Cx<S> {
                                 next = Next::Return(result);
                                 continue;
                             }
-                            Kind::Bytecode { .. } => {
-                                attempt!(self.enter(callee, fp, limit, argc));
+                            Kind::Bytecode { slots, .. } => {
+                                let needed = usize::from(slots).max(argc + 1);
+                                if !fits(fp, needed, limit) {
+                                    // Move this frame to a new segment. If it
+                                    // was the first in its segment, that
+                                    // segment is left empty, so drop it first.
+                                    let saved = *fp;
+                                    let old = *fp.add(2);
+                                    let moved: Vec<Value> =
+                                        (0..=argc).map(|i| slot(fp, i)).collect();
+                                    let position = if old == ENTRY {
+                                        ENTRY
+                                    } else if old & BOUNDARY != 0 {
+                                        self.pop_segment();
+                                        old
+                                    } else {
+                                        let base = (saved as usize - fp as usize) / 8 - 3;
+                                        position(old & 0xFFFF_FFFF, base) | BOUNDARY
+                                    };
+                                    let (top, new_limit) = attempt!(self.push_segment(needed + 3));
+                                    fp = top.sub(3);
+                                    limit = new_limit;
+                                    *fp = saved;
+                                    *fp.add(1) = return_address;
+                                    *fp.add(2) = position;
+                                    for (i, &v) in moved.iter().enumerate() {
+                                        set(fp, i, v);
+                                    }
+                                }
+                                attempt!(self.enter(callee, fp, argc));
                                 pc = 0;
                                 switch_to!(callee);
                             }
                         }
                     }
                     Next::Return(value) => {
-                        let resume = *fp.add(2);
-                        if resume == ENTRY {
+                        let position = *fp.add(2);
+                        if position == ENTRY {
                             return Ok(value);
                         }
-                        // The callee's slot 0 is the caller's result slot.
-                        set(fp, 0, value);
-                        fp = *fp as *mut u64;
-                        pc = resume as usize;
+                        let caller = *fp as *mut u64;
+                        let base = ((position >> 32) & 0xFFFF) as usize;
+                        set(caller, base + 3, value);
+                        if position & BOUNDARY != 0 {
+                            limit = self.pop_segment();
+                        }
+                        fp = caller;
+                        pc = (position & 0xFFFF_FFFF) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
                         switch_to!(caller);
                     }

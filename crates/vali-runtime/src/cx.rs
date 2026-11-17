@@ -40,8 +40,16 @@ pub struct Cx<S: Strategy> {
     /// boxed so its address survives the vector growing.
     #[allow(clippy::vec_box)]
     pub(crate) natives: Vec<Box<Code<S>>>,
-    /// The stack, created on first use.
-    pub(crate) stack: Option<Segment>,
+    /// The stack: a chain of segments, the current one last, created on
+    /// first use.
+    pub(crate) stack: Vec<Segment>,
+    /// A segment kept after the stack shrinks, so a call that keeps
+    /// crossing a segment boundary does not allocate each time.
+    pub(crate) spare: Option<Segment>,
+    /// Words allocated to the stack, the spare included.
+    pub(crate) stack_words: usize,
+    /// The most words the stack may take.
+    pub(crate) max_stack_words: usize,
     /// Whether Scheme code is running, which forbids re-entering it.
     pub(crate) running: bool,
     /// Calls made, the fuel used so far (ADR 0009).
@@ -97,7 +105,10 @@ impl<S: Strategy> Cx<S> {
             globals: HashMap::new(),
             symbols: HashMap::new(),
             natives: Vec::new(),
-            stack: None,
+            stack: Vec::new(),
+            spare: None,
+            stack_words: 0,
+            max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
             fuel_used: 0,
         }

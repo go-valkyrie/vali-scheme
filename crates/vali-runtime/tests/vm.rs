@@ -178,14 +178,75 @@ fn deep_recursion_and_overflow() {
         module("sum", |m| vec![("sum-to", sum_to(m))]),
         "sum-to",
     );
-    let result = cx.call(&f, &[int(10_000)]).unwrap();
-    assert_eq!(result.as_fixnum(), Some(10_000 * 10_001 / 2));
+    // 100,000 frames of 10 words chain many 64 KiB segments.
+    let result = cx.call(&f, &[int(100_000)]).unwrap();
+    assert_eq!(result.as_fixnum(), Some(100_000 * 100_001 / 2));
+    cx.set_max_stack_bytes(4 * 1024 * 1024);
     let Error::Scheme(e) = cx.call(&f, &[int(10_000_000)]).unwrap_err() else {
         panic!("expected a Scheme error");
     };
     assert!(e.message.contains("stack overflow"), "{}", e.message);
     // The VM is usable again after an error.
     assert_eq!(cx.call(&f, &[int(3)]).unwrap().as_fixnum(), Some(6));
+}
+
+/// `(define (deep n) (if (= n 0) (big) (+ 1 (deep (- n 1)))))`, where `big`
+/// has a 250-slot frame and returns 7. At every depth, `deep` tail-calls
+/// `big` from a different place in the segment, so sometimes `big`'s frame
+/// must move to a new segment, including from a frame that was the first in
+/// its segment.
+#[test]
+fn tail_calls_move_frames_across_segments() {
+    let mut cx = cx();
+    let m = module("deep", |m| {
+        let deep_var = m.variable("deep");
+        let big_var = m.variable("big");
+        let mut big = FunctionBuilder::new(Some("big"), Arity::exactly(0), 250, 0);
+        big.emit(I::LoadInt { dst: 249, value: 7 })
+            .emit(I::Return { src: 249 });
+        let mut deep = FunctionBuilder::new(Some("deep"), Arity::exactly(1), 8, 0);
+        let recur = deep.label();
+        deep.emit(I::LoadInt { dst: 2, value: 0 });
+        deep.branch(
+            I::IfNumEq {
+                a: 1,
+                b: 2,
+                offset: 0,
+            },
+            recur,
+        );
+        deep.emit(I::GetVariable {
+            dst: 2,
+            variable: big_var,
+        })
+        .emit(I::TailCall { proc: 2, argc: 0 });
+        deep.bind(recur);
+        deep.emit(I::GetVariable {
+            dst: 5,
+            variable: deep_var,
+        })
+        .emit(I::SubImm {
+            dst: 6,
+            a: 1,
+            imm: 1,
+        })
+        .emit(I::Call { base: 2, argc: 1 })
+        .emit(I::AddImm {
+            dst: 5,
+            a: 5,
+            imm: 1,
+        })
+        .emit(I::Return { src: 5 });
+        vec![
+            ("big", m.function(big.finish().unwrap())),
+            ("deep", m.function(deep.finish().unwrap())),
+        ]
+    });
+    let deep = procedure(&mut cx, m, "deep");
+    for n in 0..3000 {
+        let result = cx.call(&deep, &[int(n)]).unwrap();
+        assert_eq!(result.as_fixnum(), Some(n + 7), "deep {n}");
+    }
 }
 
 /// `(define (make-adder n) (lambda (x) (+ x n)))`, and

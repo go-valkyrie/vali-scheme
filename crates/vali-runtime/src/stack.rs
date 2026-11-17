@@ -1,12 +1,16 @@
 //! Stack segments (ADR 0004): memory for a task's frames, growing downward
-//! like a native stack. Chaining several segments comes with overflow
-//! handling; for now a task has one.
+//! like a native stack. When a frame does not fit in the current segment,
+//! the VM chains a new one; returning from that frame drops back to the
+//! previous segment.
 
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
 
-/// How many words a segment holds.
-pub(crate) const SEGMENT_WORDS: usize = 128 * 1024;
+/// How many words a segment holds, unless a frame needs more.
+pub(crate) const SEGMENT_WORDS: usize = 8 * 1024;
+
+/// The most words a stack may take by default: 256 MiB.
+pub(crate) const MAX_STACK_WORDS: usize = 32 * 1024 * 1024;
 
 /// One stack segment.
 pub(crate) struct Segment {
@@ -39,6 +43,11 @@ impl Segment {
         let base = unsafe { alloc::alloc(layout) } as *mut u64;
         let base = NonNull::new(base).unwrap_or_else(|| alloc::handle_alloc_error(layout));
         Segment { base, words }
+    }
+
+    /// How many words the segment holds.
+    pub(crate) fn words(&self) -> usize {
+        self.words
     }
 
     /// One past the highest word: where the stack starts.
