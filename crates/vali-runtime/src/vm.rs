@@ -919,7 +919,6 @@ impl<S: Strategy> Cx<S> {
     unsafe fn call_native(
         &mut self,
         code: &Code<S>,
-        f: NativeFn<S>,
         fp: *mut u64,
         first: usize,
         argc: usize,
@@ -944,7 +943,27 @@ impl<S: Strategy> Cx<S> {
                 &large
             }
         };
-        f(self, args)
+        match &code.kind {
+            Kind::Native(f) => f(self, args),
+            Kind::Bridge(f) => f.invoke(self, args),
+            _ => unreachable!("only Rust procedures are called here"),
+        }
+    }
+
+    /// Binds each function of `library` as a global, by its name.
+    pub fn define_globals(&mut self, library: &crate::bridge::NativeLibrary) -> Result<(), Error> {
+        for f in library.functions() {
+            let code = Box::new(Code::bridge(std::sync::Arc::clone(f)));
+            let pointer = &*code as *const Code<S>;
+            self.natives.push(code);
+            let closure = self.closure_raw(pointer, &[])?;
+            // SAFETY: the cell belongs to this isolate.
+            unsafe {
+                let cell = self.global_cell(f.name());
+                self.write_cell(cell, closure);
+            }
+        }
+        Ok(())
     }
 
     /// The constants and variables of the loaded module at `module`.
@@ -1137,9 +1156,8 @@ impl<S: Strategy> Cx<S> {
                                 };
                                 continue;
                             }
-                            Kind::Native(f) => {
-                                let result =
-                                    attempt!(self.call_native(callee, f, fp, base + 4, argc));
+                            Kind::Native(_) | Kind::Bridge(_) => {
+                                let result = attempt!(self.call_native(callee, fp, base + 4, argc));
                                 if let Some((procedure, args)) = self.tail_call.take() {
                                     // The Rust procedure asked for a tail
                                     // call: make it in its place.
@@ -1256,8 +1274,8 @@ impl<S: Strategy> Cx<S> {
                                 next = Next::TailCall { argc: 0 };
                                 continue;
                             }
-                            Kind::Native(f) => {
-                                let result = attempt!(self.call_native(callee, f, fp, 1, argc));
+                            Kind::Native(_) | Kind::Bridge(_) => {
+                                let result = attempt!(self.call_native(callee, fp, 1, argc));
                                 if let Some((procedure, args)) = self.tail_call.take() {
                                     if !fits(fp, args.len() + 2, limit) {
                                         fail!(Error::scheme(

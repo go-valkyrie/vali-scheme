@@ -9,6 +9,7 @@
 //! - [`Handle`]: how Rust code holds Scheme values. Handles are `Send`,
 //!   `Sync` and `'static`, and are used through their isolate's context.
 
+pub mod bridge;
 mod code;
 mod counting;
 mod cx;
@@ -35,6 +36,7 @@ mod trampoline;
 mod value;
 mod vm;
 
+pub use bridge::{NativeFunction, NativeLibrary, Obj};
 pub use code::{Code, ModuleId, NativeFn};
 pub use counting::{
     Counting, CountingHeap, DeferredHeadered, DeferredSideCounts, PreciseHeadered,

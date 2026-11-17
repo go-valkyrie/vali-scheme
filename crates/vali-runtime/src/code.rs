@@ -45,6 +45,9 @@ pub(crate) enum Kind<S: Strategy> {
         slots: u16,
     },
     Native(NativeFn<S>),
+    /// A Rust function from a native library (ADR 0016), which works with
+    /// any strategy.
+    Bridge(std::sync::Arc<crate::bridge::NativeFunction>),
     /// `%catch`, which the VM handles itself: it calls a thunk, and calls a
     /// handler in its place if anything is raised inside (ADR 0004).
     Catch,
@@ -62,6 +65,7 @@ impl<S: Strategy> fmt::Debug for Code<S> {
         let kind = match self.kind {
             Kind::Bytecode { .. } => "bytecode",
             Kind::Native(_) => "native",
+            Kind::Bridge(_) => "bridge",
             Kind::Catch => "catch",
         };
         f.debug_struct("Code")
@@ -79,6 +83,17 @@ impl<S: Strategy> Code<S> {
             name: name.into(),
             arity,
             kind: Kind::Native(f),
+            calls: AtomicU32::new(0),
+            stub: crate::trampoline::resume(),
+        }
+    }
+
+    /// A descriptor for a function from a native library.
+    pub(crate) fn bridge(f: std::sync::Arc<crate::bridge::NativeFunction>) -> Code<S> {
+        Code {
+            name: f.name().into(),
+            arity: f.arity(),
+            kind: Kind::Bridge(f),
             calls: AtomicU32::new(0),
             stub: crate::trampoline::resume(),
         }

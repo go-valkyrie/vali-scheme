@@ -40,20 +40,19 @@ pub trait RustObject: Any + Send {
     }
 }
 
-/// A Rust object with its type erased, as the table keeps it.
-#[allow(dead_code, reason = "bridge conversions name objects in errors")]
-pub(crate) trait AnyObject: Any + Send {
-    fn name(&self) -> &'static str;
+/// A Rust object with its type erased, as the table keeps it and bridges'
+/// conversions see it. Every [`RustObject`] is one.
+#[doc(hidden)]
+pub trait ErasedObject: Any + Send {
+    /// How `write` shows it.
     fn write_to(&self, out: &mut String);
+    /// It, to downcast.
     fn as_any(&self) -> &dyn Any;
+    /// It, to downcast and change.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-impl<T: RustObject> AnyObject for T {
-    fn name(&self) -> &'static str {
-        T::NAME
-    }
-
+impl<T: RustObject> ErasedObject for T {
     fn write_to(&self, out: &mut String) {
         self.write(out);
     }
@@ -68,7 +67,6 @@ impl<T: RustObject> AnyObject for T {
 }
 
 /// How an entry is borrowed.
-#[allow(dead_code, reason = "bridge conversions borrow shared and exclusive")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Borrow {
     #[default]
@@ -79,8 +77,20 @@ pub(crate) enum Borrow {
 }
 
 pub(crate) struct Entry {
-    pub(crate) value: Box<dyn AnyObject>,
+    pub(crate) value: Box<dyn ErasedObject>,
     pub(crate) borrow: Borrow,
+}
+
+impl Entry {
+    /// The value's type.
+    pub(crate) fn type_id(&self) -> std::any::TypeId {
+        self.value.as_any().type_id()
+    }
+
+    /// The value, to borrow while the entry's borrow state says so.
+    pub(crate) fn pointer(&mut self) -> std::ptr::NonNull<dyn ErasedObject> {
+        std::ptr::NonNull::from(&mut *self.value)
+    }
 }
 
 /// An isolate's Rust objects, by index. Freed indices are reused.
@@ -99,7 +109,7 @@ impl fmt::Debug for Objects {
 }
 
 impl Objects {
-    fn insert(&mut self, value: Box<dyn AnyObject>) -> usize {
+    fn insert(&mut self, value: Box<dyn ErasedObject>) -> usize {
         let entry = Some(Entry {
             value,
             borrow: Borrow::Free,
@@ -154,7 +164,10 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// A new Rust object holding `value`.
-    pub(crate) fn object_raw(&mut self, value: Box<dyn AnyObject>) -> Result<Value, OutOfMemory> {
+    pub(crate) fn object_raw(
+        &mut self,
+        value: Box<dyn ErasedObject>,
+    ) -> Result<Value, OutOfMemory> {
         let t = TypeCode::RustObject;
         let v = self.new_object(t, 1, 0)?;
         let i = self.objects.insert(value);
