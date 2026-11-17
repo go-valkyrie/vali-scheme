@@ -20,8 +20,8 @@ use vali_abi::Tag;
 use crate::page::OutOfMemory;
 use crate::value::Value;
 
-/// What can go wrong using a handle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What can go wrong using a handle or running Scheme code.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
     /// Allocation failed.
@@ -36,6 +36,28 @@ pub enum Error {
     },
     /// An index is out of range.
     OutOfRange,
+    /// Scheme code raised an error. Until Scheme has conditions, errors
+    /// unwind to the host with a backtrace.
+    Scheme(Box<SchemeError>),
+}
+
+/// An error raised while running Scheme code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemeError {
+    /// What went wrong.
+    pub message: String,
+    /// The procedures that were running, innermost first.
+    pub backtrace: Vec<String>,
+}
+
+impl Error {
+    /// A Scheme error with `message` and no backtrace yet.
+    pub fn scheme(message: impl Into<String>) -> Error {
+        Error::Scheme(Box::new(SchemeError {
+            message: message.into(),
+            backtrace: Vec::new(),
+        }))
+    }
 }
 
 impl fmt::Display for Error {
@@ -47,6 +69,13 @@ impl fmt::Display for Error {
             ),
             Error::WrongType { expected } => write!(f, "expected {expected}"),
             Error::OutOfRange => f.write_str("index out of range"),
+            Error::Scheme(e) => {
+                f.write_str(&e.message)?;
+                for name in &e.backtrace {
+                    write!(f, "\n  in {name}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

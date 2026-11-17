@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 vali-abi.workspace = true
+vali-bytecode.workspace = true
 
 [lints]
 workspace = true

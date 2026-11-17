@@ -9,15 +9,19 @@
 //! - [`Handle`]: how Rust code holds Scheme values. Handles are `Send`,
 //!   `Sync` and `'static`, and are used through their isolate's context.
 
+mod code;
 mod cx;
 mod handle;
 mod no_collection;
 mod page;
+mod stack;
 mod strategy;
 mod value;
+mod vm;
 
+pub use code::{Code, ModuleId, NativeFn};
 pub use cx::Cx;
-pub use handle::{Error, Handle};
+pub use handle::{Error, Handle, SchemeError};
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
 pub use strategy::{Allocate, References, Space, Strategy};

@@ -97,7 +97,8 @@ impl Layout {
         self.field(TypeCode::Flonum, 0)
     }
 
-    /// A closure's code pointer.
+    /// A closure's pointer to its code descriptor, whose entry tier-up
+    /// replaces (ADR 0002).
     pub const fn closure_code(self) -> i32 {
         self.field(TypeCode::Closure, 0)
     }

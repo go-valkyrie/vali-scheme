@@ -7,14 +7,17 @@
 //! valid only until the next allocation, and must have the type the accessor
 //! expects.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use vali_abi::{Header, Layout, TypeCode, data};
 
+use crate::code::{Code, Instance};
 use crate::handle::{Error, Handle, RootTable};
 use crate::page::{HeapConfig, OutOfMemory};
+use crate::stack::Segment;
 use crate::strategy::{Space, Strategy};
 use crate::value::Value;
 
@@ -24,6 +27,25 @@ use crate::value::Value;
 pub struct Cx<S: Strategy> {
     heap: S::Heap,
     roots: Arc<RootTable>,
+    /// Modules loaded into this isolate.
+    pub(crate) instances: Vec<Instance<S>>,
+    /// Which instance belongs to each loaded module, by its address.
+    pub(crate) instance_of: HashMap<usize, usize>,
+    /// Values that variables of newly loaded modules are bound to by name,
+    /// until libraries and imports exist.
+    pub(crate) globals: HashMap<Box<str>, Value>,
+    /// Interned symbols.
+    pub(crate) symbols: HashMap<Box<str>, Value>,
+    /// Descriptors of Rust procedures, which closures point to. Each is
+    /// boxed so its address survives the vector growing.
+    #[allow(clippy::vec_box)]
+    pub(crate) natives: Vec<Box<Code<S>>>,
+    /// The stack, created on first use.
+    pub(crate) stack: Option<Segment>,
+    /// Whether Scheme code is running, which forbids re-entering it.
+    pub(crate) running: bool,
+    /// Calls made, the fuel used so far (ADR 0009).
+    pub(crate) fuel_used: u64,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -50,13 +72,13 @@ unsafe fn word<'a>(v: Value, offset: i32) -> &'a AtomicU64 {
 }
 
 #[inline(always)]
-unsafe fn get(v: Value, offset: i32) -> u64 {
+pub(crate) unsafe fn get(v: Value, offset: i32) -> u64 {
     // SAFETY: passed on to the caller.
     unsafe { word(v, offset) }.load(Ordering::Relaxed)
 }
 
 #[inline(always)]
-unsafe fn put(v: Value, offset: i32, x: u64) {
+pub(crate) unsafe fn put(v: Value, offset: i32, x: u64) {
     // SAFETY: passed on to the caller.
     unsafe { word(v, offset) }.store(x, Ordering::Relaxed)
 }
@@ -70,6 +92,14 @@ impl<S: Strategy> Cx<S> {
         Cx {
             heap: S::new_heap(config),
             roots: RootTable::new(),
+            instances: Vec::new(),
+            instance_of: HashMap::new(),
+            globals: HashMap::new(),
+            symbols: HashMap::new(),
+            natives: Vec::new(),
+            stack: None,
+            running: false,
+            fuel_used: 0,
         }
     }
 
@@ -85,7 +115,12 @@ impl<S: Strategy> Cx<S> {
 
     /// A new object of type `t` with `fields` words after its header, the
     /// header written and the fields uninitialised.
-    fn new_object(&mut self, t: TypeCode, fields: usize, data: u32) -> Result<Value, OutOfMemory> {
+    pub(crate) fn new_object(
+        &mut self,
+        t: TypeCode,
+        fields: usize,
+        data: u32,
+    ) -> Result<Value, OutOfMemory> {
         let space = match t {
             TypeCode::Pair => Space::Pair,
             TypeCode::Flonum => Space::Flonum,
