@@ -5,6 +5,7 @@
 - **Amended:** 2026-11-16, complex numbers are headered objects, as the full numeric tower requires (ADR 0007)
 - **Amended:** 2026-11-17, a closure's code word points to its function, whose entry tier-up replaces; a call is a tag test and two loads
 - **Amended:** 2026-11-17, object layouts: one header word split between the memory strategy and the runtime; pairs and flonums carry a header only if the strategy wants one; the immediate subtags; UTF-8 strings; the built-in type codes (items 7 to 13)
+- **Amended:** 2026-11-17, syntax objects have a type code of their own, since they are Rust values (ADR 0015 #13)
 - **Related:** 0003 (memory management), 0006 (ABI version), 0008 (threads), 0010 (contracts), 0012 (distribution format)
 
 ## Context
@@ -94,8 +95,9 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
     | Code and control | Code object (bytecode or native, with its debug information), continuation and stack segment (ADR 0004) |
     | References | Weak pair, ephemeron |
     | Host | Port, Rust object |
+    | Syntax | Syntax object: a Rust value the context owns, which the object indexes (ADR 0015 #13) |
 
-13. **Everything else is a record:** hash tables, promises, parameters, conditions, environments and syntax objects (ADR 0015). They need no type code of their own, and get `record?`, printing and inspection from the record system.
+13. **Everything else is a record:** hash tables, promises, parameters, conditions and environments. They need no type code of their own, and get `record?`, printing and inspection from the record system.
 
 ## Consequences
 

@@ -20,6 +20,7 @@ mod read;
 mod stack;
 mod strategy;
 mod stubs;
+mod syntax;
 mod trampoline;
 mod value;
 mod vm;

@@ -58,11 +58,14 @@ pub enum TypeCode {
     Port = 41,
     /// A Rust object exposed to Scheme.
     RustObject = 43,
+    /// A syntax object: an index into its context's table of them (ADR
+    /// 0015 #13).
+    Syntax = 45,
 }
 
 impl TypeCode {
     /// Every type code, in numeric order.
-    pub const ALL: [TypeCode; 22] = [
+    pub const ALL: [TypeCode; 23] = [
         TypeCode::Pair,
         TypeCode::Flonum,
         TypeCode::Closure,
@@ -85,6 +88,7 @@ impl TypeCode {
         TypeCode::Ephemeron,
         TypeCode::Port,
         TypeCode::RustObject,
+        TypeCode::Syntax,
     ];
 
     /// The type code numbered `n`, if there is one.

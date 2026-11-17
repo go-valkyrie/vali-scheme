@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use vali_abi::TypeCode;
 use vali_num::Number;
-use vali_syntax::{DatumBuilder, SourceId, Span};
+use vali_syntax::{Datum, DatumBuilder, DatumKind, SourceId, Span};
 
 use crate::cx::Cx;
 use crate::handle::{Error, Handle};
@@ -170,7 +170,51 @@ impl<S: Strategy> DatumBuilder for HeapBuilder<'_, S> {
     }
 }
 
+/// Builds `datum` with `builder`, as the reader would have.
+fn build<B: DatumBuilder>(builder: &mut B, datum: &Datum) -> B::Datum {
+    let span = datum.span;
+    match &datum.kind {
+        DatumKind::Number(n) => builder.number(n.clone(), span),
+        DatumKind::Boolean(b) => builder.boolean(*b, span),
+        DatumKind::Character(c) => builder.character(*c, span),
+        DatumKind::String(s) => builder.string(s.clone(), span),
+        DatumKind::Symbol(name) => builder.symbol(name, span),
+        DatumKind::Keyword(name) => builder.keyword(name, span),
+        DatumKind::List { items, tail } => {
+            let items = items.iter().map(|d| build(builder, d)).collect();
+            let tail = tail.as_deref().map(|d| build(builder, d));
+            builder.list(items, tail, span)
+        }
+        DatumKind::Vector(items) => {
+            let items = items.iter().map(|d| build(builder, d)).collect();
+            builder.vector(items, span)
+        }
+        DatumKind::Bytevector(bytes) => builder.bytevector(bytes.clone(), span),
+        DatumKind::Labelled(label, inner) => {
+            let value = build(builder, inner);
+            builder.label_def(*label, value, span)
+        }
+        DatumKind::LabelRef(label) => builder.label_ref(*label, span),
+        _ => unreachable!("every datum kind is handled"),
+    }
+}
+
 impl<S: Strategy> Cx<S> {
+    /// `datum` in this isolate's heap, as reading its text would make it.
+    pub fn datum_raw(&mut self, datum: &Datum) -> Result<Value, Error> {
+        let mut builder = HeapBuilder {
+            cx: self,
+            error: None,
+            defined: HashMap::new(),
+            pending: HashMap::new(),
+        };
+        let value = build(&mut builder, datum);
+        match builder.error {
+            Some(error) => Err(error),
+            None => Ok(value),
+        }
+    }
+
     /// Reads every datum in `source` into this isolate's heap, as `read`
     /// does: strings are fresh and mutable, symbols are interned, and datum
     /// labels build shared and circular structure.

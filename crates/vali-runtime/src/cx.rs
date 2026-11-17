@@ -56,6 +56,10 @@ pub struct Cx<S: Strategy> {
     pub(crate) fuel_used: u64,
     /// A tail call a Rust procedure asked for, made when it returns.
     pub(crate) tail_call: Option<(Value, Vec<Value>)>,
+    /// The syntax objects that heap objects of type `Syntax` index.
+    pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
+    /// Data the host keeps here for its Rust procedures to reach.
+    pub(crate) host_data: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
@@ -114,6 +118,8 @@ impl<S: Strategy> Cx<S> {
             running: false,
             fuel_used: 0,
             tail_call: None,
+            syntaxes: Vec::new(),
+            host_data: None,
         }
     }
 

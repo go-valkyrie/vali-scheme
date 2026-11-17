@@ -220,6 +220,14 @@ impl<S: Strategy> Printer<'_, S> {
                             self.out.push_str(&n.to_string_radix(Radix::Decimal));
                         }
                         Some(TypeCode::Box) => self.out.push_str("#<box>"),
+                        // Without scopes, which would differ between runs
+                        // (ADR 0001 #4).
+                        Some(TypeCode::Syntax) => match self.cx.syntax_value(v) {
+                            Some(syntax) => {
+                                let _ = write!(self.out, "#<syntax {}>", syntax.to_datum());
+                            }
+                            None => self.out.push_str("#<syntax>"),
+                        },
                         Some(TypeCode::Bytevector) => {
                             self.out.push_str("#u8(");
                             for (i, b) in self.cx.bytevector_bytes(v).iter().enumerate() {

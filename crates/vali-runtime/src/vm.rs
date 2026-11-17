@@ -389,7 +389,7 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// Whether `v` is a heap object of type `t` under the "other" tag.
-    fn is_other(&self, v: Value, t: TypeCode) -> bool {
+    pub(crate) fn is_other(&self, v: Value, t: TypeCode) -> bool {
         // SAFETY: values in slots are valid, so an "other" pointer points to
         // a live object with a header.
         v.tag() == Tag::Other && unsafe { self.header(v, t) }.and_then(Header::type_code) == Some(t)
