@@ -836,6 +836,47 @@ fn symbol_eq<S: Strategy>(_cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Erro
     Ok(Value::boolean(args.windows(2).all(|p| p[0] == p[1])))
 }
 
+fn radix_arg(name: &str, args: &[Value]) -> Result<vali_num::Radix, Error> {
+    use vali_num::Radix;
+    match args.get(1).copied().filter(|v| *v != Value::DEFAULT) {
+        None => Ok(Radix::Decimal),
+        Some(v) => match v.as_fixnum() {
+            Some(2) => Ok(Radix::Binary),
+            Some(8) => Ok(Radix::Octal),
+            Some(10) => Ok(Radix::Decimal),
+            Some(16) => Ok(Radix::Hexadecimal),
+            _ => Err(type_error(name, "a radix of 2, 8, 10 or 16", v)),
+        },
+    }
+}
+
+fn number_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let radix = radix_arg("number->string", args)?;
+    let number = match number_arg(cx, "number->string", args[0])? {
+        Num::Fixnum(n) => vali_num::Number::Integer(n.into()),
+        Num::Integer(n) => vali_num::Number::Integer(n),
+        Num::Flonum(x) => vali_num::Number::Real(x),
+    };
+    let text = number
+        .to_string_radix(radix)
+        .ok_or_else(|| Error::scheme("number->string: inexact numbers print only in radix 10"))?;
+    Ok(cx.string_raw(&text, false)?)
+}
+
+/// `string->number`: `#f` for text that is not a number.
+fn string_to_number<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let radix = radix_arg("string->number", args)?;
+    let text = string_arg(cx, "string->number", args[0])?.to_owned();
+    match vali_num::parse(&text, radix) {
+        Err(_) => Ok(Value::FALSE),
+        Ok(vali_num::Number::Integer(n)) => Ok(cx.integer_raw(&n)?),
+        Ok(vali_num::Number::Real(x)) => Ok(cx.flonum_raw(x)?),
+        Ok(_) => Err(Error::scheme(
+            "string->number: rationals and complex numbers are not supported in the heap yet",
+        )),
+    }
+}
+
 /// `(apply f a ... list)`: asks the VM to tail-call `f`.
 fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
@@ -913,6 +954,24 @@ impl<S: Strategy> Cx<S> {
             ("list-tail", Arity::exactly(2), list_tail),
             ("list-ref", Arity::exactly(2), list_ref),
             ("apply", at_least(1), apply),
+            (
+                "number->string",
+                Arity {
+                    required: 1,
+                    optional: 1,
+                    rest: false,
+                },
+                number_to_string,
+            ),
+            (
+                "string->number",
+                Arity {
+                    required: 1,
+                    optional: 1,
+                    rest: false,
+                },
+                string_to_number,
+            ),
             ("number?", Arity::exactly(1), is_number),
             ("integer?", Arity::exactly(1), is_integer),
             ("exact?", Arity::exactly(1), is_exact),

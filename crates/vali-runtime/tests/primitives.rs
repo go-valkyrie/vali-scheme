@@ -342,3 +342,32 @@ fn integer_division() {
         assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
     }
 }
+
+#[test]
+fn numbers_and_strings() {
+    let mut cx = cx();
+    let cases = [
+        ("number->string", "42", "\"42\""),
+        ("number->string", "255 16", "\"ff\""),
+        ("number->string", "-5 2", "\"-101\""),
+        ("number->string", "2.5", "\"2.5\""),
+        (
+            "number->string",
+            "123456789012345678901234567890",
+            "\"123456789012345678901234567890\"",
+        ),
+        ("string->number", "\"42\"", "42"),
+        ("string->number", "\"ff\" 16", "255"),
+        ("string->number", "\"#xff\"", "255"),
+        ("string->number", "\"1e3\"", "1000.0"),
+        (
+            "string->number",
+            "\"12345678901234567890123\"",
+            "12345678901234567890123",
+        ),
+        ("string->number", "\"abc\"", "#f"),
+    ];
+    for (name, args, expected) in cases {
+        assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
+    }
+}
