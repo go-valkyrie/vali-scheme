@@ -2179,3 +2179,256 @@ fn direct(function: FunId) -> V {
         free: RefCell::new(Vec::new()),
     }))
 }
+
+// ---------------------------------------------------------------------------
+// Contification and the order of a closure's ties and its call
+// (ADR 0017 #9, #11).
+
+/// `f1(i) [self]`: loops by tail calling `self` while `i < 3`, then returns
+/// `i`. Constants 0, 1, 3 and `#<unspecified>` are `c(0)` to `c(3)`.
+fn tie_loop() -> Function {
+    let mut fb = FB::default();
+    let i = fb.var();
+    let me = fb.var();
+    let (t, i1) = (fb.var(), fb.var());
+    let call = fb.push(Term::TailCall {
+        callee: v(me),
+        args: vec![v(i1)],
+        position: None,
+    });
+    let then = let_(
+        &mut fb,
+        i1,
+        Value::Primitive {
+            op: Primitive::Add,
+            args: vec![v(i), c(1)],
+        },
+        call,
+    );
+    let otherwise = fb.push(Term::Return(v(i)));
+    let iff = fb.push(Term::If {
+        test: v(t),
+        then,
+        otherwise,
+    });
+    let body = let_(
+        &mut fb,
+        t,
+        Value::Primitive {
+            op: Primitive::Lt,
+            args: vec![v(i), c(2)],
+        },
+        iff,
+    );
+    fb.finish(
+        "f1",
+        Arity {
+            required: 1,
+            optional: 0,
+            rest: false,
+        },
+        vec![i],
+        vec![me],
+        body,
+    )
+}
+
+/// A module of `f0`, built by `build`, and `tie_loop`.
+fn tie_module(build: impl FnOnce(&mut FB) -> TermId) -> Module {
+    let consts = vec![
+        Constant::Integer(0),
+        Constant::Integer(1),
+        Constant::Integer(3),
+        Constant::Unspecified,
+    ];
+    let mut fb = FB::default();
+    let body = build(&mut fb);
+    let f0 = fb.finish(
+        "f0",
+        Arity {
+            required: 0,
+            optional: 0,
+            rest: false,
+        },
+        vec![],
+        vec![],
+        body,
+    );
+    module(consts, vec![], vec![f0, tie_loop()])
+}
+
+fn make_closure(fb: &mut FB, k: Var, body: TermId) -> TermId {
+    let_(
+        fb,
+        k,
+        Value::Closure {
+            function: FunId(1),
+            free: vec![c(3)],
+        },
+        body,
+    )
+}
+
+fn tie(fb: &mut FB, u: Var, k: Var, body: TermId) -> TermId {
+    let_(
+        fb,
+        u,
+        Value::SetFree {
+            closure: v(k),
+            index: 0,
+            value: v(k),
+        },
+        body,
+    )
+}
+
+fn call_k(fb: &mut FB, r: Var, k: Var, body: TermId) -> TermId {
+    let_(
+        fb,
+        r,
+        Value::Call {
+            callee: v(k),
+            args: vec![c(0)],
+        },
+        body,
+    )
+}
+
+/// What a module gives, which every memory strategy must agree on.
+fn answer_of(m: &Module) -> Result<String, String> {
+    let bytecode = convert_checked(m).unwrap();
+    let mut runs = run_all(&bytecode).into_iter();
+    let (_, first) = runs.next().unwrap();
+    for (name, run) in runs {
+        assert_eq!(run, first, "{name} disagrees");
+    }
+    first
+}
+
+fn closures_in_f0(m: &Module) -> usize {
+    m.functions[0]
+        .terms
+        .iter()
+        .filter(|t| {
+            matches!(
+                t,
+                Term::Let {
+                    value: Value::Closure { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// Runs `contify` on a copy of `m` and checks the result still validates.
+fn contified(m: &Module) -> Module {
+    let mut out = m.clone();
+    vali_opt::contify(&mut out);
+    ir::validate(&out).unwrap();
+    out
+}
+
+/// A letrec-style closure whose self-tie comes after its call: the call
+/// reaches the placeholder and fails, and must still fail once optimised.
+#[test]
+fn contify_tie_after_call() {
+    let m = tie_module(|fb| {
+        let (k, r, u) = (fb.var(), fb.var(), fb.var());
+        let ret = fb.push(Term::Return(v(r)));
+        let t = tie(fb, u, k, ret);
+        let t = call_k(fb, r, k, t);
+        make_closure(fb, k, t)
+    });
+    let before = answer_of(&m).unwrap_err();
+    assert!(before.contains("not a procedure"), "{before}");
+    let after = contified(&m);
+    assert_eq!(closures_in_f0(&after), 1, "contified");
+    assert_eq!(answer_of(&after).unwrap_err(), before);
+    let mut optimised = m.clone();
+    vali_opt::optimise(&mut optimised);
+    ir::validate(&optimised).unwrap();
+    assert_eq!(answer_of(&optimised).unwrap_err(), before);
+}
+
+/// The tie is in the branch of an `if` the call is not in.
+#[test]
+fn contify_tie_in_other_branch() {
+    let m = tie_module(|fb| {
+        let (k, r, u, t) = (fb.var(), fb.var(), fb.var(), fb.var());
+        let ret = fb.push(Term::Return(c(0)));
+        let then = tie(fb, u, k, ret);
+        let ret = fb.push(Term::Return(v(r)));
+        let otherwise = call_k(fb, r, k, ret);
+        let iff = fb.push(Term::If {
+            test: v(t),
+            then,
+            otherwise,
+        });
+        let test = let_(
+            fb,
+            t,
+            Value::Primitive {
+                op: Primitive::Lt,
+                args: vec![c(1), c(0)],
+            },
+            iff,
+        );
+        make_closure(fb, k, test)
+    });
+    let before = answer_of(&m).unwrap_err();
+    assert!(before.contains("not a procedure"), "{before}");
+    let after = contified(&m);
+    assert_eq!(closures_in_f0(&after), 1, "contified");
+    assert_eq!(answer_of(&after).unwrap_err(), before);
+}
+
+/// The tie is in a join's body and the call in its handler. The tie runs
+/// first, but contification does not follow the jump: it declines. A later
+/// `find` that follows jumps may legitimately accept it, and this test then
+/// changes.
+#[test]
+fn contify_tie_in_join_body_call_in_handler_is_declined() {
+    let m = tie_module(|fb| {
+        let (k, r, u) = (fb.var(), fb.var(), fb.var());
+        let j = fb.join();
+        let ret = fb.push(Term::Return(v(r)));
+        let handler = call_k(fb, r, k, ret);
+        let jump = fb.push(Term::Jump {
+            join: j,
+            args: vec![],
+        });
+        let body = tie(fb, u, k, jump);
+        let join = fb.push(Term::Join {
+            join: j,
+            params: vec![],
+            recursive: false,
+            handler,
+            body,
+        });
+        make_closure(fb, k, join)
+    });
+    let before = answer_of(&m);
+    assert_eq!(before, Ok("3".into()));
+    let after = contified(&m);
+    assert_eq!(closures_in_f0(&after), 1, "contified");
+    assert_eq!(answer_of(&after), before);
+}
+
+/// A closure tied, then called, which is what a named `let` lowers to,
+/// still contifies.
+#[test]
+fn contify_tie_before_call() {
+    let m = tie_module(|fb| {
+        let (k, r, u) = (fb.var(), fb.var(), fb.var());
+        let ret = fb.push(Term::Return(v(r)));
+        let t = call_k(fb, r, k, ret);
+        let t = tie(fb, u, k, t);
+        make_closure(fb, k, t)
+    });
+    let before = answer_of(&m);
+    assert_eq!(before, Ok("3".into()));
+    let after = contified(&m);
+    assert_eq!(closures_in_f0(&after), 0, "not contified");
+    assert_eq!(answer_of(&after), before);
+}

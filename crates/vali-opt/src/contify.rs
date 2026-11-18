@@ -5,7 +5,11 @@
 //! when `f` uses it only as the callee of one call, and to tie it to
 //! itself with `set-free c i c` (how `letrec` closes a loop), and `g` uses
 //! that free variable only as the callee of tail calls to itself, with the
-//! arguments its arity fixes. Then `g`'s body is copied into `f` as a
+//! arguments its arity fixes. Every tie must also run before the call: each
+//! is an ancestor of the call in `f`'s term tree, so the call is inside the
+//! `let` that makes the tie. A tie in another branch, after the call, or in
+//! a join's body when the call is in its handler is not, and the closure is
+//! left alone. Then `g`'s body is copied into `f` as a
 //! `rec join`, its own tail calls becoming jumps:
 //!
 //! - at a tail call, `tail c(a)` becomes `rec join j(p) = body in jump
@@ -60,8 +64,17 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
             }
         }
     };
+    // The term tree, to tell whether a tie is an ancestor of the call:
+    // each term's parent, its place in the walk's preorder, and its
+    // subtree's size.
+    let mut parent: Vec<usize> = vec![usize::MAX; f.terms.len()];
+    let mut pre: Vec<usize> = vec![0; f.terms.len()];
+    let mut order: Vec<usize> = Vec::new();
     let mut pending = vec![f.body];
     while let Some(id) = pending.pop() {
+        pre[id.0 as usize] = order.len();
+        order.push(id.0 as usize);
+        let before = pending.len();
         match f.term(id) {
             Term::Let {
                 var, value, body, ..
@@ -121,7 +134,22 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
             }
             Term::TailCallDirect { args, .. } => mark(args, &mut other),
         }
+        for child in &pending[before..] {
+            parent[child.0 as usize] = id.0 as usize;
+        }
     }
+    let mut size = vec![1usize; f.terms.len()];
+    for &t in order.iter().rev() {
+        if parent[t] != usize::MAX {
+            size[parent[t]] += size[t];
+        }
+    }
+    // Whether `tie` is an ancestor of `call`, so that the call runs after
+    // the tie has.
+    let before = |tie: TermId, call: TermId| {
+        let (t, c) = (tie.0 as usize, call.0 as usize);
+        pre[t] < pre[c] && pre[c] < pre[t] + size[t]
+    };
     (0..vars).find_map(|v| {
         let (made_at, function, free) = made[v].clone()?;
         if other[v] || calls[v].len() != 1 {
@@ -141,6 +169,12 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
             _ => return None,
         };
         if argc != usize::from(g.arity.required) {
+            return None;
+        }
+        // A closure is tied before it is called: lowering ensures it, but
+        // IR from elsewhere may tie it in another branch, or after the
+        // call, and contifying would then change what the call does.
+        if ties[v].iter().any(|&(tie, _)| !before(tie, call)) {
             return None;
         }
         let selves: Vec<u32> = ties[v].iter().map(|&(_, i)| i).collect();

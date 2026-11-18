@@ -700,6 +700,7 @@ dependencies = [
  "vali-bytecode",
  "vali-compiler",
  "vali-dist",
+ "vali-opt",
  "vali-runtime",
  "vali-stdlib",
  "vali-syntax",

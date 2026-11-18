@@ -18,6 +18,7 @@ vali-syntax.workspace = true
 
 [dev-dependencies]
 vali-dist.workspace = true
+vali-opt.workspace = true
 
 [[test]]
 name = "regressions"
