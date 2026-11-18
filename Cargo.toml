@@ -21,6 +21,15 @@ vali-runtime = { path = "crates/vali-runtime", version = "0.0.0" }
 vali-stdlib = { path = "crates/vali-stdlib", version = "0.0.0" }
 vali-syntax = { path = "crates/vali-syntax", version = "0.0.0" }
 
+# The tests compile and run a lot of Scheme, most of it under every heap
+# strategy and each time with the standard libraries compiled from source.
+# Unoptimised, that took about eight minutes in CI; opt-level 1 makes the
+# tests about seven times faster and keeps debug assertions and overflow
+# checks. Only `cargo test` uses this profile, so builds stay unoptimised
+# for debugging.
+[profile.test]
+opt-level = 1
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"

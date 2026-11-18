@@ -20,6 +20,9 @@ pub extern "C" fn vali_test_breakpoint() {
 }
 
 fn stop(_cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+    // Taking its address keeps `args` on the stack, where the debuggers can
+    // print it even when the tests are optimised.
+    std::hint::black_box(&args);
     vali_test_breakpoint();
     Ok(args[0])
 }
