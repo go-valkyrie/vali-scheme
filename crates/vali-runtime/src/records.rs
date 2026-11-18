@@ -73,7 +73,13 @@ fn field_index<S: Strategy>(cx: &Cx<S>, rtd: Value, field: Value) -> Result<usiz
         .ok_or_else(|| {
             // SAFETY: valid values.
             let type_name = unsafe { cx.record_type_name(rtd) }.unwrap_or("?");
-            Error::scheme(format!("{type_name} has no field {field:?}"))
+            let field_name = if field.tag() == vali_abi::Tag::Symbol {
+                // SAFETY: a live symbol.
+                unsafe { cx.symbol_name(field) }
+            } else {
+                "?"
+            };
+            Error::scheme(format!("{type_name} has no field {field_name}"))
         })
 }
 
