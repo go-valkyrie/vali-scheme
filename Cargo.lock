@@ -509,6 +509,7 @@ version = "0.0.0"
 dependencies = [
  "vali-compiler",
  "vali-runtime",
+ "vali-stdlib",
 ]
 
 [[package]]
@@ -559,6 +560,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vali-stdlib"
+version = "0.0.0"
+dependencies = [
+ "vali-compiler",
+ "vali-runtime",
+]
+
+[[package]]
 name = "vali-syntax"
 version = "0.0.0"
 dependencies = [
@@ -580,6 +589,7 @@ dependencies = [
  "vali-bytecode",
  "vali-compiler",
  "vali-runtime",
+ "vali-stdlib",
  "vali-syntax",
 ]
 

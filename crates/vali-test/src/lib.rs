@@ -466,6 +466,8 @@ pub fn verdict(header: &Header, outcome: Outcome) -> Result<(), String> {
 /// One `cargo test` test per file, run through `backend`. Tests expected to
 /// fail are labelled `xfail`.
 pub fn trials(files: Vec<TestFile>, backend: Arc<dyn Backend + Send + Sync>) -> Vec<Trial> {
+    // Vali's own libraries load prebuilt, as they do for every host.
+    vali_stdlib::install();
     files
         .into_iter()
         .map(|file| {

@@ -6,6 +6,10 @@
 //!
 //! The REPL uses deferred counting, for now the fastest strategy that frees
 //! memory (ADR 0003).
+//!
+//! Vali's own libraries are loaded from the artifacts `vali-stdlib` built,
+//! not expanded; setting `VALI_NO_PREBUILT` compiles them from source, to
+//! compare.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -14,6 +18,9 @@ use vali_compiler::Repl;
 use vali_runtime::{DeferredHeadered, Error, HeapConfig};
 
 fn main() -> ExitCode {
+    if std::env::var_os("VALI_NO_PREBUILT").is_none() {
+        vali_stdlib::install();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [] => repl(),
