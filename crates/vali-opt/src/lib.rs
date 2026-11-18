@@ -14,10 +14,43 @@
 //!   values again, threaded through join points (ADR 0017 #5). Runs first.
 
 mod build;
+mod contify;
 mod simplify;
 mod unbox;
 
-use vali_dist::{ConstantId, Module, Operand, Term, Value};
+use vali_dist::{ConstantId, FunId, Module, Operand, Term, Value};
+
+/// The most closures contified in one function: each makes the function
+/// bigger, and a long chain of them is rare.
+const CONTIFICATIONS: usize = 256;
+
+/// What a value reads.
+pub(crate) fn operands(value: &Value) -> Vec<Operand> {
+    match value {
+        Value::Operand(x) | Value::Box(x) | Value::Unbox(x) | Value::SetGlobal(_, x) => vec![*x],
+        Value::Primitive { args, .. } => args.clone(),
+        Value::Call { callee, args } => std::iter::once(*callee)
+            .chain(args.iter().copied())
+            .collect(),
+        Value::Closure { free, .. } => free.clone(),
+        Value::Global(_) => Vec::new(),
+        Value::SetBox(a, b) => vec![*a, *b],
+        Value::SetFree { closure, value, .. } => vec![*closure, *value],
+    }
+}
+
+/// The cheap set of passes, for evaluated code and REPL inputs (ADR 0013
+/// #13): contification alone, so their loops are loops.
+pub fn contify(module: &mut Module) {
+    for n in 0..module.functions.len() {
+        for _ in 0..CONTIFICATIONS {
+            if !contify::contify(module, n) {
+                break;
+            }
+        }
+    }
+    compact_functions(module);
+}
 
 /// How many rounds of simplification a function gets at most: each round
 /// can expose more, but few programs need more than two.
@@ -26,6 +59,11 @@ const ROUNDS: usize = 4;
 /// Optimises `module` in place. It stays valid.
 pub fn optimise(module: &mut Module) {
     for n in 0..module.functions.len() {
+        for _ in 0..CONTIFICATIONS {
+            if !contify::contify(module, n) {
+                break;
+            }
+        }
         unbox::unbox(module, n);
         for _ in 0..ROUNDS {
             if !simplify::simplify(module, n) {
@@ -33,12 +71,59 @@ pub fn optimise(module: &mut Module) {
             }
         }
     }
+    compact_functions(module);
     compact_constants(module);
     debug_assert!(
         vali_dist::validate(module).is_ok(),
         "the optimiser produced invalid IR: {:?}",
         vali_dist::validate(module)
     );
+}
+
+/// Drops the functions no closure reaches from the body, which
+/// contification leaves behind, keeping the others in order.
+fn compact_functions(module: &mut Module) {
+    let mut reached = vec![false; module.functions.len()];
+    reached[module.body.0 as usize] = true;
+    let mut pending = vec![module.body];
+    while let Some(id) = pending.pop() {
+        for term in &module.functions[id.0 as usize].terms {
+            if let Term::Let {
+                value: Value::Closure { function, .. },
+                ..
+            } = term
+                && !std::mem::replace(&mut reached[function.0 as usize], true)
+            {
+                pending.push(*function);
+            }
+        }
+    }
+    if reached.iter().all(|&r| r) {
+        return;
+    }
+    let mut renumber = vec![0u32; reached.len()];
+    let mut next = 0;
+    for (n, &r) in reached.iter().enumerate() {
+        renumber[n] = next;
+        next += u32::from(r);
+    }
+    let mut n = 0;
+    module.functions.retain(|_| {
+        n += 1;
+        reached[n - 1]
+    });
+    module.body = FunId(renumber[module.body.0 as usize]);
+    for f in &mut module.functions {
+        for term in &mut f.terms {
+            if let Term::Let {
+                value: Value::Closure { function, .. },
+                ..
+            } = term
+            {
+                *function = FunId(renumber[function.0 as usize]);
+            }
+        }
+    }
 }
 
 /// Drops the constants no code uses, which folding leaves behind, keeping

@@ -8,14 +8,14 @@
 //!
 //! An `if` whose value is wanted becomes a join point whose handler is
 //! what follows: `join k(r): ...rest...` around an `if` whose arms jump to
-//! `k`. A `letrec` procedure that `analyze` proves is a loop becomes a
-//! `rec join` at its one entry, its own calls jumps.
+//! `k`. Loops are closures here: the optimiser's contification makes a
+//! named `let` a `rec join`.
 //!
 //! Variables follow ADR 0005 #4: every assigned variable is boxed (ADR
 //! 0017 #5 leaves unboxing to the optimiser), and closures in a `letrec`
 //! that capture a variable bound after them are patched with `set-free`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use vali_dist::{
     Arity, Constant, ConstantId, Effects, FunId, Function, Global, GlobalId, GlobalLink, JoinId,
@@ -85,8 +85,6 @@ struct Fun {
     /// Each lexical variable's operand: its value, or for a boxed
     /// variable, its box.
     env: HashMap<VarId, Operand>,
-    /// The loops whose bodies are being lowered, and their join points.
-    loops: HashMap<VarId, JoinId>,
 }
 
 impl Fun {
@@ -256,7 +254,6 @@ fn negated(e: &Expr) -> Option<&Expr> {
 pub(crate) fn lower(
     vars: &[VarInfo],
     lambdas: &[Lambda],
-    loops: &HashSet<VarId>,
     sources: &Sources,
     body: LambdaId,
     name: &str,
@@ -264,7 +261,6 @@ pub(crate) fn lower(
     let mut lowerer = Lowerer {
         vars,
         lambdas,
-        loops,
         sources,
         constants: Vec::new(),
         keys: HashMap::new(),
@@ -273,7 +269,6 @@ pub(crate) fn lower(
         functions: Vec::new(),
         source_table: Vec::new(),
         spans: Vec::new(),
-        loop_lambdas: HashMap::new(),
     };
     let body = lowerer.function(body)?;
     let exports = lowerer
@@ -302,7 +297,6 @@ pub(crate) fn lower(
 struct Lowerer<'a> {
     vars: &'a [VarInfo],
     lambdas: &'a [Lambda],
-    loops: &'a HashSet<VarId>,
     sources: &'a Sources,
     constants: Vec<Constant>,
     keys: HashMap<Key, ConstantId>,
@@ -313,8 +307,6 @@ struct Lowerer<'a> {
     source_table: Vec<Box<str>>,
     /// The spans of the calls being lowered, one inside another.
     spans: Vec<Span>,
-    /// Each loop's `lambda`, from when its `letrec` is lowered.
-    loop_lambdas: HashMap<VarId, LambdaId>,
 }
 
 impl Lowerer<'_> {
@@ -665,14 +657,7 @@ impl Lowerer<'_> {
     /// order. A closure that captured a variable before it had its value
     /// gets it with `set-free` once it has.
     fn letrec(&mut self, f: &mut Fun, bindings: &[(VarId, Expr)]) -> Result<()> {
-        for (v, init) in bindings {
-            if self.loops.contains(v) {
-                let Expr::Lambda(l) = init else {
-                    return Err(internal("a loop that is not a lambda"));
-                };
-                self.loop_lambdas.insert(*v, *l);
-                continue;
-            }
+        for (v, _) in bindings {
             let unspecified = self.unspecified()?;
             let operand = if self.vars[*v].boxed() {
                 self.bind(f, Value::Box(unspecified))?
@@ -683,10 +668,6 @@ impl Lowerer<'_> {
         }
         let mut closures: Vec<Option<(Operand, LambdaId)>> = Vec::new();
         for (v, init) in bindings {
-            if self.loops.contains(v) {
-                closures.push(None);
-                continue;
-            }
             let x = self.value(f, init)?;
             if self.vars[*v].boxed() {
                 let cell = self.location(f, *v)?;
@@ -735,11 +716,6 @@ impl Lowerer<'_> {
         args: &[Expr],
         tail: Option<Tail>,
     ) -> Result<Option<Operand>> {
-        if let Expr::Local(v) = callee
-            && self.loops.contains(v)
-        {
-            return self.loop_call(f, *v, args, tail);
-        }
         if let Expr::Free(name) = callee
             && inlined(name, args.len())
         {
@@ -766,71 +742,6 @@ impl Lowerer<'_> {
                 Self::deliver(f, x, Tail::Jump(join)).map(|()| None)
             }
             None => self.bind(f, Value::Call { callee, args }).map(Some),
-        }
-    }
-
-    /// A call to a loop: a jump back from inside its body, or its entry,
-    /// where the body is lowered as a `rec join`.
-    fn loop_call(
-        &mut self,
-        f: &mut Fun,
-        v: VarId,
-        args: &[Expr],
-        tail: Option<Tail>,
-    ) -> Result<Option<Operand>> {
-        if let Some(&join) = f.loops.get(&v) {
-            if tail.is_none() {
-                return Err(internal("a loop calls itself not in tail position"));
-            }
-            let args = self.values(f, args)?;
-            f.place(Term::Jump { join, args })?;
-            return Ok(None);
-        }
-        let l = *self
-            .loop_lambdas
-            .get(&v)
-            .ok_or_else(|| internal("a loop entered before its letrec"))?;
-        let args = self.values(f, args)?;
-        // Its value goes where the entry's would, through a join point if
-        // the entry is not in tail position.
-        let (result, tail) = match tail {
-            Some(tail) => (None, tail),
-            None => {
-                let (join, result) = self.open_join(f)?;
-                (Some((join.0, result)), Tail::Jump(join.1))
-            }
-        };
-        let join = f.join();
-        let lambdas = self.lambdas;
-        let lambda = &lambdas[l];
-        let params: Vec<Var> = lambda.required.iter().map(|_| f.var()).collect();
-        let id = f.place(Term::Join {
-            join,
-            params: params.clone(),
-            recursive: true,
-            handler: HOLE,
-            body: HOLE,
-        })?;
-        f.hole = Some((id, Field::JoinBody));
-        f.place(Term::Jump { join, args })?;
-        f.hole = Some((id, Field::JoinHandler));
-        for (&w, &param) in lambda.required.iter().zip(&params) {
-            let operand = if self.vars[w].boxed() {
-                self.bind(f, Value::Box(Operand::Var(param)))?
-            } else {
-                Operand::Var(param)
-            };
-            f.env.insert(w, operand);
-        }
-        f.loops.insert(v, join);
-        self.tail(f, &lambda.body, tail)?;
-        f.loops.remove(&v);
-        match result {
-            Some((term, result)) => {
-                f.hole = Some((term, Field::JoinHandler));
-                Ok(Some(result))
-            }
-            None => Ok(None),
         }
     }
 

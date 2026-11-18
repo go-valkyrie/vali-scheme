@@ -30,26 +30,30 @@ fn check(source: &str, expected: &str) {
 }
 
 #[test]
-fn loops_are_recursive_join_points() {
+fn a_named_let_is_a_closure_tied_to_itself() {
+    // Contification makes it a loop (vali-opt's tests).
     check(
         "(define (sum l) (let loop ((l l) (acc 0)) (if (null? l) acc (loop (cdr l) (+ acc (car l))))))",
         "fun f1 sum (v0) []:
-  rec join j0(v1 v2):
-    let v3 = null? v1
-    if v3:
-      return v2
-    else:
-      let v4 = cdr v1 @0:1:66
-      let v5 = car v1 @0:1:81
-      let v6 = + v2 v5 @0:1:74
-      jump j0(v4 v6)
-  jump j0(v0 c0)
+  let v1 = closure f2 [c0]
+  let v2 = set-free v1 0 v1
+  tail v1(v0 c1) @0:1:16
+
+fun f2 loop (v1 v2) [v0]:
+  let v3 = null? v1
+  if v3:
+    return v2
+  else:
+    let v4 = cdr v1 @0:1:66
+    let v5 = car v1 @0:1:81
+    let v6 = + v2 v5 @0:1:74
+    tail v0(v4 v6) @0:1:60
 ",
     );
 }
 
 #[test]
-fn values_of_ifs_and_loops_go_to_join_points() {
+fn values_of_ifs_go_to_join_points() {
     check(
         "(define (f x) (+ 1 (if (< x 0) (- x) x)))",
         "fun f1 f (v0) []:
@@ -62,27 +66,6 @@ fn values_of_ifs_and_loops_go_to_join_points() {
     jump j0(v3)
   else:
     jump j0(v0)
-",
-    );
-    check(
-        "(define (count n) (define i 0) (let loop () (if (< i n) (begin (set! i (+ i 1)) (loop)))) i)",
-        "fun f1 count (v0) []:
-  let v1 = box c0
-  let v2 = set-box v1 c1
-  join j0(v3):
-    let v9 = unbox v1
-    return v9
-  rec join j1():
-    let v4 = unbox v1
-    let v5 = < v4 v0 @0:1:48
-    if v5:
-      let v6 = unbox v1
-      let v7 = + v6 c2 @0:1:71
-      let v8 = set-box v1 v7
-      jump j1()
-    else:
-      jump j0(c0)
-  jump j1()
 ",
     );
 }

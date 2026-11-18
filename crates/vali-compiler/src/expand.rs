@@ -1426,15 +1426,18 @@ impl Expander {
 
     /// The `lambda` `body` lowered to the IR, as a module's body.
     fn lower_only(&self, body: LambdaId, name: &str) -> Result<vali_dist::Module> {
-        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)
+        crate::lower::lower(&self.vars, &self.lambdas, &self.sources, body, name)
     }
 
-    /// Optimises `ir`, unless the unit is evaluated code or a REPL input,
-    /// which gets no passes (ADR 0013 #13), or optimising is off.
+    /// Optimises `ir`: fully, unless the unit is evaluated code or a REPL
+    /// input, which gets only contification, so its loops are loops (ADR
+    /// 0013 #13); not at all if optimising is off.
     fn optimised(&self, ir: &mut vali_dist::Module) {
-        if self.optimise && optimising() {
+        if !optimising() {
+        } else if self.optimise {
             vali_opt::optimise(ir);
+        } else {
+            vali_opt::contify(ir);
         }
     }
 

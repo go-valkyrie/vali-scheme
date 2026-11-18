@@ -11,7 +11,6 @@
 //! (ADR 0017): the tree is lowered to it, and the IR is converted to
 //! bytecode. The optimiser's passes over the IR come later.
 
-mod analyze;
 mod ast;
 mod eval;
 mod expand;

@@ -88,3 +88,51 @@ fn unused_values_go_unless_they_may_raise() {
         "fun f1 e (v0) []:\n  let v1 = car v0 @0:1:14\n  return c1\n",
     );
 }
+
+#[test]
+fn named_lets_become_loops() {
+    // Entered by a tail call: the loop's returns are the function's, and
+    // its closure function is gone.
+    let sum = ir(
+        "(define (sum l) (let loop ((l l) (acc 0)) (if (null? l) acc (loop (cdr l) (+ acc (car l))))))",
+    );
+    assert!(
+        sum.contains(
+            "fun f1 sum (v0) []:
+  rec join j0(v4 v5):
+    let v6 = null? v4
+    if v6:
+      return v5
+    else:
+      let v7 = cdr v4 @0:1:66
+      let v8 = car v4 @0:1:81
+      let v9 = + v5 v8 @0:1:74
+      jump j0(v7 v9)
+  jump j0(v0 c1)
+"
+        ),
+        "{sum}"
+    );
+    assert!(!sum.contains("fun f2"), "{sum}");
+    // Entered for its value: its returns jump to what follows.
+    check(
+        "(define (g x) (let ((n (let lp ((i x)) (if (> i 10) i (lp (* i 2)))))) (vector n x n)))",
+        "fun f1 g (v0) []:
+  join j1(v3):
+    let v4 = make-vector c3 v3 @0:1:71
+    let v5 = vector-set! v4 c4 v0 @0:1:71
+    return v4
+  rec join j0(v7):
+    let v8 = < c1 v7 @0:1:43
+    if v8:
+      jump j1(v7)
+    else:
+      let v9 = * v7 c2 @0:1:58
+      jump j0(v9)
+  jump j0(v0)
+",
+    );
+    // A loop that escapes stays a closure.
+    let escapes = ir("(define (h) (letrec ((f (lambda () f))) (f)))");
+    assert!(escapes.contains("closure"), "{escapes}");
+}

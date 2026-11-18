@@ -116,19 +116,7 @@ fn removable(value: &Value) -> bool {
         && !effects.contains(Effects::CAPTURE)
 }
 
-fn operands_of(value: &Value) -> Vec<Operand> {
-    match value {
-        Value::Operand(x) | Value::Box(x) | Value::Unbox(x) | Value::SetGlobal(_, x) => vec![*x],
-        Value::Primitive { args, .. } => args.clone(),
-        Value::Call { callee, args } => std::iter::once(*callee)
-            .chain(args.iter().copied())
-            .collect(),
-        Value::Closure { free, .. } => free.clone(),
-        Value::Global(_) => Vec::new(),
-        Value::SetBox(a, b) => vec![*a, *b],
-        Value::SetFree { closure, value, .. } => vec![*closure, *value],
-    }
-}
+use crate::operands as operands_of;
 
 /// How often each variable is used, and each join point jumped to, in
 /// what `f`'s body reaches.
