@@ -101,6 +101,8 @@ pub struct ScopeContext {
     limit: u32,
     kinds: Vec<ScopeKind>,
     sets: Vec<Box<[Scope]>>,
+    /// Each set without its newest scope, if that was interned already.
+    parents: Vec<Option<ScopeSetId>>,
     /// Each large set as a bit set, made when a subset test first needs it.
     bits: Vec<OnceLock<Box<[u64]>>>,
     /// How many bytes of `bits` this context has made, against its own
@@ -120,6 +122,7 @@ impl Clone for ScopeContext {
             limit: self.limit,
             kinds: self.kinds.clone(),
             sets: self.sets.clone(),
+            parents: self.parents.clone(),
             bits: self.sets.iter().map(|_| OnceLock::new()).collect(),
             bits_bytes: AtomicUsize::new(0),
             interned: self.interned.clone(),
@@ -150,6 +153,7 @@ impl ScopeContext {
             limit: limit.max(1),
             kinds: Vec::new(),
             sets: vec![empty.clone()],
+            parents: vec![None],
             bits: vec![OnceLock::new()],
             bits_bytes: AtomicUsize::new(0),
             interned: HashMap::from([(empty, ScopeSetId::EMPTY)]),
@@ -267,6 +271,15 @@ impl ScopeContext {
         }))
     }
 
+    /// `set` without its newest scope, if that set was interned by the
+    /// time `set` was. Deeply nested code makes each set just after the
+    /// one around it, so there it is always known. Resolution uses it to
+    /// build on what it found for the smaller set; it is only a hint, and
+    /// a set without one is resolved the long way.
+    pub fn parent(&self, set: ScopeSetId) -> Option<ScopeSetId> {
+        self.parents[set.0 as usize]
+    }
+
     /// The set of `scopes`, interned.
     pub fn intern(&mut self, scopes: &[Scope]) -> Result<ScopeSetId, TooManyScopes> {
         let mut sorted = scopes.to_vec();
@@ -381,7 +394,11 @@ impl ScopeContext {
             return Ok(id);
         }
         let id = ScopeSetId(self.next_index(self.sets.len())?);
+        let parent = sorted
+            .split_last()
+            .and_then(|(_, rest)| self.interned.get(rest).copied());
         let sorted = sorted.into_boxed_slice();
+        self.parents.push(parent);
         self.sets.push(sorted.clone());
         self.bits.push(OnceLock::new());
         self.interned.insert(sorted, id);

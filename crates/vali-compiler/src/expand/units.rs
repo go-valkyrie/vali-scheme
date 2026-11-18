@@ -228,6 +228,7 @@ impl Expander {
                 // Kept as the unit's syntax export for as long as the
                 // expander lives, so without the caches that only saved time.
                 state.context.clear_caches();
+                state.table.clear_caches();
                 self.units[unit].syntax = Some(Arc::new(state));
             }
             ContextOwner::Repl => self.repl_state = Some(state),
