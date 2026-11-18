@@ -721,3 +721,53 @@ fn bignums_mix_with_flonums() {
     let result = cx.run(id).unwrap();
     assert_eq!(result.to_f64(&mut cx), Ok(2f64.powi(99)));
 }
+
+fn seven(_cx: &mut Cx<NoCollection>, _args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::fixnum(777).unwrap())
+}
+
+fn one(_cx: &mut Cx<NoCollection>, _args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::fixnum(1).unwrap())
+}
+
+/// Asks for a tail call to its argument, then fails anyway.
+fn tail_then_fail(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
+    cx.tail_call(args[0], Vec::new());
+    Err(Error::scheme("tail-then-fail: failed"))
+}
+
+fn boom(_cx: &mut Cx<NoCollection>, _args: &[Value]) -> Result<Value, Error> {
+    panic!("kaboom")
+}
+
+/// A tail call asked for by a Rust procedure that then fails is dropped,
+/// not made by the next Rust procedure to return.
+#[test]
+fn failed_procedures_leave_no_tail_call() {
+    let mut cx = cx();
+    let seven = cx.define_native("seven", Arity::exactly(0), seven).unwrap();
+    let one = cx.define_native("one", Arity::exactly(0), one).unwrap();
+    let fail = cx
+        .define_native("tail-then-fail", Arity::exactly(1), tail_then_fail)
+        .unwrap();
+    assert!(cx.call(&fail, &[seven]).is_err());
+    assert_eq!(cx.call(&one, &[]).unwrap().as_fixnum(), Some(1));
+}
+
+/// A panic in a Rust procedure becomes an error naming it, and the isolate
+/// goes on working.
+#[test]
+fn panics_in_procedures_become_errors() {
+    let mut cx = cx();
+    let boom = cx.define_native("boom", Arity::exactly(0), boom).unwrap();
+    let one = cx.define_native("one", Arity::exactly(0), one).unwrap();
+    let Error::Scheme(e) = cx.call(&boom, &[]).unwrap_err() else {
+        panic!("expected a Scheme error");
+    };
+    assert!(
+        e.message.contains("boom: panicked: kaboom"),
+        "{}",
+        e.message
+    );
+    assert_eq!(cx.call(&one, &[]).unwrap().as_fixnum(), Some(1));
+}

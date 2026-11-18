@@ -94,7 +94,7 @@ impl Sealed {
 }
 
 impl<S: Strategy> Cx<S> {
-    /// The record of `k`, if it is a continuation.
+    /// The record of `k`, if it is a continuation that has not been freed.
     pub(crate) fn sealed<'a>(k: Value) -> Option<&'a Sealed> {
         if k.tag() != Tag::Other {
             return None;
@@ -103,10 +103,13 @@ impl<S: Strategy> Cx<S> {
         let header = Self::LAYOUT.header(t)?;
         // SAFETY: a valid value tagged "other" is a live object starting
         // with its header; a continuation's second field points to its
-        // record, which lives as long as it does.
+        // record, which lives as long as it does, or is null once freeing
+        // has dropped the record (`Cx::retire`).
         unsafe {
-            (Header(get(k, header)).type_code() == Some(t))
-                .then(|| &*(get(k, Self::LAYOUT.field(t, 1)) as *const Sealed))
+            if Header(get(k, header)).type_code() != Some(t) {
+                return None;
+            }
+            (get(k, Self::LAYOUT.field(t, 1)) as *const Sealed).as_ref()
         }
     }
 

@@ -220,6 +220,23 @@ fn native_libraries_come_through_the_loader() {
     );
 }
 
+/// A parameter whose conversion panics on `#f`, to test what a panic while
+/// converting leaves behind.
+struct Touchy(i64);
+
+impl vali_runtime::bridge::FromScheme for Touchy {
+    const EXPECTED: &'static str = "an exact integer";
+
+    unsafe fn from_scheme(
+        cx: &mut dyn vali_runtime::bridge::Isolate,
+        v: vali_runtime::Value,
+    ) -> Option<Self> {
+        assert!(v != vali_runtime::Value::FALSE, "touchy about #f");
+        // SAFETY: passed on to the caller.
+        unsafe { i64::from_scheme(cx, v) }.map(Touchy)
+    }
+}
+
 /// A Rust object and its bridge, written with the macros.
 #[vali_runtime::object]
 struct Greeter {
@@ -256,6 +273,13 @@ impl Greeter {
     #[scheme(name = "copy-greeting!")]
     fn copy_from(&mut self, other: &Greeter) {
         self.greeting = other.greeting.clone();
+    }
+
+    /// Converting `by` happens after `self` is borrowed.
+    #[scheme(name = "greeter-repeat!")]
+    fn repeat(&mut self, by: Touchy) -> usize {
+        self.greeting = self.greeting.repeat(by.0 as usize);
+        self.greeting.len()
     }
 
     #[scheme(expansion_safe, version = 2)]
@@ -310,6 +334,15 @@ fn the_macros_write_the_bridges() {
     );
     let error = run("(define g (make-greeter \"x\")) (helper g)").unwrap_err();
     assert!(error.contains("helper"), "{error}");
+    // A panic converting an argument after the receiver is borrowed releases
+    // the borrow: the greeter is usable afterwards.
+    assert_eq!(
+        run("(define g (make-greeter \"ab\"))
+             (guard (e (#t #f)) (greeter-repeat! g #f))
+             (greeter-repeat! g 2)")
+        .as_deref(),
+        Ok("4")
+    );
 }
 
 /// Serves `(test greeters)` as a native library.

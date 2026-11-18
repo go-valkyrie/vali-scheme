@@ -2539,6 +2539,29 @@ const CYCLES: &str = "
                          (if (e 4) 1 0))))))))
     (list (churn 50000) (car keep) (car (cdr (cdr (cdr keep)))))";
 
+/// A continuation counting frees while cycle collection still buffers its
+/// block is never read again: freeing drops its record, and a later cycle
+/// collection describing the block used to follow the dropped pointer.
+#[test]
+fn freed_continuations_stay_freed() {
+    check(&[(
+        "(define (churn n) (if (> n 0) (begin (cons n n) (churn (- n 1))) #t))
+         (define (f)
+           (let* ((k (call/cc (lambda (c) c)))
+                  (p (cons k k)))
+             ;; Epochs run, and the continuation, referred to twice, is
+             ;; old by the time it loses one reference and is buffered.
+             (churn 20000)
+             (set-car! p #f)
+             (churn 20000)
+             (set-cdr! p #f)
+             (procedure? k)))
+         (let loop ((i 0) (all #t))
+           (if (< i 20) (loop (+ i 1) (and all (f) (churn 20000))) all))",
+        "#t",
+    )]);
+}
+
 #[test]
 fn cycles_are_collected() {
     check(&[(CYCLES, "((150000 #t) 1 1)")]);

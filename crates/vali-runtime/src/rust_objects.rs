@@ -23,6 +23,10 @@ use crate::page::OutOfMemory;
 use crate::strategy::Strategy;
 use crate::value::Value;
 
+/// The index of a Rust object or continuation whose record was dropped
+/// (`Cx::retire`).
+const RETIRED: u64 = u64::MAX;
+
 /// A Rust type whose values Scheme can hold.
 ///
 /// It is `Send`, since an isolate is, and holds Scheme values only through
@@ -164,22 +168,46 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// The table index of `v`, if it is a Rust object or a continuation,
-    /// whose record the table holds too.
+    /// whose record the table holds too, and has not been retired.
     pub(crate) fn table_index(v: Value) -> Option<usize> {
+        let t = Self::table_type(v)?;
+        // SAFETY: both types keep the index in their first field.
+        let i = unsafe { get(v, Self::LAYOUT.field(t, 0)) };
+        (i != RETIRED).then_some(i as usize)
+    }
+
+    /// `v`'s type, if it is a Rust object or a continuation.
+    fn table_type(v: Value) -> Option<TypeCode> {
         if v.tag() != Tag::Other {
             return None;
         }
         let header = Self::LAYOUT.header(TypeCode::RustObject)?;
         // SAFETY: a valid value tagged "other" is a live object starting
-        // with its header; both types keep the index in their first field.
+        // with its header.
+        match unsafe { Header(get(v, header)).type_code() } {
+            Some(t @ (TypeCode::RustObject | TypeCode::Continuation)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Cuts `v`, a Rust object or continuation being freed, off from what
+    /// the table holds for it, and returns its index there, for the caller
+    /// to remove. A cycle candidate keeps a freed block until the next
+    /// cycle collection, which reads it again: after this, its index and a
+    /// continuation's record are no longer reachable through it, and a
+    /// second call returns `None`.
+    pub(crate) fn retire(v: Value) -> Option<usize> {
+        let i = Self::table_index(v)?;
+        let t = Self::table_type(v)?;
+        // SAFETY: both types have the index field, and a continuation the
+        // pointer to its record.
         unsafe {
-            match Header(get(v, header)).type_code() {
-                Some(t @ (TypeCode::RustObject | TypeCode::Continuation)) => {
-                    Some(get(v, Self::LAYOUT.field(t, 0)) as usize)
-                }
-                _ => None,
+            put(v, Self::LAYOUT.field(t, 0), RETIRED);
+            if t == TypeCode::Continuation {
+                put(v, Self::LAYOUT.field(t, 1), 0);
             }
         }
+        Some(i)
     }
 
     /// A new Rust object holding `value`.
@@ -198,7 +226,7 @@ impl<S: Strategy> Cx<S> {
     /// Drops the Rust value `v` stands for, if it is a Rust object, or its
     /// record, if it is a continuation: the strategy is freeing it.
     pub(crate) fn finalize(&mut self, v: Value) {
-        if let Some(i) = Self::table_index(v) {
+        if let Some(i) = Self::retire(v) {
             self.objects.remove(i);
         }
     }

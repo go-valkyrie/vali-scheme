@@ -332,14 +332,16 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
                 let mut __held: ::std::vec::Vec<::vali_runtime::Value> = ::std::vec::Vec::new();
                 // SAFETY: the arguments are the values the bridge was called
                 // with, and each borrow is released below, after the call
-                // that uses it.
-                let __outcome = (|| -> ::core::result::Result<::std::thread::Result<#output>, ::vali_runtime::Error> {
+                // that uses it. Converting the arguments runs inside the
+                // guard too, so a panic converting a later one cannot leave
+                // an earlier one borrowed.
+                let __outcome = __p::guarded(|| -> ::core::result::Result<#output, ::vali_runtime::Error> {
                     #(#takes)*
-                    Ok(__p::guarded(|| Self::#ident(#(#uses),*)))
-                })();
+                    Ok(Self::#ident(#(#uses),*))
+                });
                 unsafe { __p::release(cx, &__held) };
-                match __outcome? {
-                    Ok(r) => __p::finish(cx, r),
+                match __outcome {
+                    Ok(r) => __p::finish(cx, r?),
                     Err(panic) => __p::resume(panic),
                 }
             },

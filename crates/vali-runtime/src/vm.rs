@@ -877,10 +877,20 @@ impl<S: Strategy> Cx<S> {
         // and the entry frame is set up as `interpret` expects.
         unsafe { trampoline::enter(&raw mut state as *mut c_void, body::<S>) };
         self.running = false;
+        // A panic in the VM itself leaves the same state as an error would,
+        // so the next call starts clean instead of resuming dead frames.
+        self.finish_run();
         if let Some(panic) = state.panic {
             std::panic::resume_unwind(panic);
         }
-        let result = state.result.expect("the VM ran");
+        state.result.expect("the VM ran")
+    }
+
+    /// Resets what a run leaves behind, however it ended: waiting catches,
+    /// the continuation below, the dynamic environment, a pending tail
+    /// call, and chained or shared segments.
+    fn finish_run(&mut self) {
+        self.tail_call = None;
         while let Some(catch) = self.catches.pop() {
             if S::PRECISE {
                 S::release(self.heap_mut(), catch.handler);
@@ -897,7 +907,6 @@ impl<S: Strategy> Cx<S> {
         if !self.stack[0].is_whole() {
             self.drop_view();
         }
-        result
     }
 
     /// Chains a segment that holds at least `words` words, reusing the
@@ -1195,11 +1204,30 @@ impl<S: Strategy> Cx<S> {
                 &large
             }
         };
-        match &code.kind {
-            Kind::Native(f) => f(self, args),
+        // A tail call only stands for a result the procedure returns: one
+        // left by a procedure that failed would hold values the next
+        // collection may free, for the next Rust procedure to call.
+        self.tail_call = None;
+        let result = match &code.kind {
+            // A panic in a primitive becomes an error naming it, as in a
+            // bridge, so it never unwinds through the frames it ran in.
+            Kind::Native(f) => {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, args)))
+                    .unwrap_or_else(|panic| {
+                        Err(Error::scheme(format!(
+                            "{}: panicked: {}",
+                            code.name,
+                            crate::bridge::panic_message(&*panic)
+                        )))
+                    })
+            }
             Kind::Bridge(f) => f.invoke(self, args),
             _ => unreachable!("only Rust procedures are called here"),
+        };
+        if result.is_err() {
+            self.tail_call = None;
         }
+        result
     }
 
     /// A procedure calling `f`.

@@ -855,16 +855,22 @@ impl NativeFunction {
                 Err(Error::Scheme(e))
             }
             Ok(Err(e)) => Err(Error::scheme(format!("{}: {e}", self.name))),
-            Err(panic) => {
-                let what = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "a panic".into());
-                Err(Error::scheme(format!("{}: panicked: {what}", self.name)))
-            }
+            Err(panic) => Err(Error::scheme(format!(
+                "{}: panicked: {}",
+                self.name,
+                panic_message(&*panic)
+            ))),
         }
     }
+}
+
+/// What a caught panic said, if it said it with a string.
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".into())
 }
 
 /// A conversion failure as an error.

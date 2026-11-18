@@ -429,13 +429,22 @@ pub fn divide(n: &Number, d: &Number, division: Division) -> Result<(Number, Num
     }
 }
 
-/// `gcd` of two integers: never negative.
+/// `gcd` of two integers: never negative, and 0 for two zeros.
 pub fn gcd(a: &Number, b: &Number) -> Result<Number> {
+    // dashu panics on two zeros, and zero is the identity anyway.
+    let gcd = |x: IBig, y: IBig| -> IBig {
+        if x.is_zero() {
+            return IBig::from(y.unsigned_abs());
+        }
+        if y.is_zero() {
+            return IBig::from(x.unsigned_abs());
+        }
+        IBig::from((&x).gcd(&y))
+    };
     Ok(match int_pair(a, b)? {
-        IntPair::Exact(x, y) => Number::Integer(Integer(IBig::from((&x).gcd(&y)))),
+        IntPair::Exact(x, y) => Number::Integer(Integer(gcd(x, y))),
         IntPair::Inexact(x, y) => {
-            let g = whole_to_ibig(x).gcd(&whole_to_ibig(y));
-            Number::Real(IBig::from(g).to_f64().value())
+            Number::Real(gcd(whole_to_ibig(x), whole_to_ibig(y)).to_f64().value())
         }
     })
 }
@@ -1030,6 +1039,9 @@ mod tests {
         );
         assert_eq!(show(gcd(&n("32"), &n("-36")).unwrap()), "4");
         assert_eq!(show(gcd(&n("0"), &n("5")).unwrap()), "5");
+        assert_eq!(show(gcd(&n("0"), &n("0")).unwrap()), "0");
+        assert_eq!(show(gcd(&n("-6"), &n("0")).unwrap()), "6");
+        assert_eq!(show(gcd(&n("0.0"), &n("0.0")).unwrap()), "0.0");
         assert_eq!(show(lcm(&n("32"), &n("-36")).unwrap()), "288");
         assert_eq!(show(lcm(&n("32.0"), &n("-36")).unwrap()), "288.0");
         assert_eq!(show(lcm(&n("0"), &n("5")).unwrap()), "0");

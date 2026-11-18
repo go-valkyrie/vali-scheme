@@ -112,7 +112,7 @@ impl<S: Strategy> Cx<S> {
         // holds in the table as it is freed.
         let (heap, objects) = self.heap_and_objects();
         let mut finalize = |v| {
-            if let Some(i) = Self::table_index(v) {
+            if let Some(i) = Self::retire(v) {
                 objects.remove(i);
             }
         };

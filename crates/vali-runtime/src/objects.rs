@@ -109,10 +109,12 @@ impl<S: Strategy> Cx<S> {
                 f(field(3));
             }
             // What its frames hold, and more, kept in its record.
+            // A freed one still waiting in the cycle buffer has none.
             TypeCode::Continuation => {
-                let sealed = Self::sealed(v).expect("a continuation");
-                // SAFETY: a live continuation keeps its frames.
-                unsafe { sealed.for_each_value(f) };
+                if let Some(sealed) = Self::sealed(v) {
+                    // SAFETY: a live continuation keeps its frames.
+                    unsafe { sealed.for_each_value(f) };
+                }
             }
             _ => {}
         }
