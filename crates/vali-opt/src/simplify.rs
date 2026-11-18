@@ -101,6 +101,20 @@ fn fold(value: &Value, pool: &mut Pool<'_>) -> Option<Operand> {
         Primitive::Car | Primitive::Cdr => match constant(pool, 0)? {
             Constant::Pair(ref car, ref cdr) => {
                 let part = if *op == Primitive::Car { car } else { cdr };
+                // Only a part with no identity can be copied: a pair,
+                // string, vector or bytevector must stay the object the
+                // pair holds, or `eq?`, `memq` and `assq` miss it.
+                if !matches!(
+                    **part,
+                    Constant::Integer(_)
+                        | Constant::Boolean(_)
+                        | Constant::Character(_)
+                        | Constant::EmptyList
+                        | Constant::Unspecified
+                        | Constant::Symbol(_)
+                ) {
+                    return None;
+                }
                 return Some(Operand::Const(pool.add((**part).clone())));
             }
             _ => return None,

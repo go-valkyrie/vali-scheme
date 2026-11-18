@@ -39,9 +39,27 @@ fn constants_fold() {
     assert!(ir.contains("c0 = #<unspecified>\nc1 = 7\ng0"), "{ir}");
     assert!(ir.contains("fun f1 f () []:\n  return c1\n"), "{ir}");
     check(
-        "(define (q) (car (cdr '(1 2 3))))",
+        "(define (q) (car '(1 2 3)))",
         "fun f1 q () []:\n  return c1\n",
     );
+}
+
+#[test]
+fn parts_with_identity_are_not_folded() {
+    // A pair, string or vector inside a constant must stay the object the
+    // constant holds, or `eq?` and `memq` on it would miss.
+    for source in [
+        "(define (q) (cdr '(1 2 3)))",
+        "(define (q) (car '((1) 2)))",
+        "(define (q) (car '(\"s\")))",
+        "(define (q) (car '(#(1))))",
+    ] {
+        let ir = ir(source);
+        assert!(
+            ir.contains(" = car c") || ir.contains(" = cdr c"),
+            "{source}\n{ir}"
+        );
+    }
 }
 
 #[test]
