@@ -1,0 +1,11 @@
+[package]
+name = "vali-dist"
+description = "Vali's distribution format (ADR 0012): the IR (ADR 0017), interfaces, encoding and versions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

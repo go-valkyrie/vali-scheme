@@ -17,7 +17,7 @@ Each boundary below exists for a reason recorded in an ADR:
 | `vali-syntax` | Spans and source identities, the lexer, the event parser and its sinks (ADR 0014), scope sets and syntax-object data structures | `vali-num` | M0 |
 | `vali-test` | The test harness: `.scm` test files, the regression list, compliance suites, determinism checks and runs under each memory strategy. Not published | grows with the others | M0 |
 | `vali-abi` | ABI facts: the tag table, object and frame layouts, the runtime function table, strategy descriptors, the ABI version (ADR 0006) | none | M1 |
-| `vali-dist` | The distribution format (ADR 0012): the IR's types and encoding (ADR 0017), interfaces, version and feature flags | `vali-num`, `vali-syntax` | M1 |
+| `vali-dist` | The distribution format (ADR 0012): the IR's types and encoding (ADR 0017), interfaces, version and feature flags | none yet; `vali-syntax` once syntax exports are encoded | M1 |
 | `vali-opt` | The optimiser (ADR 0017): passes over the IR for each library, and the link-time optimiser across libraries | `vali-dist` | With the IR |
 | `vali-bytecode` | Run-format bytecode (ADR 0005): encoding, validator, disassembler, and conversion from the distribution format | `vali-abi`, `vali-dist` | M1 |
 | `vali-artifact` | The artifact container, fingerprints and cache store (ADR 0001) | `vali-bytecode`, `vali-dist` | M1 |
