@@ -262,11 +262,79 @@ impl Expander {
             self.owner = None;
             self.swap_state(ContextState::empty(self.core_scope, self.core));
         }
+        self.forget_locals();
         self.units.truncate(mark.units);
         self.vars.truncate(mark.vars);
         self.lambdas.truncate(mark.lambdas);
+        self.check_no_stale_variables();
         self.last_ir = None;
         self.last_lowered = None;
+    }
+
+    /// Drops the local variables of the REPL input that was just compiled
+    /// from the interaction environment's table: the `Local` and
+    /// `PatternVar` entries, whose variables are about to go (`forget`).
+    /// Nothing a later input can write reaches them: a phase-0 local is
+    /// visible only to code inside the form that bound it, and the macros
+    /// defined there are local too. Imports never bring locals across
+    /// (`remap_bindings`).
+    ///
+    /// The input's scopes are those numbered from `repl_floor`, since a
+    /// context numbers scopes in the order it makes them and never reuses
+    /// a number, so a scope a macro the input used made counts too. An
+    /// entry goes if its set has one of them that a binder made.
+    ///
+    /// Nothing else goes. The input's top-level definitions are REPL
+    /// globals, and those, top-level macros and anything a macro defined at
+    /// top level are bound with the top-level scopes, maybe with macro and
+    /// use-site scopes of the input added. Local macros stay too, with their
+    /// entries in `macros`: a top-level macro's transformer can be wrapped
+    /// in a `let-syntax`, and its output then names the local macro under
+    /// the binder's scope, as does that of an imported macro whose helper a
+    /// library bound under a binder scope, which an import remaps in.
+    ///
+    /// A syntax object that outlives the input, with a dropped scope in its
+    /// set, resolves as if the variable were not there: outward, to the
+    /// global of that name or to nothing. Scope numbers are not reused, so
+    /// it can never meet another input's binding.
+    fn forget_locals(&mut self) {
+        let Some(from) = self.repl_floor.take() else {
+            return;
+        };
+        if !matches!(self.owner, Some(ContextOwner::Repl)) {
+            return;
+        }
+        let context = &self.context;
+        self.table.forget_tracked(|set, binding| {
+            matches!(binding, Binding::Local(_) | Binding::PatternVar(..))
+                && context
+                    .scopes(set)
+                    .iter()
+                    .any(|&s| s.index() >= from && context.kind(s) == ScopeKind::Binder)
+        });
+    }
+
+    /// Checks that no entry of the interaction environment's table names a
+    /// variable that `forget` truncated, which a later input's variable
+    /// would take the number of. It walks the whole table, so it is for
+    /// debug builds only, and a debug REPL session pays for it per input.
+    fn check_no_stale_variables(&self) {
+        if cfg!(debug_assertions) && matches!(self.owner, Some(ContextOwner::Repl)) {
+            for (symbol, _, _, binding) in self.table.entries() {
+                if let Binding::Local(v) | Binding::PatternVar(v, _) = binding {
+                    assert!(
+                        *v < self.vars.len(),
+                        "{symbol} is bound to variable {v}, which was forgotten"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The number of entries in the live context's binding table, for tests.
+    #[cfg(test)]
+    pub(crate) fn table_len(&self) -> usize {
+        self.table.entries().count()
     }
 
     /// The artifact of `unit`, a library this build compiled or loaded:
@@ -477,6 +545,8 @@ impl Expander {
         body: &[vali_syntax::Datum],
     ) -> Result<Module> {
         self.start_context(true, imports)?;
+        self.repl_floor = Some(self.context.scope_count() as u32);
+        self.table.track();
         self.next_hashed = true;
         let span = body.first().map_or(
             Span {

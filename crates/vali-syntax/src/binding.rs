@@ -13,7 +13,7 @@
 //! more than one bound once, so expansion stays linear in the program.
 
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Mutex;
 
@@ -80,6 +80,8 @@ pub struct BindingTable<S, B> {
     /// Each symbol's entries, by the newest scope of their sets, `None` for
     /// the empty set.
     entries: HashMap<S, Symbol<B>>,
+    /// The symbols bound since `track`, if it is on.
+    tracked: Option<HashSet<S>>,
 }
 
 /// Where a candidate is: its key, and its place among that key's entries.
@@ -153,6 +155,7 @@ impl<S, B> Default for BindingTable<S, B> {
     fn default() -> Self {
         BindingTable {
             entries: HashMap::new(),
+            tracked: None,
         }
     }
 }
@@ -177,7 +180,7 @@ pub struct AlreadyBound<'a, B> {
     pub existing: &'a B,
 }
 
-impl<S: Eq + Hash, B> BindingTable<S, B> {
+impl<S: Eq + Hash + Clone, B> BindingTable<S, B> {
     /// An empty table.
     pub fn new() -> Self {
         Self::default()
@@ -196,6 +199,7 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         binding: B,
     ) -> Result<(), AlreadyBound<'_, B>> {
         let k = key(context, scopes);
+        let tracked = self.tracked.is_some().then(|| symbol.clone());
         let sym = self.entries.entry(symbol).or_default();
         sym.touch(k);
         let entries = sym.by_key.entry(k).or_default();
@@ -212,6 +216,9 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
             phases,
             binding,
         });
+        if let (Some(symbol), Some(tracked)) = (tracked, &mut self.tracked) {
+            tracked.insert(symbol);
+        }
         Ok(())
     }
 
@@ -227,6 +234,9 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         binding: B,
     ) {
         let k = key(context, scopes);
+        if let Some(tracked) = &mut self.tracked {
+            tracked.insert(symbol.clone());
+        }
         let sym = self.entries.entry(symbol).or_default();
         // Replacing shifts the entries of a key, which memoised results
         // point at, and a REPL redefines top-level names: start over.
@@ -238,6 +248,45 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
             phases,
             binding,
         });
+    }
+
+    /// Starts remembering which symbols are bound from now on, for
+    /// [`BindingTable::forget_tracked`].
+    pub fn track(&mut self) {
+        self.tracked = Some(HashSet::new());
+    }
+
+    /// Stops remembering, and drops the entries `doomed` selects of the
+    /// symbols bound since [`BindingTable::track`], returning how many it
+    /// dropped. `doomed` is given an entry's set and binding. A symbol left
+    /// with no entries is dropped, and one that lost some forgets what it
+    /// memoised, since the memos name entries by place.
+    ///
+    /// A REPL uses this when it forgets an input, to drop the input's local
+    /// bindings without looking at every symbol its session has bound.
+    /// Identifiers that still carry the input's scopes resolve as if those
+    /// bindings were never made.
+    pub fn forget_tracked(&mut self, mut doomed: impl FnMut(ScopeSetId, &B) -> bool) -> usize {
+        let mut dropped = 0;
+        for symbol in self.tracked.take().unwrap_or_default() {
+            let Some(sym) = self.entries.get_mut(&symbol) else {
+                continue;
+            };
+            let before = dropped;
+            sym.by_key.retain(|_, entries| {
+                let n = entries.len();
+                entries.retain(|e| !doomed(e.scopes, &e.binding));
+                dropped += n - entries.len();
+                !entries.is_empty()
+            });
+            if dropped != before {
+                *sym.memo.get_mut().expect("memo") = Memo::default();
+            }
+            if sym.by_key.is_empty() {
+                self.entries.remove(&symbol);
+            }
+        }
+        dropped
     }
 
     /// Drops what resolving has memoised, which only saves time, so a
@@ -503,6 +552,47 @@ mod tests {
         for level in [39, 3, 20, 21, 0, 38, 10, 11, 12, 13, 14, 15, 16, 17, 30] {
             assert_eq!(f.resolve(sets[level]), vec![level as u32]);
         }
+    }
+
+    #[test]
+    fn forgetting_tracked_entries_leaves_older_ones_and_resolves_outward() {
+        let mut f = Fixture::new();
+        let top = f.scope();
+        let top_set = f.set(&[top]);
+        f.bind(top_set, 0);
+        f.table.track();
+        let (inner, macro_scope) = (f.scope(), f.scope());
+        let inner_set = f.set(&[top, inner]);
+        // Bound by a macro step after the binder's scope, so its set's
+        // newest scope is not the binder's.
+        let inner_macro = f.set(&[top, inner, macro_scope]);
+        let only_macro = f.set(&[top, macro_scope]);
+        f.bind(inner_set, 1);
+        f.bind(inner_macro, 2);
+        f.bind(only_macro, 3);
+        // Memoise results that name entries about to go.
+        for set in [inner_set, inner_macro, only_macro] {
+            f.resolve(set);
+        }
+        let dropped = f
+            .table
+            .forget_tracked(|set, _| f.cx.scopes(set).contains(&inner));
+        assert_eq!(dropped, 2);
+        // What carried a dropped scope resolves to what is outside it, and
+        // what only a macro bound stays.
+        assert_eq!(f.resolve(inner_set), vec![0]);
+        assert_eq!(f.resolve(inner_macro), vec![3]);
+        assert_eq!(f.resolve(only_macro), vec![3]);
+        assert_eq!(f.table.entries().count(), 2);
+        // Only what was bound since `track` is looked at.
+        assert_eq!(f.table.forget_tracked(|_, _| true), 0);
+        assert_eq!(f.table.entries().count(), 2);
+        // A symbol with nothing left is gone from the table.
+        f.table.track();
+        let late = f.set(&[top, macro_scope, inner]);
+        f.bind(late, 4);
+        assert_eq!(f.table.forget_tracked(|_, _| true), 3);
+        assert!(f.table.entries.is_empty());
     }
 
     #[test]

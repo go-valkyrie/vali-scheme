@@ -140,3 +140,130 @@ fn inputs_after_a_failed_one() {
         ("((lambda (a b) (+ a b)) 1 2)", Ok(&["3"])),
     ]);
 }
+
+/// An input's local bindings are dropped with it, and nothing a later
+/// input can reach goes with them.
+#[test]
+fn what_later_inputs_reach_survives_forgetting_locals() {
+    check(&[
+        // Top-level definitions, whatever they expand through.
+        ("(define (inc x) (let ((y 1)) (+ x y)))", Ok(&[])),
+        (
+            "(define-record-type point (make-point x y) point? (x px) (y py))",
+            Ok(&[]),
+        ),
+        ("(define-values (a b) (values 1 2))", Ok(&[])),
+        (
+            "(define-syntax def-pair
+               (syntax-rules ()
+                 ((_ n m v) (begin (define tmp v) (define n tmp) (define m tmp)))))",
+            Ok(&[]),
+        ),
+        ("(def-pair p q 7)", Ok(&[])),
+        // A macro whose helper is a top-level definition another macro
+        // introduced: only that macro's output can name it.
+        (
+            "(define-syntax def-helper
+               (syntax-rules ()
+                 ((_ name) (begin (define (helper) 'helped)
+                                  (define-syntax name
+                                    (syntax-rules () ((_) (helper))))))))",
+            Ok(&[]),
+        ),
+        ("(def-helper call-helper)", Ok(&[])),
+        // Locals of other inputs come and go in between.
+        (
+            "(let loop ((i 0)) (if (< i 3) (loop (+ i 1)) i))",
+            Ok(&["3"]),
+        ),
+        ("(inc 1)", Ok(&["2"])),
+        ("(px (make-point 3 4))", Ok(&["3"])),
+        ("(list a b p q)", Ok(&["(1 2 7 7)"])),
+        ("(call-helper)", Ok(&["helped"])),
+        // A macro defined in one input, used in a later one, with locals.
+        (
+            "(define-syntax my-or2
+               (syntax-rules () ((_ a b) (let ((t a)) (if t t b)))))",
+            Ok(&[]),
+        ),
+        ("(let ((t 5)) (my-or2 #f t))", Ok(&["5"])),
+        (
+            "(let-syntax ((m (syntax-rules () ((_ e) (let ((z 2)) (* z e)))))) (m 4))",
+            Ok(&["8"]),
+        ),
+        (
+            "(let ((z 10)) (let-syntax ((m (syntax-rules () ((_ e) (* z e))))) (m 4)))",
+            Ok(&["40"]),
+        ),
+        // Shadowing a REPL global locally, then using the global later.
+        ("(define g 'global)", Ok(&[])),
+        ("(let ((g 'local)) g)", Ok(&["local"])),
+        ("g", Ok(&["global"])),
+        ("(define (use-g) g)", Ok(&[])),
+        ("(let ((g 1) (h 2)) (+ g h))", Ok(&["3"])),
+        ("(use-g)", Ok(&["global"])),
+        // Inputs that fail to compile or run leave nothing behind.
+        ("(let ((w 1)) (car w))", Err("car: expected a pair")),
+        ("(let ((w 1)) (if))", Err("if: expected a test")),
+        ("(let ((w 1)) w)", Ok(&["1"])),
+        ("w", Err("unbound variable: w")),
+    ]);
+}
+
+/// The macro `m`'s transformer is wrapped in a `let-syntax`, and its output
+/// names that `let-syntax`'s macro `h`, which is bound under a binder's
+/// scope: dropping an input's local macros would leave a later `(m 5)`
+/// with an unbound `h`. Only local variables go.
+const WRAPPED: &str = "(define-syntax m
+  (let-syntax ((h (syntax-rules () ((_ x) (quote (helped x))))))
+    (lambda (stx) (syntax-case stx () ((_ x) (syntax (h x)))))))";
+
+#[test]
+fn a_top_level_macro_keeps_the_local_macros_its_output_names() {
+    check(&[
+        (WRAPPED, Ok(&[])),
+        ("(m 5)", Ok(&["(helped 5)"])),
+        ("(let ((x 1)) (m x))", Ok(&["(helped x)"])),
+        ("(m 6)", Ok(&["(helped 6)"])),
+    ]);
+}
+
+/// Serves `(test helped)`, whose exported macro is built like `WRAPPED`.
+struct Helped;
+
+impl vali_compiler::Loader for Helped {
+    fn load(
+        &self,
+        name: &vali_compiler::LibraryName,
+        _importer: Option<&vali_compiler::Identity>,
+    ) -> Result<Option<vali_compiler::Source>, vali_compiler::LoadError> {
+        Ok((name.to_string() == "(test helped)").then(|| {
+            vali_compiler::Source::scheme(
+                vali_compiler::Identity::new("lib:test/helped"),
+                format!(
+                    "(define-library (test helped)
+                       (import (scheme base))
+                       (export m)
+                       (begin {WRAPPED}))"
+                ),
+            )
+        }))
+    }
+}
+
+/// A library first imported in an input brings its macros' local helpers
+/// into the interaction environment's table, under binder scopes made while
+/// that input compiled.
+#[test]
+fn a_library_first_imported_in_an_input_keeps_its_local_macros() {
+    let loader = std::sync::Arc::new(Helped);
+    let mut repl =
+        Repl::<DeferredHeadered>::new(&HeapConfig::default(), Some(loader)).expect("a REPL");
+    let mut eval = |input: &str| repl.eval(input).map_err(|e| e.to_string());
+    assert_eq!(eval("(import (test helped))"), Ok(vec![]));
+    assert_eq!(eval("(m 5)"), Ok(vec!["(helped 5)".to_owned()]));
+    assert_eq!(
+        eval("(let ((x 2)) (m x))"),
+        Ok(vec!["(helped x)".to_owned()])
+    );
+}

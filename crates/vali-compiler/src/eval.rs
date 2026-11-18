@@ -375,4 +375,63 @@ mod tests {
             assert_eq!(held, 0, "after {n} deep inputs");
         }
     }
+
+    /// An input's local bindings leave the interaction environment's
+    /// binding table with it, and only those: what it defines stays. The
+    /// table holds what the inputs define, however many locals they bind.
+    #[test]
+    fn interaction_inputs_leave_no_local_bindings() {
+        let source = "
+            (import (scheme base) (scheme eval) (scheme read) (scheme repl))
+            (define (run text n)
+              (do ((i 0 (+ i 1))) ((= i n))
+                (eval (read (open-input-string text)) (interaction-environment))))";
+        let program = crate::compile_program(source, &Identity::new("locals"), &Fetcher(None))
+            .expect("the program compiles");
+        let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = crate::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let run = cx.variable(id, "run").unwrap();
+        let mut sizes = Vec::new();
+        let step = |cx: &mut Cx<DeferredHeadered>, text: &str, n: i64| {
+            let text = cx.string(text).unwrap();
+            cx.call(&run, &[text, Handle::fixnum(n).unwrap()]).unwrap();
+            let data = cx.set_evaluator(None).unwrap();
+            let evaluator = data.downcast::<Evaluator>().unwrap();
+            let size = evaluator.expander.table_len();
+            cx.set_evaluator(Some(evaluator));
+            size
+        };
+        // One definition, then many inputs binding locals of every kind:
+        // parameters, `let`, named `let`, internal definitions, and a
+        // macro that binds a local of its own. (A local macro's entry
+        // stays, since a top-level macro's output can name it.)
+        step(
+            &mut cx,
+            "(define-syntax m (syntax-rules () ((_ e) (let ((t e)) (+ t 1)))))",
+            1,
+        );
+        let defined = step(&mut cx, "(define (f x) (+ x 1))", 1);
+        sizes.push(defined);
+        let locals = "(let loop ((i 0) (acc '()))
+                        (if (< i 3)
+                            (let ()
+                              (define (h a) (m a))
+                              (loop (+ i 1) (cons (h i) acc)))
+                            ((lambda (x . rest) (let* ((y x) (z y)) z)) 1 2)))";
+        sizes.push(step(&mut cx, locals, 1));
+        sizes.push(step(&mut cx, locals, 200));
+        assert_eq!(sizes[1], sizes[0], "an input with locals adds no entries");
+        assert_eq!(sizes[2], sizes[0], "and neither do many");
+        // A failed input leaves none either.
+        let failed = |cx: &mut Cx<DeferredHeadered>| {
+            let text = cx.string("(let ((q 1)) (if))").unwrap();
+            assert!(cx.call(&run, &[text, Handle::fixnum(1).unwrap()]).is_err());
+        };
+        failed(&mut cx);
+        assert_eq!(step(&mut cx, "(define (g y) (+ y 2))", 1), sizes[0] + 1);
+        // Definitions are what the table grows by.
+        assert_eq!(step(&mut cx, "(define h 1)", 1), sizes[0] + 2);
+    }
 }

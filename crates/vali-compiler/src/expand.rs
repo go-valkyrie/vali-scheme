@@ -257,6 +257,10 @@ pub(crate) struct Expander {
     /// those. Every REPL input uses the same ones, so what one defines the
     /// next sees.
     repl: Option<(ScopeSetId, ScopeSetId)>,
+    /// How many scopes the interaction environment's context had when the
+    /// input being compiled began: the scopes numbered from here are the
+    /// input's, and `forget` drops its local bindings (`forget_locals`).
+    repl_floor: Option<u32>,
     /// The files bodies include, fetched with the import graph.
     includes: crate::loader::Includes,
     /// Which libraries bodies' `cond-expand`s may find (`add_available`).
@@ -318,6 +322,7 @@ impl Expander {
             last_lowered: None,
             optimise: true,
             repl: None,
+            repl_floor: None,
         };
         Ok(expander)
     }
