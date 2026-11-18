@@ -17,12 +17,17 @@ run = "cargo build --workspace --all-targets"
 [tasks.test]
 description = "Run every crate's tests, the native debugger tests with native frames on, the library tests on artifacts, and the library and bridge tests unoptimised"
 run = [
-    "cargo test --workspace",
+    # Not the examples: they have no tests, linking them costs time, and
+    # Clippy (`lint`) already checks they compile. Naming the targets turns
+    # doctests off, so those run on their own.
+    "cargo test --workspace --lib --bins --tests",
+    "cargo test --workspace --doc",
     "cargo test -p vali-runtime --features native-frames --test debugger",
     # `--workspace`, not `-p vali-compiler`, so features resolve as in the
     # first run and these reuse its build: the variables are read at run time.
-    "VALI_ROUND_TRIP=1 cargo test --workspace --test libraries",
-    "VALI_NO_OPT=1 cargo test --workspace --test libraries --test bridges",
+    # The library and bridge tests are modules of vali-compiler's `it` binary.
+    "VALI_ROUND_TRIP=1 cargo test --workspace --test it -- libraries::",
+    "VALI_NO_OPT=1 cargo test --workspace --test it -- libraries:: bridges::",
 ]
 
 [tasks.lint]

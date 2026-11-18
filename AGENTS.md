@@ -11,7 +11,7 @@ Tasks live in `mise.toml` and run through `bin/mise`, which downloads a pinned m
 - `bin/mise run lint`: `cargo fmt --all --check` and Clippy with `-D warnings`.
 - `bin/mise run docs`: rustdoc with `-D warnings`, so a broken intra-doc link fails the build.
 - `bin/mise run bench`, `bin/mise run bench-compare OLD NEW`: the programs in `benchmarks/`.
-- One crate: `cargo test -q -p vali-opt`. One test file: `cargo test -q -p vali-compiler --test libraries`. One regression: `cargo test -p vali-test --test regressions NAME`.
+- One crate: `cargo test -q -p vali-opt`. One test file: `cargo test -q -p vali-compiler --test it libraries::` (vali-compiler's and vali-runtime's integration tests are modules of one `it` binary). One regression: `cargo test -p vali-test --test regressions NAME`.
 
 `cargo test` builds with opt-level 1 (`[profile.test]` in `Cargo.toml`). Other builds stay unoptimised.
 
