@@ -63,7 +63,7 @@ impl Effect {
         }
     }
 
-    fn apply(
+    pub(crate) fn apply(
         self,
         context: &mut ScopeContext,
         set: ScopeSetId,
@@ -505,10 +505,7 @@ impl Syntax {
         let Some(pending) = &self.pending else {
             return Ok(child.clone());
         };
-        let mut scopes = child.scopes;
-        for &(scope, effect) in pending.iter() {
-            scopes = effect.apply(context, scopes, scope)?;
-        }
+        let scopes = context.apply_changes(child.scopes, pending)?;
         // A leaf has nothing below it to pend for; a child with nothing
         // pending of its own shares its parent's list.
         let pending = match (&*child.content, &child.pending) {

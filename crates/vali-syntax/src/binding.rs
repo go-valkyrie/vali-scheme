@@ -199,9 +199,26 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         };
         // Only entries kept by one of the identifier's own scopes can have
         // sets that are subsets of its set.
-        let keys = std::iter::once(None).chain(context.scopes(scopes).iter().copied().map(Some));
+        // A symbol with fewer keys than the identifier has scopes, which is
+        // the usual case in deeply nested code, is cheaper to look at by
+        // its keys than to look up by the identifier's scopes.
+        let own = context.scopes(scopes);
+        let keys: Vec<Option<Scope>> = if by_key.len() <= own.len() {
+            let mut keys: Vec<Option<Scope>> = by_key
+                .keys()
+                .copied()
+                .filter(|k| k.is_none_or(|k| own.binary_search(&k).is_ok()))
+                .collect();
+            keys.sort_unstable();
+            keys
+        } else {
+            std::iter::once(None)
+                .chain(own.iter().copied().map(Some))
+                .collect()
+        };
         let candidates: Vec<&Entry<B>> = keys
-            .filter_map(|k| by_key.get(&k))
+            .iter()
+            .filter_map(|k| by_key.get(k))
             .flatten()
             .filter(|e| e.phases.contains(phase) && context.is_subset(e.scopes, scopes))
             .collect();

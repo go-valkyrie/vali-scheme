@@ -8,6 +8,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use crate::syntax::Effect;
 
 /// A scope: an opaque identity, numbered within its [`ScopeContext`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,14 +79,30 @@ enum Op {
     Flip,
 }
 
+/// The fewest scopes in a set that is tested as a bit set.
+const BIT_SET_MIN: usize = 64;
+
+/// The most bytes of bit sets a context makes.
+const BIT_SET_BUDGET: usize = 256 << 20;
+
+/// A list of changes made to a set: the result, and the list, to keep its
+/// address its own.
+type Batch = (ScopeSetId, Arc<[(Scope, Effect)]>);
+
 /// Numbers scopes and interns scope sets for one expansion.
 #[derive(Clone, Debug)]
 pub struct ScopeContext {
     limit: u32,
     kinds: Vec<ScopeKind>,
     sets: Vec<Box<[Scope]>>,
+    /// Each large set as a bit set, made when a subset test first needs it.
+    bits: Vec<OnceLock<Box<[u64]>>>,
+    bits_bytes: Arc<AtomicUsize>,
     interned: HashMap<Box<[Scope]>, ScopeSetId>,
     memo: HashMap<(ScopeSetId, Scope, Op), ScopeSetId>,
+    /// Long lists of changes, applied whole, by the list's address. The
+    /// list is kept, so its address stays its own.
+    batches: HashMap<(ScopeSetId, usize), Batch>,
 }
 
 impl Default for ScopeContext {
@@ -106,8 +126,11 @@ impl ScopeContext {
             limit: limit.max(1),
             kinds: Vec::new(),
             sets: vec![empty.clone()],
+            bits: vec![OnceLock::new()],
+            bits_bytes: Arc::new(AtomicUsize::new(0)),
             interned: HashMap::from([(empty, ScopeSetId::EMPTY)]),
             memo: HashMap::new(),
+            batches: HashMap::new(),
         }
     }
 
@@ -159,12 +182,44 @@ impl ScopeContext {
         if a == b || a == ScopeSetId::EMPTY {
             return true;
         }
-        let (a, b) = (self.scopes(a), self.scopes(b));
-        if a.len() > b.len() {
+        let (sa, sb) = (self.scopes(a), self.scopes(b));
+        if sa.len() > sb.len() {
             return false;
         }
-        let mut rest = b.iter();
-        a.iter().all(|x| rest.by_ref().any(|y| y == x))
+        if sa.len() >= BIT_SET_MIN
+            && let (Some(x), Some(y)) = (self.bit_set(a), self.bit_set(b))
+        {
+            let y = |i: usize| y.get(i).copied().unwrap_or(0);
+            return x.iter().enumerate().all(|(i, &w)| w & !y(i) == 0);
+        }
+        let mut rest = sb.iter();
+        sa.iter().all(|x| rest.by_ref().any(|y| y == x))
+    }
+
+    /// `set` as a bit set, if it is worth one and the context has room:
+    /// testing two large sets for a subset is then a word at a time, not
+    /// a scope at a time, which is what keeps resolving a name that
+    /// every level of deeply nested code binds from costing the square
+    /// of the depth in scopes.
+    fn bit_set(&self, set: ScopeSetId) -> Option<&[u64]> {
+        let cell = &self.bits[set.0 as usize];
+        if let Some(bits) = cell.get() {
+            return Some(bits);
+        }
+        let scopes = self.scopes(set);
+        let words = scopes.last().map_or(0, |s| s.0 as usize / 64 + 1);
+        let bytes = words * 8;
+        if self.bits_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes > BIT_SET_BUDGET {
+            self.bits_bytes.fetch_sub(bytes, Ordering::Relaxed);
+            return None;
+        }
+        Some(cell.get_or_init(|| {
+            let mut bits = vec![0u64; words];
+            for s in scopes {
+                bits[s.0 as usize / 64] |= 1 << (s.0 % 64);
+            }
+            bits.into_boxed_slice()
+        }))
     }
 
     /// The set of `scopes`, interned.
@@ -189,6 +244,62 @@ impl ScopeContext {
     /// present.
     pub fn flip(&mut self, set: ScopeSetId, scope: Scope) -> Result<ScopeSetId, TooManyScopes> {
         self.apply(set, scope, Op::Flip)
+    }
+
+    /// `set` with every change in `changes`, sorted by scope, made. Short
+    /// lists apply change by change. A long one, which is what a deeply
+    /// nested form carries to each of its children, is merged in one pass
+    /// and remembered per list, so the children that share it share the
+    /// work instead of each paying for every change in turn.
+    pub(crate) fn apply_changes(
+        &mut self,
+        set: ScopeSetId,
+        changes: &Arc<[(Scope, Effect)]>,
+    ) -> Result<ScopeSetId, TooManyScopes> {
+        const LONG: usize = 8;
+        if changes.len() < LONG {
+            let mut set = set;
+            for &(scope, effect) in changes.iter() {
+                set = effect.apply(self, set, scope)?;
+            }
+            return Ok(set);
+        }
+        let key = (set, Arc::as_ptr(changes) as *const () as usize);
+        if let Some((result, _)) = self.batches.get(&key) {
+            return Ok(*result);
+        }
+        let old = self.scopes(set);
+        let mut merged = Vec::with_capacity(old.len() + changes.len());
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() || j < changes.len() {
+            match (old.get(i), changes.get(j)) {
+                (Some(&a), Some(&(b, effect))) if a == b => {
+                    i += 1;
+                    j += 1;
+                    if effect == Effect::Add {
+                        merged.push(a);
+                    }
+                }
+                (Some(&a), Some(&(b, _))) if a < b => {
+                    i += 1;
+                    merged.push(a);
+                }
+                (Some(&a), None) => {
+                    i += 1;
+                    merged.push(a);
+                }
+                (_, Some(&(b, effect))) => {
+                    j += 1;
+                    if effect != Effect::Remove {
+                        merged.push(b);
+                    }
+                }
+                (None, None) => unreachable!(),
+            }
+        }
+        let result = self.intern_sorted(merged)?;
+        self.batches.insert(key, (result, Arc::clone(changes)));
+        Ok(result)
     }
 
     fn apply(
@@ -227,6 +338,7 @@ impl ScopeContext {
         let id = ScopeSetId(self.next_index(self.sets.len())?);
         let sorted = sorted.into_boxed_slice();
         self.sets.push(sorted.clone());
+        self.bits.push(OnceLock::new());
         self.interned.insert(sorted, id);
         Ok(id)
     }
