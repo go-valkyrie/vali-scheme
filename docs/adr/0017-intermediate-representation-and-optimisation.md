@@ -28,6 +28,7 @@ The design overview and ADR 0004 said the compiler would convert to CPS. CPS wit
    - `join j(p…) = …` binds a local continuation that is only jumped to and never escapes; `rec join` binds a loop. Join-point parameters play the role of φ-nodes.
    - A non-tail call is `let x = call f(a…)`, whose return point is what follows it. A tail call is `tail f(a…)`.
    - Control flow is nested: `if` tests a variable, and a name is visible only inside the scope that binds it. Dominance is lexical scope, so checking that every use is dominated by its definition is one walk.
+   - **Everything compiled goes through it:** libraries, programs, `eval`, the REPL and macro transformers. They differ only in which passes run: evaluated code and REPL inputs get a cheap set (ADR 0013 #13), libraries the full one. There is no second path from the expander to bytecode. Rust procedures, from bridges and host-served libraries, are the only code that never passes through it; the IR refers to them by name.
    - In memory, nodes live in an arena and refer to each other by index, so passes run on worklists and never recurse on the program's nesting depth. A pass that wants a flat control-flow graph or a dominator tree builds one on demand.
 2. **Return points become frames when the IR is converted to bytecode.** This is ADR 0004's commitment: continuations are never heap closures at run time. The IR is equivalent to CPS with second-class continuations, but no pass works on a CPS form.
 3. **Operations on values are primitive operations defined by the IR's specification:** `car`, `+`, `null?`, `vector-ref` and the rest of the standard procedures the compiler can open-code. They are part of the format, not bodies inlined from `(scheme base)`, so code that uses them depends on the specification and not on any library's implementation. The compiler emits one when the callee resolves to the standard binding (ADR 0015 #16).
@@ -75,7 +76,7 @@ The design overview and ADR 0004 said the compiler would convert to CPS. CPS wit
 - Embedding hosts that compile source carry the optimiser. It is small beside the expander they carry already, and can be left out.
 - The run format gains instructions: direct calls, dispatch sites with a link slot each, and `dup`, `drop`, `drop-reuse` and reuse constructors (ADR 0005, as amended). Dispatch sites' slots live in a per-module table, so linking fills tables and never rewrites code (ADR 0005 #10).
 - The IR's specification, including every primitive operation and its effect set, is part of the distribution format's specification, and has the same compatibility promise.
-- The baseline compiler is retired once the IR path matches it. Until then both exist, and the regression suite runs against both.
+- The baseline compiler is replaced, not kept beside it. It stays in use while the IR path is built; once the IR path passes the regression suite, everything switches over and the baseline code generator is deleted.
 - Deoptimisation is not needed, because nothing is speculative. Speculation in the JIT would bring it back.
 
 ## Alternatives considered
