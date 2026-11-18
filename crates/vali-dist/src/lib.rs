@@ -16,14 +16,24 @@
 //!   defines, and what each may do.
 //! - [`validate`]: the checks that make a module well formed.
 //! - The [`Display`](std::fmt::Display) of a [`Module`]: a readable form.
+//! - [`encode`] and [`decode`]: a module's bytes (ADR 0017 #8), built on
+//!   [`Writer`] and [`Reader`], which other sections' encodings use too.
+//! - [`Artifact`]: the container that holds a compiled library's sections.
 //!
 //! These types are the distribution format's own. Run-format bytecode is a
 //! separate, private format (ADR 0005), so the two can change apart.
 
+mod artifact;
+mod bytes;
+mod encode;
 mod ir;
 mod primitive;
 mod print;
 mod validate;
+
+pub use artifact::{Artifact, FORMAT_VERSION, KNOWN_FEATURES, MAGIC, Section};
+pub use bytes::{DecodeError, Reader, Writer};
+pub use encode::{decode, encode};
 
 pub use ir::{
     Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, JoinId, Module,

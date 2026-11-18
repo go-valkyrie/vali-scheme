@@ -378,3 +378,161 @@ fn effects() {
         assert!(!op.effects().contains(Effects::CAPTURE));
     }
 }
+
+mod encoding {
+    use super::*;
+    use vali_dist::{Artifact, decode, encode};
+
+    #[test]
+    fn a_module_survives_encoding() {
+        let module = sum();
+        let bytes = encode(&module).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        // Its variables were numbered in binding order already, so only
+        // the arena's order differs: the printed form is the same.
+        assert_eq!(decoded.to_string(), module.to_string());
+        assert_eq!(encode(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn constants_survive_encoding() {
+        let mut module = sum();
+        let mut list = Constant::EmptyList;
+        for n in 0..1000 {
+            list = Constant::Pair(Box::new(Constant::Integer(n - 500)), Box::new(list));
+        }
+        module.constants.extend([
+            list,
+            Constant::Vector(vec![
+                Constant::Flonum(-0.5),
+                Constant::Character('λ'),
+                Constant::String("é\n".into()),
+                Constant::Keyword("k".into()),
+                Constant::Bytevector(vec![0, 255]),
+                Constant::Vector(Vec::new()),
+            ]),
+            Constant::Bignum {
+                negative: true,
+                limbs: vec![1, 2, 3],
+            },
+            Constant::Ratio(
+                Box::new(Constant::Integer(-1)),
+                Box::new(Constant::Integer(3)),
+            ),
+            Constant::Complex(
+                Box::new(Constant::Flonum(1.0)),
+                Box::new(Constant::Flonum(f64::INFINITY)),
+            ),
+            Constant::Integer(i64::MIN),
+            Constant::Integer(i64::MAX),
+        ]);
+        let decoded = decode(&encode(&module).unwrap()).unwrap();
+        assert_eq!(decoded.constants, module.constants);
+    }
+
+    #[test]
+    fn deep_nesting_does_not_recurse_in_encoding() {
+        const DEPTH: u32 = 200_000;
+        let mut t = Terms::default();
+        let mut body = t.push(Term::Return(v(DEPTH - 1)));
+        for n in (1..DEPTH).rev() {
+            body = t.bind(n, prim(Primitive::Cons, &[c(0), v(n - 1)]), body);
+        }
+        body = t.bind(0, Value::Operand(c(0)), body);
+        let mut list = Constant::EmptyList;
+        for _ in 0..DEPTH {
+            list = Constant::Pair(Box::new(Constant::Integer(1)), Box::new(list));
+        }
+        let module = Module {
+            name: "deep".into(),
+            constants: vec![list],
+            globals: vec![],
+            exports: vec![],
+            functions: vec![Function {
+                name: None,
+                arity: Arity::exactly(0),
+                params: vec![],
+                free: vec![],
+                vars: DEPTH,
+                joins: 0,
+                terms: t.0,
+                body,
+            }],
+            body: FunId(0),
+            sources: vec![],
+        };
+        let bytes = encode(&module).unwrap();
+        assert_eq!(encode(&decode(&bytes).unwrap()).unwrap(), bytes);
+    }
+
+    /// A small random number generator, so the tests need no crate.
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn corrupt_input_is_refused_not_panicked_on() {
+        let bytes = encode(&sum()).unwrap();
+        for end in 0..bytes.len() {
+            assert!(
+                decode(&bytes[..end]).is_err(),
+                "a prefix of {end} bytes decoded"
+            );
+        }
+        for i in 0..bytes.len() {
+            for bit in 0..8 {
+                let mut flipped = bytes.clone();
+                flipped[i] ^= 1 << bit;
+                let _ = decode(&flipped);
+            }
+        }
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..20_000 {
+            let len = (rng.next() % 64) as usize;
+            let random: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            let _ = decode(&random);
+            let mut spliced = bytes.clone();
+            let at = (rng.next() as usize) % spliced.len();
+            spliced.splice(at..at, random);
+            let _ = decode(&spliced);
+        }
+    }
+
+    #[test]
+    fn artifacts_keep_what_they_know() {
+        let mut artifact = Artifact::default();
+        artifact.insert("invoke", true, vec![1, 2, 3]);
+        artifact.insert("debug", false, vec![4]);
+        let bytes = artifact.encode();
+        let read = Artifact::decode(&bytes, &["invoke", "debug"]).unwrap();
+        assert_eq!(read, artifact);
+        // An optional section it does not know is dropped.
+        let read = Artifact::decode(&bytes, &["invoke"]).unwrap();
+        assert_eq!(read.section("invoke"), Some(&[1, 2, 3][..]));
+        assert_eq!(read.section("debug"), None);
+        // A required one is refused, by name.
+        let error = Artifact::decode(&bytes, &["debug"]).unwrap_err();
+        assert!(
+            error.message.contains("needs the section invoke"),
+            "{error}"
+        );
+        let mut newer = artifact.clone();
+        newer.features.push("wide-slots".into());
+        let error = Artifact::decode(&newer.encode(), &["invoke", "debug"]).unwrap_err();
+        assert!(
+            error.message.contains("format feature wide-slots"),
+            "{error}"
+        );
+        assert!(Artifact::decode(b"not an artifact", &[]).is_err());
+        for end in 0..bytes.len() {
+            assert!(Artifact::decode(&bytes[..end], &["invoke", "debug"]).is_err());
+        }
+    }
+}
