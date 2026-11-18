@@ -785,10 +785,12 @@ impl Lowerer<'_> {
                 let unit = if name == "+" { 0 } else { 1 };
                 self.constant(Constant::Integer(unit))
             }
+            // Negation, as -1 times x rather than 0 minus x: (- 0.0) is
+            // -0.0.
             ("-", 1) => {
                 let x = self.value(f, &args[0])?;
-                let zero = self.constant(Constant::Integer(0))?;
-                self.primitive(f, Primitive::Sub, vec![zero, x])
+                let minus_one = self.constant(Constant::Integer(-1))?;
+                self.primitive(f, Primitive::Mul, vec![minus_one, x])
             }
             ("+" | "*", 1) => self.value(f, &args[0]),
             ("+" | "*" | "-", _) => {

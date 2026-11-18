@@ -192,7 +192,7 @@ impl ModuleBuilder {
     ///
     /// If the pool would exceed 65,536 constants.
     pub fn constant(&mut self, constant: Constant) -> u16 {
-        let index = match self.constants.iter().position(|c| c == &constant) {
+        let index = match self.constants.iter().position(|c| identical(c, &constant)) {
             Some(index) => index,
             None => {
                 self.constants.push(constant);
@@ -331,4 +331,43 @@ impl ModuleBuilder {
             body,
         }
     }
+}
+
+/// Whether two constants are the same value, so that one pool entry can
+/// stand for both. Unlike `==`, flonums compare by their bits: `-0.0` and
+/// `0.0` are different constants, as `eqv?` tells them apart. It compares
+/// from a stack of its own, so deeply nested constants cannot overflow the
+/// native stack.
+fn identical(a: &Constant, b: &Constant) -> bool {
+    let mut pending = vec![(a, b)];
+    while let Some((a, b)) = pending.pop() {
+        match (a, b) {
+            (Constant::Flonum(x), Constant::Flonum(y)) => {
+                if x.to_bits() != y.to_bits() {
+                    return false;
+                }
+            }
+            (Constant::Pair(a1, a2), Constant::Pair(b1, b2))
+            | (Constant::Ratio(a1, a2), Constant::Ratio(b1, b2))
+            | (Constant::Complex(a1, a2), Constant::Complex(b1, b2)) => {
+                pending.push((a1, b1));
+                pending.push((a2, b2));
+            }
+            (Constant::Vector(xs), Constant::Vector(ys)) => {
+                if xs.len() != ys.len() {
+                    return false;
+                }
+                pending.extend(xs.iter().zip(ys));
+            }
+            (Constant::Pair(..) | Constant::Ratio(..) | Constant::Complex(..), _)
+            | (Constant::Vector(_), _)
+            | (Constant::Flonum(_), _) => return false,
+            _ => {
+                if a != b {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }

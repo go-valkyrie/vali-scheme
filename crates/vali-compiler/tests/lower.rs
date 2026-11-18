@@ -62,7 +62,7 @@ fn values_of_ifs_go_to_join_points() {
     let v4 = + c0 v2 @0:1:14
     return v4
   if v1:
-    let v3 = - c1 v0 @0:1:31
+    let v3 = * c2 v0 @0:1:31
     jump j0(v3)
   else:
     jump j0(v0)

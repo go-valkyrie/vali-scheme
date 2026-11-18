@@ -237,6 +237,11 @@ const ZERO: Value = match Value::fixnum(0) {
     None => unreachable!(),
 };
 
+const MINUS_ONE: Value = match Value::fixnum(-1) {
+    Some(v) => v,
+    None => unreachable!(),
+};
+
 fn fold<S: Strategy>(
     cx: &mut Cx<S>,
     op: Arith,
@@ -260,7 +265,8 @@ fn mul<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
 
 fn sub<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     match args {
-        [x] => cx.arith(Arith::Sub, ZERO, *x),
+        // Negation, as -1 times x rather than 0 minus x: (- 0.0) is -0.0.
+        [x] => cx.arith(Arith::Mul, MINUS_ONE, *x),
         [x, rest @ ..] => {
             let mut acc = *x;
             for &y in rest {
