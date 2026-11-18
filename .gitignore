@@ -1,2 +1,5 @@
 /target
 __pycache__/
+
+# Per-machine mise overrides (e.g. a local RUSTC_WRAPPER)
+mise.local.toml
