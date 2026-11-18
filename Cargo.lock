@@ -606,6 +606,7 @@ dependencies = [
  "libtest-mimic",
  "vali-bytecode",
  "vali-compiler",
+ "vali-dist",
  "vali-runtime",
  "vali-stdlib",
  "vali-syntax",

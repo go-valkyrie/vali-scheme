@@ -16,6 +16,9 @@ vali-runtime.workspace = true
 vali-stdlib.workspace = true
 vali-syntax.workspace = true
 
+[dev-dependencies]
+vali-dist.workspace = true
+
 [[test]]
 name = "regressions"
 harness = false

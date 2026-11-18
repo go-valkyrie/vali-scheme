@@ -1,0 +1,2123 @@
+//! Adversarial tests of the IR to run-format path (ADR 0017 #13): a module
+//! that passes `vali_dist::validate` must convert without panicking, convert
+//! to bytecode that passes `vali_bytecode::validate`, and run to the result an
+//! independent IR interpreter gives, under every memory strategy.
+//!
+//! Two kinds of test:
+//!
+//! - Targeted cases, each a module built by hand around one assumption the
+//!   converter or the module builder makes. Those that show a known bug are
+//!   ignored with the bug as the reason, so they run with `--ignored` and
+//!   pass once it is fixed.
+//! - `random_valid_ir`: random valid, terminating modules (lets, ifs, joins,
+//!   loops, calls and tail calls, closures, `set-free`, boxes, vectors,
+//!   globals and up to 250 live values), each compared with the reference
+//!   interpreter below. `IR_SEEDS` and `IR_FIRST` choose the seeds,
+//!   `IR_SEED` with `one_seed` runs one, and `IR_PRINT` and `IR_TRACE` show
+//!   the module and progress.
+//!
+//! Slow or process-killing cases are ignored too; run them alone, in
+//! release.
+
+#![allow(missing_debug_implementations)]
+
+use std::cell::RefCell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
+use std::time::Instant;
+
+use vali_dist::{
+    self as ir, Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, JoinId,
+    Module, Operand, Primitive, Term, TermId, Value, Var,
+};
+use vali_runtime::{
+    Cx, DeferredHeadered, DeferredSideCounts, HeapConfig, NoCollection, PreciseHeadered,
+    PreciseSideCounts, Strategy,
+};
+use vali_test::fuzz::{Random, XorShift};
+
+// ---------------------------------------------------------------------------
+// Building IR by hand.
+
+#[derive(Default)]
+struct FB {
+    terms: Vec<Term>,
+    vars: u32,
+    joins: u32,
+}
+
+impl FB {
+    fn var(&mut self) -> Var {
+        self.vars += 1;
+        Var(self.vars - 1)
+    }
+    fn join(&mut self) -> JoinId {
+        self.joins += 1;
+        JoinId(self.joins - 1)
+    }
+    fn push(&mut self, t: Term) -> TermId {
+        self.terms.push(t);
+        TermId(self.terms.len() as u32 - 1)
+    }
+    fn finish(
+        self,
+        name: &str,
+        arity: Arity,
+        params: Vec<Var>,
+        free: Vec<Var>,
+        body: TermId,
+    ) -> Function {
+        Function {
+            name: Some(name.into()),
+            arity,
+            params,
+            free,
+            vars: self.vars,
+            joins: self.joins,
+            terms: self.terms,
+            body,
+        }
+    }
+}
+
+fn let_(fb: &mut FB, var: Var, value: Value, body: TermId) -> TermId {
+    fb.push(Term::Let {
+        var,
+        value,
+        body,
+        position: None,
+    })
+}
+
+fn module(constants: Vec<Constant>, globals: Vec<Global>, functions: Vec<Function>) -> Module {
+    Module {
+        name: "adversarial".into(),
+        constants,
+        globals,
+        exports: Vec::new(),
+        functions,
+        body: FunId(0),
+        sources: Vec::new(),
+    }
+}
+
+fn v(x: Var) -> Operand {
+    Operand::Var(x)
+}
+fn c(n: u32) -> Operand {
+    Operand::Const(ConstantId(n))
+}
+
+/// Validates, converts (catching panics), validates the bytecode.
+fn convert_checked(m: &Module) -> Result<vali_bytecode::Module, String> {
+    ir::validate(m).map_err(|e| format!("IR invalid: {e}"))?;
+    let out = catch_unwind(AssertUnwindSafe(|| vali_bytecode::convert(m)))
+        .map_err(|p| format!("CONVERT PANICKED: {}", panic_message(&p)))?
+        .map_err(|e| format!("convert error: {e}"))?;
+    vali_bytecode::validate(&out).map_err(|e| format!("BYTECODE INVALID: {e}"))?;
+    Ok(out)
+}
+
+fn dis(m: &vali_bytecode::Module) -> String {
+    m.functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            format!(
+                "function {i} ({} slots):\n{}",
+                f.slots,
+                vali_bytecode::disassemble(f)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".into())
+}
+
+fn run_with<S: Strategy>(m: &vali_bytecode::Module) -> Result<String, String> {
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let mut cx = Cx::<S>::new(&HeapConfig {
+            max_bytes: Some(256 << 20),
+        });
+        cx.set_fuel_limit(Some(5_000_000));
+        cx.set_max_stack_bytes(8 << 20);
+        let id = cx.load(m.clone()).map_err(|e| format!("load: {e}"))?;
+        let out = match cx.run(id) {
+            Ok(h) => cx.write_string(&h).map_err(|e| format!("write: {e}")),
+            Err(e) => Err(format!("error: {e}")),
+        };
+        cx.collect_garbage();
+        out
+    }));
+    match r {
+        Ok(x) => x,
+        Err(p) => Err(format!(
+            "VM PANICKED under {}: {}",
+            S::NAME,
+            panic_message(&p)
+        )),
+    }
+}
+
+fn run_all(m: &vali_bytecode::Module) -> Vec<(&'static str, Result<String, String>)> {
+    vec![
+        (NoCollection::NAME, run_with::<NoCollection>(m)),
+        (DeferredHeadered::NAME, run_with::<DeferredHeadered>(m)),
+        (DeferredSideCounts::NAME, run_with::<DeferredSideCounts>(m)),
+        (PreciseHeadered::NAME, run_with::<PreciseHeadered>(m)),
+        (PreciseSideCounts::NAME, run_with::<PreciseSideCounts>(m)),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Targeted cases.
+
+/// f0 makes a closure of f1, which has 256 free variables, passing one
+/// variable 256 times. f1 would be rejected ("too many free variables"),
+/// but f0 is converted first and its `Closure` instruction's encoder
+/// panics.
+#[test]
+#[ignore = "known bug: the closure instruction's encoder panics before the converter checks the count"]
+fn closure_with_256_free_variables() {
+    let mut fb = FB::default();
+    let x = fb.var();
+    let k = fb.var();
+    let ret = fb.push(Term::Return(v(k)));
+    let mk = let_(
+        &mut fb,
+        k,
+        Value::Closure {
+            function: FunId(1),
+            free: vec![v(x); 256],
+        },
+        ret,
+    );
+    let body = let_(&mut fb, x, Value::Operand(c(0)), mk);
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+
+    let mut fb = FB::default();
+    let free: Vec<Var> = (0..256).map(|_| fb.var()).collect();
+    let body = fb.push(Term::Return(v(free[0])));
+    let f1 = fb.finish("wide", Arity::exactly(0), vec![], free, body);
+
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0, f1]);
+    let r = convert_checked(&m);
+    eprintln!(
+        "closure_with_256_free_variables: {r:?}",
+        r = r.as_ref().map(|_| "ok")
+    );
+    assert!(
+        !matches!(&r, Err(e) if e.contains("PANICKED")),
+        "{r:?}",
+        r = r.err()
+    );
+}
+
+/// 0.0 and -0.0 are different constants; the module builder's pool
+/// deduplicates with `==` on f64, so -0.0 becomes 0.0.
+#[test]
+#[ignore = "known bug: the constant pool merges -0.0 into 0.0, comparing flonums with =="]
+fn negative_zero_survives() {
+    let mut fb = FB::default();
+    let a = fb.var();
+    let b = fb.var();
+    let r = fb.var();
+    let ret = fb.push(Term::Return(v(r)));
+    let t = let_(
+        &mut fb,
+        r,
+        Value::Primitive {
+            op: Primitive::Cons,
+            args: vec![v(a), v(b)],
+        },
+        ret,
+    );
+    let t = let_(&mut fb, b, Value::Operand(c(1)), t);
+    let body = let_(&mut fb, a, Value::Operand(c(0)), t);
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(
+        vec![Constant::Flonum(0.0), Constant::Flonum(-0.0)],
+        vec![],
+        vec![f0],
+    );
+    let out = convert_checked(&m).unwrap();
+    let results = run_all(&out);
+    eprintln!("negative_zero_survives: {results:?}");
+    for (_, r) in results {
+        assert_eq!(r.unwrap(), "(0.0 . -0.0)");
+    }
+}
+
+/// 65,536 distinct constants pass the converter's own limit check, then
+/// the unspecified constant it adds is the 65,537th.
+#[test]
+#[ignore = "slow: quadratic constant dedup; run with --release --ignored"]
+fn full_constant_pool() {
+    let mut fb = FB::default();
+    let body = fb.push(Term::Return(c(0)));
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let constants = (0..65_536).map(Constant::Integer).collect();
+    let m = module(constants, vec![], vec![f0]);
+    let t = Instant::now();
+    let r = convert_checked(&m);
+    eprintln!(
+        "full_constant_pool: {:?} in {:?}",
+        r.as_ref().map(|_| "ok"),
+        t.elapsed()
+    );
+    assert!(
+        !matches!(&r, Err(e) if e.contains("PANICKED")),
+        "{:?}",
+        r.err()
+    );
+}
+
+/// The time the converter's dedup takes: quadratic in the pool size.
+#[test]
+#[ignore = "timing"]
+fn constant_pool_dedup_time() {
+    for n in [4_000u32, 8_000, 16_000, 32_000] {
+        let mut fb = FB::default();
+        let body = fb.push(Term::Return(c(0)));
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+        let constants = (0..n)
+            .map(|i| Constant::String(format!("s{i}").into()))
+            .collect();
+        let m = module(constants, vec![], vec![f0]);
+        let t = Instant::now();
+        let r = convert_checked(&m);
+        eprintln!(
+            "{n} constants: {:?} in {:?}",
+            r.as_ref().map(|_| "ok"),
+            t.elapsed()
+        );
+    }
+}
+
+/// A quoted list a million long: the IR's constants drop iteratively, the
+/// run format's do not.
+#[test]
+#[ignore = "aborts the process with a stack overflow; run alone"]
+fn deep_constant_list() {
+    let mut list = Constant::EmptyList;
+    for i in 0..1_000_000 {
+        list = Constant::Pair(Box::new(Constant::Integer(i)), Box::new(list));
+    }
+    let mut fb = FB::default();
+    let body = fb.push(Term::Return(c(0)));
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(vec![list], vec![], vec![f0]);
+    ir::validate(&m).unwrap();
+    eprintln!("validated; converting");
+    let out = vali_bytecode::convert(&m).unwrap();
+    eprintln!("converted; dropping");
+    drop(out);
+    eprintln!("dropped");
+}
+
+/// Two equal quoted lists: the builder's dedup compares them recursively.
+#[test]
+#[ignore = "aborts the process with a stack overflow; run alone"]
+fn deep_constant_list_dedup() {
+    let make = || {
+        let mut list = Constant::EmptyList;
+        for i in 0..300_000 {
+            list = Constant::Pair(Box::new(Constant::Integer(i)), Box::new(list));
+        }
+        list
+    };
+    let mut fb = FB::default();
+    let body = fb.push(Term::Return(c(0)));
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(vec![make(), make()], vec![], vec![f0]);
+    eprintln!("built; converting");
+    let out = vali_bytecode::convert(&m).unwrap();
+    std::mem::forget(out);
+    eprintln!("converted");
+}
+
+/// A call with 300 arguments, and a tail call with 300.
+#[test]
+fn very_wide_calls() {
+    for tail in [false, true] {
+        let mut fb = FB::default();
+        let f = fb.var();
+        let r = fb.var();
+        let args = vec![c(0); 300];
+        let t = if tail {
+            fb.push(Term::TailCall {
+                callee: v(f),
+                args,
+                position: None,
+            })
+        } else {
+            let ret = fb.push(Term::Return(v(r)));
+            let_(&mut fb, r, Value::Call { callee: v(f), args }, ret)
+        };
+        let body = let_(&mut fb, f, Value::Global(GlobalId(0)), t);
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+        let m = module(
+            vec![Constant::Integer(1)],
+            vec![Global {
+                name: "list".into(),
+                link: GlobalLink::Primitive,
+            }],
+            vec![f0],
+        );
+        let r = convert_checked(&m);
+        eprintln!(
+            "call with 300 args (tail {tail}): {:?}",
+            r.as_ref().map(|_| "ok").map_err(|e| e.clone())
+        );
+        assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+    }
+}
+
+/// The widest calls that fit: every argument a distinct live variable.
+#[test]
+fn widest_calls_that_fit() {
+    for tail in [false, true] {
+        for n in [240usize, 248, 250, 251, 252, 253, 254, 255] {
+            let mut fb = FB::default();
+            let f = fb.var();
+            let r = fb.var();
+            let xs: Vec<Var> = (0..n).map(|_| fb.var()).collect();
+            let args: Vec<Operand> = xs.iter().map(|&x| v(x)).collect();
+            let mut t = if tail {
+                fb.push(Term::TailCall {
+                    callee: v(f),
+                    args,
+                    position: None,
+                })
+            } else {
+                let ret = fb.push(Term::Return(v(r)));
+                let_(&mut fb, r, Value::Call { callee: v(f), args }, ret)
+            };
+            for (i, &x) in xs.iter().enumerate().rev() {
+                t = let_(
+                    &mut fb,
+                    x,
+                    Value::Primitive {
+                        op: Primitive::Add,
+                        args: vec![c(0), c(i as u32 % 2)],
+                    },
+                    t,
+                );
+            }
+            let body = let_(&mut fb, f, Value::Global(GlobalId(0)), t);
+            let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+            let m = module(
+                vec![Constant::Integer(1000), Constant::Integer(2000)],
+                vec![Global {
+                    name: "+".into(),
+                    link: GlobalLink::Primitive,
+                }],
+                vec![f0],
+            );
+            let r = convert_checked(&m);
+            let expected = (0..n)
+                .map(|i| 1000 + 1000 + if i % 2 == 1 { 1000 } else { 0 })
+                .sum::<usize>()
+                - (0..n).filter(|i| i % 2 == 1).count() * 1000;
+            let _ = expected;
+            match r {
+                Ok(bc) => {
+                    let results = run_all(&bc);
+                    let first = results[0].1.clone();
+                    eprintln!("tail {tail} n {n}: converted, ran {first:?}");
+                    for (s, x) in &results {
+                        assert_eq!(x, &first, "{s}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("tail {tail} n {n}: {e}");
+                    assert!(!e.contains("PANICKED") && !e.contains("INVALID"), "{e}");
+                }
+            }
+        }
+    }
+}
+
+/// 300 values live at once.
+#[test]
+fn too_many_live_values() {
+    let mut fb = FB::default();
+    let xs: Vec<Var> = (0..300).map(|_| fb.var()).collect();
+    let acc: Vec<Var> = (0..300).map(|_| fb.var()).collect();
+    let mut t = fb.push(Term::Return(v(acc[299])));
+    for i in (1..300).rev() {
+        t = let_(
+            &mut fb,
+            acc[i],
+            Value::Primitive {
+                op: Primitive::Add,
+                args: vec![v(acc[i - 1]), v(xs[i])],
+            },
+            t,
+        );
+    }
+    t = let_(&mut fb, acc[0], Value::Operand(v(xs[0])), t);
+    for (i, &x) in xs.iter().enumerate().rev() {
+        t = let_(
+            &mut fb,
+            x,
+            Value::Primitive {
+                op: Primitive::Add,
+                args: vec![c(0), c(i as u32 % 3)],
+            },
+            t,
+        );
+    }
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+    let m = module(
+        vec![
+            Constant::Integer(1000),
+            Constant::Integer(2),
+            Constant::Integer(3),
+        ],
+        vec![],
+        vec![f0],
+    );
+    let r = convert_checked(&m);
+    eprintln!("300 live: {:?}", r.as_ref().map(|_| "ok"));
+    assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+}
+
+/// A function with 300 parameters (200 required, 100 optional).
+#[test]
+fn too_many_parameters() {
+    let mut fb = FB::default();
+    let k = fb.var();
+    let ret = fb.push(Term::Return(v(k)));
+    let body = let_(
+        &mut fb,
+        k,
+        Value::Closure {
+            function: FunId(1),
+            free: vec![],
+        },
+        ret,
+    );
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let mut fb = FB::default();
+    let ps: Vec<Var> = (0..300).map(|_| fb.var()).collect();
+    let body = fb.push(Term::Return(v(ps[299])));
+    let f1 = fb.finish(
+        "many",
+        Arity {
+            required: 200,
+            optional: 100,
+            rest: false,
+        },
+        ps,
+        vec![],
+        body,
+    );
+    let m = module(vec![], vec![], vec![f0, f1]);
+    let r = convert_checked(&m);
+    eprintln!("300 params: {:?}", r.as_ref().map(|_| "ok"));
+    assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+}
+
+/// `set-free` with index 300: the IR's docs say conversion checks the index
+/// at run time; the converter rejects the module instead.
+#[test]
+fn set_free_index_out_of_u8() {
+    let mut fb = FB::default();
+    let k = fb.var();
+    let u = fb.var();
+    let ret = fb.push(Term::Return(c(0)));
+    // Never runs: guarded by #f.
+    let set = let_(
+        &mut fb,
+        u,
+        Value::SetFree {
+            closure: v(k),
+            index: 300,
+            value: c(0),
+        },
+        ret,
+    );
+    let skip = fb.push(Term::Return(c(0)));
+    let iff = fb.push(Term::If {
+        test: c(1),
+        then: set,
+        otherwise: skip,
+    });
+    let body = let_(
+        &mut fb,
+        k,
+        Value::Closure {
+            function: FunId(0),
+            free: vec![],
+        },
+        iff,
+    );
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(
+        vec![Constant::Integer(7), Constant::Boolean(false)],
+        vec![],
+        vec![f0],
+    );
+    let r = convert_checked(&m);
+    eprintln!("set-free 300: {:?}", r.as_ref().map(|_| "ok"));
+}
+
+/// Non-canonical exact ratios with bignum parts pass the IR validator.
+#[test]
+fn bignum_ratio_not_in_lowest_terms() {
+    let big = |limbs: Vec<u64>| Constant::Bignum {
+        negative: false,
+        limbs,
+    };
+    for (name, k) in [
+        (
+            "2^65/2",
+            Constant::Ratio(Box::new(big(vec![0, 2])), Box::new(Constant::Integer(2))),
+        ),
+        (
+            "0/2^64",
+            Constant::Ratio(Box::new(Constant::Integer(0)), Box::new(big(vec![0, 1]))),
+        ),
+        (
+            "2^64/2^65",
+            Constant::Ratio(Box::new(big(vec![0, 1])), Box::new(big(vec![0, 2]))),
+        ),
+    ] {
+        let mut fb = FB::default();
+        let body = fb.push(Term::Return(c(0)));
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+        let m = module(vec![k], vec![], vec![f0]);
+        let r = convert_checked(&m).map(|bc| run_all(&bc));
+        eprintln!("{name}: {r:?}");
+    }
+}
+
+/// Two distinct IR globals with the same name and link: the module
+/// builder merges them into one cell.
+#[test]
+fn duplicate_defined_globals_alias() {
+    let mut fb = FB::default();
+    let (a, b, r) = (fb.var(), fb.var(), fb.var());
+    let ret = fb.push(Term::Return(v(r)));
+    let t = let_(&mut fb, r, Value::Global(GlobalId(0)), ret);
+    let t = let_(&mut fb, b, Value::SetGlobal(GlobalId(1), c(1)), t);
+    let body = let_(&mut fb, a, Value::SetGlobal(GlobalId(0), c(0)), t);
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(
+        vec![Constant::Integer(1), Constant::Integer(2)],
+        vec![
+            Global {
+                name: "x".into(),
+                link: GlobalLink::Defined,
+            },
+            Global {
+                name: "x".into(),
+                link: GlobalLink::Defined,
+            },
+        ],
+        vec![f0],
+    );
+    let out = convert_checked(&m).unwrap();
+    eprintln!("variables: {}", out.variables.len());
+    let results = run_all(&out);
+    eprintln!(
+        "duplicate globals: g0 reads {:?} (IR semantics: 1)",
+        results[0].1
+    );
+}
+
+/// Nesting 1,000,000 deep: lets, ifs, joins.
+#[test]
+fn deep_nesting() {
+    // Deep enough to overflow a test thread's stack under any recursive
+    // implementation; the full million only where the build is fast.
+    let n = if cfg!(debug_assertions) {
+        50_000
+    } else {
+        1_000_000
+    };
+    // Lets: v_i = v_{i-1} + 1.
+    {
+        let mut fb = FB::default();
+        let xs: Vec<Var> = (0..n).map(|_| fb.var()).collect();
+        let mut t = fb.push(Term::Return(v(xs[n - 1])));
+        for i in (1..n).rev() {
+            t = let_(
+                &mut fb,
+                xs[i],
+                Value::Primitive {
+                    op: Primitive::Add,
+                    args: vec![v(xs[i - 1]), c(0)],
+                },
+                t,
+            );
+        }
+        t = let_(&mut fb, xs[0], Value::Operand(c(0)), t);
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+        let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
+        let time = Instant::now();
+        let r = convert_checked(&m).map(|bc| run_with::<PreciseHeadered>(&bc));
+        eprintln!("{n} lets: {r:?} in {:?}", time.elapsed());
+    }
+    // Ifs nested in `then`, each testing a fresh comparison.
+    {
+        let mut fb = FB::default();
+        let x = fb.var();
+        let mut t = fb.push(Term::Return(v(x)));
+        for _ in 0..n {
+            let b = fb.var();
+            let other = fb.push(Term::Return(c(0)));
+            let iff = fb.push(Term::If {
+                test: v(b),
+                then: t,
+                otherwise: other,
+            });
+            t = let_(
+                &mut fb,
+                b,
+                Value::Primitive {
+                    op: Primitive::Lt,
+                    args: vec![c(0), v(x)],
+                },
+                iff,
+            );
+        }
+        t = let_(&mut fb, x, Value::Operand(c(1)), t);
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+        let m = module(
+            vec![Constant::Integer(1), Constant::Integer(5)],
+            vec![],
+            vec![f0],
+        );
+        let time = Instant::now();
+        let r = convert_checked(&m).map(|bc| run_with::<PreciseHeadered>(&bc));
+        eprintln!("{n} ifs: {r:?} in {:?}", time.elapsed());
+    }
+    // Joins nested in bodies: join j_i(p) = jump j_{i-1}(p) ... j_0(p) = return p.
+    {
+        let n = if cfg!(debug_assertions) {
+            10_000
+        } else {
+            200_000
+        };
+        let mut fb = FB::default();
+        let js: Vec<JoinId> = (0..n).map(|_| fb.join()).collect();
+        let mut handlers = Vec::new();
+        let mut params = Vec::new();
+        for i in 0..n {
+            let p = fb.var();
+            params.push(p);
+            let h = if i == 0 {
+                fb.push(Term::Return(v(p)))
+            } else {
+                fb.push(Term::Jump {
+                    join: js[i - 1],
+                    args: vec![v(p)],
+                })
+            };
+            handlers.push(h);
+        }
+        let mut t = fb.push(Term::Jump {
+            join: js[n - 1],
+            args: vec![c(0)],
+        });
+        for i in (0..n).rev() {
+            t = fb.push(Term::Join {
+                join: js[i],
+                params: vec![params[i]],
+                recursive: false,
+                handler: handlers[i],
+                body: t,
+            });
+        }
+        // Wrap so the outermost is j_0.
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+        let m = module(vec![Constant::Integer(42)], vec![], vec![f0]);
+        let time = Instant::now();
+        let r = convert_checked(&m).map(|bc| run_with::<PreciseHeadered>(&bc));
+        eprintln!("{n} joins: {r:?} in {:?}", time.elapsed());
+    }
+}
+
+/// `analyse` checks every use against every recursive join's region:
+/// O(uses x loops).
+#[test]
+#[ignore = "timing"]
+fn quadratic_loop_regions() {
+    for n in [10_000usize, 20_000, 40_000, 80_000] {
+        let mut fb = FB::default();
+        // rec join j_i() = return x  in  rec join j_{i+1} ... in  return x
+        let x = fb.var();
+        let mut t = fb.push(Term::Return(v(x)));
+        for _ in 0..n {
+            let j = fb.join();
+            let h = fb.push(Term::Return(v(x)));
+            t = fb.push(Term::Join {
+                join: j,
+                params: vec![],
+                recursive: true,
+                handler: h,
+                body: t,
+            });
+        }
+        t = let_(&mut fb, x, Value::Operand(c(0)), t);
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+        let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
+        let time = Instant::now();
+        let r = convert_checked(&m);
+        eprintln!(
+            "{n} loops + {n} uses: {:?} in {:?}",
+            r.as_ref().map(|_| "ok"),
+            time.elapsed()
+        );
+    }
+}
+
+/// `analyse` scans the free-variable list for each fused `if`, before the
+/// free-variable count is checked: O(ifs x free).
+#[test]
+#[ignore = "timing"]
+fn quadratic_free_scan() {
+    for n in [10_000usize, 20_000, 40_000, 80_000] {
+        let mut fb = FB::default();
+        let free: Vec<Var> = (0..n).map(|_| fb.var()).collect();
+        let mut t = fb.push(Term::Return(c(0)));
+        for _ in 0..n {
+            let b = fb.var();
+            let other = fb.push(Term::Return(c(0)));
+            let iff = fb.push(Term::If {
+                test: v(b),
+                then: t,
+                otherwise: other,
+            });
+            t = let_(
+                &mut fb,
+                b,
+                Value::Primitive {
+                    op: Primitive::Eq,
+                    args: vec![c(0), c(0)],
+                },
+                iff,
+            );
+        }
+        let f1 = fb.finish("f", Arity::exactly(0), vec![], free, t);
+        let mut fb = FB::default();
+        let body = fb.push(Term::Return(c(0)));
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+        let m = module(vec![Constant::Integer(1)], vec![], vec![f0, f1]);
+        let time = Instant::now();
+        let r = convert_checked(&m);
+        eprintln!(
+            "{n} fused ifs + {n} free: {:?} in {:?}",
+            r.as_ref().map(|_| "ok").map_err(|e| e.clone()),
+            time.elapsed()
+        );
+    }
+}
+
+/// A function that declares 2^32 - 1 variables and join points but has one
+/// term: the validator and converter allocate per declared count.
+#[test]
+#[ignore = "allocates many GB; run alone under ulimit -v"]
+fn huge_declared_counts() {
+    let which = std::env::var("HUGE").unwrap_or_else(|_| "vars".into());
+    let mut fb = FB::default();
+    let body = fb.push(Term::Return(c(0)));
+    let mut f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    if which == "vars" {
+        f0.vars = u32::MAX;
+    } else {
+        f0.joins = u32::MAX;
+    }
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
+    let time = Instant::now();
+    let r = ir::validate(&m);
+    eprintln!("validate: {r:?} in {:?}", time.elapsed());
+    let r = vali_bytecode::convert(&m);
+    eprintln!(
+        "convert: {:?} in {:?}",
+        r.as_ref().map(|_| "ok"),
+        time.elapsed()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A reference interpreter for the IR.
+
+#[derive(Clone)]
+enum V {
+    Int(i64),
+    Bool(bool),
+    Nil,
+    Unspec,
+    Str(Rc<str>),
+    Pair(Rc<RefCell<(V, V)>>),
+    Vector(Rc<RefCell<Vec<V>>>),
+    Box(Rc<RefCell<V>>),
+    Clo(Rc<Clo>),
+    Prim,
+}
+
+struct Clo {
+    fun: u32,
+    free: RefCell<Vec<V>>,
+}
+
+#[derive(Debug)]
+enum Stop {
+    Overflow,
+    Timeout,
+    Error(String),
+}
+
+fn eq(a: &V, b: &V) -> bool {
+    match (a, b) {
+        (V::Int(x), V::Int(y)) => x == y,
+        (V::Bool(x), V::Bool(y)) => x == y,
+        (V::Nil, V::Nil) | (V::Unspec, V::Unspec) | (V::Prim, V::Prim) => true,
+        (V::Str(x), V::Str(y)) => Rc::ptr_eq(x, y),
+        (V::Pair(x), V::Pair(y)) => Rc::ptr_eq(x, y),
+        (V::Vector(x), V::Vector(y)) => Rc::ptr_eq(x, y),
+        (V::Box(x), V::Box(y)) => Rc::ptr_eq(x, y),
+        (V::Clo(x), V::Clo(y)) => Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+fn write(v: &V, out: &mut String) {
+    match v {
+        V::Int(n) => out.push_str(&n.to_string()),
+        V::Bool(true) => out.push_str("#t"),
+        V::Bool(false) => out.push_str("#f"),
+        V::Nil => out.push_str("()"),
+        V::Unspec => out.push_str("#<unspecified>"),
+        V::Str(s) => {
+            out.push('"');
+            out.push_str(s);
+            out.push('"');
+        }
+        V::Pair(p) => {
+            out.push('(');
+            let mut cur = p.clone();
+            loop {
+                let (car, cdr) = cur.borrow().clone();
+                write(&car, out);
+                match cdr {
+                    V::Nil => break,
+                    V::Pair(next) => {
+                        out.push(' ');
+                        cur = next;
+                    }
+                    other => {
+                        out.push_str(" . ");
+                        write(&other, out);
+                        break;
+                    }
+                }
+            }
+            out.push(')');
+        }
+        V::Vector(items) => {
+            out.push_str("#(");
+            for (i, x) in items.borrow().iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                write(x, out);
+            }
+            out.push(')');
+        }
+        V::Box(_) => out.push_str("#<box>"),
+        V::Clo(_) | V::Prim => out.push_str("#<procedure>"),
+    }
+}
+
+/// Replaces `#<procedure anything>` with `#<procedure>`.
+fn normalise(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("#<procedure") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        let end = after.find('>').unwrap();
+        out.push_str("#<procedure>");
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+const LIMIT: i64 = 1 << 40;
+
+/// A join point the interpreter has entered the scope of: its parameters
+/// and its body.
+type JoinScope = Option<(Vec<Var>, TermId)>;
+
+struct Interp<'m> {
+    m: &'m Module,
+    consts: Vec<V>,
+    globals: Vec<Option<V>>,
+    steps: u64,
+    joins: Vec<Vec<JoinScope>>,
+}
+
+impl<'m> Interp<'m> {
+    fn new(m: &'m Module) -> Self {
+        let consts = m
+            .constants
+            .iter()
+            .map(|k| match k {
+                Constant::Integer(n) => V::Int(*n),
+                Constant::Boolean(b) => V::Bool(*b),
+                Constant::EmptyList => V::Nil,
+                Constant::Unspecified => V::Unspec,
+                Constant::String(s) => V::Str(Rc::from(&**s)),
+                Constant::Pair(a, b) => {
+                    // Only (int . int) / small lists of ints are generated.
+                    fn conv(k: &Constant) -> V {
+                        match k {
+                            Constant::Integer(n) => V::Int(*n),
+                            Constant::EmptyList => V::Nil,
+                            Constant::Pair(a, b) => {
+                                V::Pair(Rc::new(RefCell::new((conv(a), conv(b)))))
+                            }
+                            _ => unimplemented!(),
+                        }
+                    }
+                    V::Pair(Rc::new(RefCell::new((conv(a), conv(b)))))
+                }
+                _ => unimplemented!("constant {k:?}"),
+            })
+            .collect();
+        let joins = m
+            .functions
+            .iter()
+            .map(|f| {
+                let mut js = vec![None; f.joins as usize];
+                for t in &f.terms {
+                    if let Term::Join {
+                        join,
+                        params,
+                        handler,
+                        ..
+                    } = t
+                    {
+                        js[join.0 as usize] = Some((params.clone(), *handler));
+                    }
+                }
+                js
+            })
+            .collect();
+        Interp {
+            m,
+            consts,
+            globals: vec![None; m.globals.len()],
+            steps: 0,
+            joins,
+        }
+    }
+
+    fn int(&self, n: i64) -> Result<V, Stop> {
+        if n.abs() >= LIMIT {
+            Err(Stop::Overflow)
+        } else {
+            Ok(V::Int(n))
+        }
+    }
+
+    fn apply(&mut self, mut callee: V, mut args: Vec<V>) -> Result<V, Stop> {
+        'call: loop {
+            let clo = match &callee {
+                V::Clo(c) => c.clone(),
+                V::Prim => {
+                    // "+" only.
+                    let mut sum = 0i64;
+                    for a in &args {
+                        match a {
+                            V::Int(n) => sum += n,
+                            _ => return Err(Stop::Error("+ of non-int".into())),
+                        }
+                    }
+                    return self.int(sum);
+                }
+                _ => return Err(Stop::Error("not a procedure".into())),
+            };
+            let f = &self.m.functions[clo.fun as usize];
+            let mut env: Vec<Option<V>> = vec![None; f.vars as usize];
+            let fixed = f.arity.required as usize + f.arity.optional as usize;
+            if args.len() < f.arity.required as usize || (!f.arity.rest && args.len() > fixed) {
+                return Err(Stop::Error("arity".into()));
+            }
+            for i in 0..fixed {
+                env[f.params[i].0 as usize] =
+                    Some(args.get(i).cloned().ok_or(Stop::Error("default".into()))?);
+            }
+            if f.arity.rest {
+                let mut list = V::Nil;
+                for a in args.iter().skip(fixed).rev() {
+                    list = V::Pair(Rc::new(RefCell::new((a.clone(), list))));
+                }
+                env[f.params[fixed].0 as usize] = Some(list);
+            }
+            for (i, fv) in f.free.iter().enumerate() {
+                env[fv.0 as usize] = Some(clo.free.borrow()[i].clone());
+            }
+            let mut t = f.body;
+            loop {
+                self.steps += 1;
+                if self.steps > 2_000_000 {
+                    return Err(Stop::Timeout);
+                }
+                match f.term(t) {
+                    Term::Let {
+                        var, value, body, ..
+                    } => {
+                        let x = self.value(&env, value)?;
+                        env[var.0 as usize] = Some(x);
+                        t = *body;
+                    }
+                    Term::Join { body, .. } => t = *body,
+                    Term::Jump { join, args } => {
+                        let vals: Vec<V> = args.iter().map(|a| self.get(&env, a)).collect();
+                        let (params, handler) = self.joins[clo.fun as usize][join.0 as usize]
+                            .clone()
+                            .unwrap();
+                        for (p, x) in params.iter().zip(vals) {
+                            env[p.0 as usize] = Some(x);
+                        }
+                        t = handler;
+                    }
+                    Term::If {
+                        test,
+                        then,
+                        otherwise,
+                    } => {
+                        t = if matches!(self.get(&env, test), V::Bool(false)) {
+                            *otherwise
+                        } else {
+                            *then
+                        };
+                    }
+                    Term::Return(x) => return Ok(self.get(&env, x)),
+                    Term::TailCall {
+                        callee: c, args: a, ..
+                    } => {
+                        let nc = self.get(&env, c);
+                        let na = a.iter().map(|x| self.get(&env, x)).collect();
+                        callee = nc;
+                        args = na;
+                        continue 'call;
+                    }
+                }
+            }
+        }
+    }
+
+    fn get(&self, env: &[Option<V>], x: &Operand) -> V {
+        match x {
+            Operand::Var(v) => env[v.0 as usize].clone().expect("bound"),
+            Operand::Const(k) => self.consts[k.0 as usize].clone(),
+        }
+    }
+
+    fn value(&mut self, env: &[Option<V>], value: &Value) -> Result<V, Stop> {
+        let g = |x: &Operand| self.get(env, x);
+        let int = |x: V| match x {
+            V::Int(n) => Ok(n),
+            _ => Err(Stop::Error("not an int".into())),
+        };
+        Ok(match value {
+            Value::Operand(x) => g(x),
+            Value::Primitive { op, args } => {
+                let a: Vec<V> = args.iter().map(&g).collect();
+                match op {
+                    Primitive::Add => self.int(int(a[0].clone())? + int(a[1].clone())?)?,
+                    Primitive::Sub => self.int(int(a[0].clone())? - int(a[1].clone())?)?,
+                    Primitive::Mul => {
+                        let r = int(a[0].clone())?
+                            .checked_mul(int(a[1].clone())?)
+                            .ok_or(Stop::Overflow)?;
+                        self.int(r)?
+                    }
+                    Primitive::Lt => V::Bool(int(a[0].clone())? < int(a[1].clone())?),
+                    Primitive::Le => V::Bool(int(a[0].clone())? <= int(a[1].clone())?),
+                    Primitive::NumEq => V::Bool(int(a[0].clone())? == int(a[1].clone())?),
+                    Primitive::Eq => V::Bool(eq(&a[0], &a[1])),
+                    Primitive::Not => V::Bool(matches!(a[0], V::Bool(false))),
+                    Primitive::Cons => V::Pair(Rc::new(RefCell::new((a[0].clone(), a[1].clone())))),
+                    Primitive::Car | Primitive::Cdr => match &a[0] {
+                        V::Pair(p) => {
+                            let p = p.borrow();
+                            if *op == Primitive::Car {
+                                p.0.clone()
+                            } else {
+                                p.1.clone()
+                            }
+                        }
+                        _ => return Err(Stop::Error("car".into())),
+                    },
+                    Primitive::SetCar | Primitive::SetCdr => match &a[0] {
+                        V::Pair(p) => {
+                            let mut p = p.borrow_mut();
+                            if *op == Primitive::SetCar {
+                                p.0 = a[1].clone()
+                            } else {
+                                p.1 = a[1].clone()
+                            }
+                            V::Unspec
+                        }
+                        _ => return Err(Stop::Error("set-car".into())),
+                    },
+                    Primitive::IsNull => V::Bool(matches!(a[0], V::Nil)),
+                    Primitive::IsPair => V::Bool(matches!(a[0], V::Pair(_))),
+                    Primitive::MakeVector => {
+                        let n = int(a[0].clone())?;
+                        V::Vector(Rc::new(RefCell::new(vec![a[1].clone(); n as usize])))
+                    }
+                    Primitive::VectorRef => match &a[0] {
+                        V::Vector(items) => items.borrow()[int(a[1].clone())? as usize].clone(),
+                        _ => return Err(Stop::Error("vector-ref".into())),
+                    },
+                    Primitive::VectorSet => match &a[0] {
+                        V::Vector(items) => {
+                            items.borrow_mut()[int(a[1].clone())? as usize] = a[2].clone();
+                            V::Unspec
+                        }
+                        _ => return Err(Stop::Error("vector-set".into())),
+                    },
+                    Primitive::VectorLength => match &a[0] {
+                        V::Vector(items) => V::Int(items.borrow().len() as i64),
+                        _ => return Err(Stop::Error("vector-length".into())),
+                    },
+                }
+            }
+            Value::Call { callee, args } => {
+                let c = g(callee);
+                let a = args.iter().map(&g).collect();
+                self.apply(c, a)?
+            }
+            Value::Closure { function, free } => V::Clo(Rc::new(Clo {
+                fun: function.0,
+                free: RefCell::new(free.iter().map(&g).collect()),
+            })),
+            Value::Global(gid) => match &self.m.globals[gid.0 as usize].link {
+                GlobalLink::Primitive => V::Prim,
+                _ => self.globals[gid.0 as usize]
+                    .clone()
+                    .ok_or(Stop::Error("unbound".into()))?,
+            },
+            Value::SetGlobal(gid, x) => {
+                self.globals[gid.0 as usize] = Some(g(x));
+                V::Unspec
+            }
+            Value::Box(x) => V::Box(Rc::new(RefCell::new(g(x)))),
+            Value::Unbox(x) => match g(x) {
+                V::Box(b) => b.borrow().clone(),
+                _ => return Err(Stop::Error("unbox".into())),
+            },
+            Value::SetBox(b, x) => match g(b) {
+                V::Box(b) => {
+                    *b.borrow_mut() = g(x);
+                    V::Unspec
+                }
+                _ => return Err(Stop::Error("set-box".into())),
+            },
+            Value::SetFree {
+                closure,
+                index,
+                value,
+            } => match g(closure) {
+                V::Clo(c) => {
+                    let mut free = c.free.borrow_mut();
+                    if (*index as usize) >= free.len() {
+                        return Err(Stop::Error("set-free index".into()));
+                    }
+                    free[*index as usize] = g(value);
+                    V::Unspec
+                }
+                _ => return Err(Stop::Error("set-free".into())),
+            },
+        })
+    }
+}
+
+fn interpret(m: &Module) -> Result<String, Stop> {
+    let mut i = Interp::new(m);
+    let body = V::Clo(Rc::new(Clo {
+        fun: m.body.0,
+        free: RefCell::new(vec![]),
+    }));
+    let r = i.apply(body, vec![])?;
+    let mut s = String::new();
+    write(&r, &mut s);
+    Ok(s)
+}
+
+// ---------------------------------------------------------------------------
+// A generator of valid, well-typed, terminating IR modules.
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum K {
+    Int,
+    Bool,
+    Pair,
+    Vector(u8),
+    BoxInt,
+    Clo(u32),
+    Prim,
+    Any,
+}
+
+#[derive(Clone)]
+struct Sig {
+    required: u8,
+    optional: u8,
+    rest: bool,
+    free: usize,
+}
+
+#[derive(Clone)]
+struct JoinCtx {
+    id: JoinId,
+    kinds: Vec<K>,
+    /// For a loop: the operand its counter must be passed.
+    first: Option<Operand>,
+}
+
+#[derive(Default, Clone)]
+struct Ctx {
+    vars: Vec<(Var, K)>,
+    joins: Vec<JoinCtx>,
+}
+
+struct Gen<'r, R: Random> {
+    r: &'r mut R,
+    sigs: Vec<Sig>,
+    consts: Vec<(Constant, K)>,
+    fb: FB,
+    fun: u32,
+    /// How big to make things.
+    budget: i64,
+    pressure: bool,
+    /// Variables every leaf uses, so they are live throughout.
+    prelude: Vec<Var>,
+}
+
+const G_DEFINED: u32 = 0;
+const G_PLUS: u32 = 1;
+
+impl<R: Random> Gen<'_, R> {
+    fn below(&mut self, n: u64) -> u64 {
+        self.r.below(n)
+    }
+    fn chance(&mut self, pct: u64) -> bool {
+        self.below(100) < pct
+    }
+
+    fn int_const(&mut self) -> Operand {
+        let ints: Vec<usize> = self
+            .consts
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, k))| *k == K::Int)
+            .map(|(i, _)| i)
+            .collect();
+        c(ints[self.below(ints.len() as u64) as usize] as u32)
+    }
+
+    fn small_int_const(&mut self, max: i64) -> Operand {
+        let ints: Vec<usize> = self
+            .consts
+            .iter()
+            .enumerate()
+            .filter(|(_, (k, kk))| {
+                *kk == K::Int && matches!(k, Constant::Integer(n) if (0..=max).contains(n))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        c(ints[self.below(ints.len() as u64) as usize] as u32)
+    }
+
+    fn const_of(&self, n: i64) -> Operand {
+        let i = self
+            .consts
+            .iter()
+            .position(|(k, _)| matches!(k, Constant::Integer(m) if *m == n))
+            .unwrap();
+        c(i as u32)
+    }
+
+    fn var_of(&mut self, ctx: &Ctx, pred: impl Fn(K) -> bool) -> Option<(Var, K)> {
+        let vs: Vec<(Var, K)> = ctx.vars.iter().copied().filter(|(_, k)| pred(*k)).collect();
+        if vs.is_empty() {
+            None
+        } else {
+            // Bias to recent variables, and sometimes old ones.
+            let i = if self.chance(60) {
+                vs.len() - 1 - (self.below(vs.len().min(4) as u64) as usize)
+            } else {
+                self.below(vs.len() as u64) as usize
+            };
+            Some(vs[i])
+        }
+    }
+
+    fn int(&mut self, ctx: &Ctx) -> Operand {
+        if self.chance(75)
+            && let Some((x, _)) = self.var_of(ctx, |k| k == K::Int)
+        {
+            return v(x);
+        }
+        self.int_const()
+    }
+
+    fn any(&mut self, ctx: &Ctx) -> (Operand, K) {
+        if self.chance(80) && !ctx.vars.is_empty() {
+            let (x, k) = self.var_of(ctx, |_| true).unwrap();
+            return (v(x), k);
+        }
+        let i = self.below(self.consts.len() as u64) as usize;
+        (c(i as u32), self.consts[i].1)
+    }
+
+    fn of_kind(&mut self, ctx: &Ctx, k: K) -> Operand {
+        match k {
+            K::Int => self.int(ctx),
+            K::Any => self.any(ctx).0,
+            _ => unreachable!(),
+        }
+    }
+
+    fn leaf(&mut self, ctx: &Ctx) -> TermId {
+        if self.prelude.is_empty() || self.below(100) < 15 {
+            return self.plain_leaf(ctx);
+        }
+        // Use every prelude variable here, so all stay live everywhere.
+        let prelude = self.prelude.clone();
+        let sums: Vec<Var> = prelude.iter().map(|_| self.fb.var()).collect();
+        let mut ctx2 = ctx.clone();
+        ctx2.vars.push((sums[sums.len() - 1], K::Int));
+        let mut t = if self.chance(50) {
+            self.fb.push(Term::Return(v(sums[sums.len() - 1])))
+        } else {
+            self.plain_leaf(&ctx2)
+        };
+        for i in (0..prelude.len()).rev() {
+            let prev = if i == 0 {
+                self.const_of(0)
+            } else {
+                v(sums[i - 1])
+            };
+            // Alternate the operand order so both sides are exercised.
+            let args = if i % 2 == 0 {
+                vec![prev, v(prelude[i])]
+            } else {
+                vec![v(prelude[i]), prev]
+            };
+            t = let_(
+                &mut self.fb,
+                sums[i],
+                Value::Primitive {
+                    op: Primitive::Add,
+                    args,
+                },
+                t,
+            );
+        }
+        t
+    }
+
+    fn plain_leaf(&mut self, ctx: &Ctx) -> TermId {
+        loop {
+            match self.below(4) {
+                0 | 1 if !ctx.joins.is_empty() => {
+                    let j = ctx.joins[self.below(ctx.joins.len() as u64) as usize].clone();
+                    let mut args = Vec::new();
+                    for (i, &k) in j.kinds.iter().enumerate() {
+                        if i == 0
+                            && let Some(first) = j.first
+                        {
+                            args.push(first);
+                        } else {
+                            args.push(self.of_kind(ctx, k));
+                        }
+                    }
+                    return self.fb.push(Term::Jump { join: j.id, args });
+                }
+                2 => {
+                    if let Some((callee, k)) =
+                        self.var_of(ctx, |k| matches!(k, K::Clo(_) | K::Prim))
+                    {
+                        let args = self.call_args(ctx, k);
+                        return self.fb.push(Term::TailCall {
+                            callee: v(callee),
+                            args,
+                            position: None,
+                        });
+                    }
+                }
+                _ => {
+                    let (x, _) = self.any(ctx);
+                    return self.fb.push(Term::Return(x));
+                }
+            }
+        }
+    }
+
+    fn call_args(&mut self, ctx: &Ctx, k: K) -> Vec<Operand> {
+        match k {
+            K::Prim => {
+                let n = self.below(4) as usize;
+                (0..n).map(|_| self.int(ctx)).collect()
+            }
+            K::Clo(j) => {
+                let sig = self.sigs[j as usize].clone();
+                let mut n = sig.required as usize + sig.optional as usize;
+                if sig.rest {
+                    n += if self.pressure && self.chance(30) {
+                        self.below(250) as usize
+                    } else {
+                        self.below(4) as usize
+                    };
+                }
+                (0..n)
+                    .map(|i| {
+                        if i < sig.required as usize + sig.optional as usize {
+                            self.int(ctx)
+                        } else {
+                            self.any(ctx).0
+                        }
+                    })
+                    .collect()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// A value for a `let`, and its kind.
+    fn value(&mut self, ctx: &Ctx) -> (Value, K) {
+        loop {
+            let choice = self.below(24);
+            let prim = |op, args| Value::Primitive { op, args };
+            match choice {
+                0 => {
+                    let (x, k) = self.any(ctx);
+                    return (Value::Operand(x), k);
+                }
+                1..=3 => {
+                    let op = [Primitive::Add, Primitive::Sub, Primitive::Add][choice as usize - 1];
+                    let a = self.int(ctx);
+                    let b = self.int(ctx);
+                    return (prim(op, vec![a, b]), K::Int);
+                }
+                4 => {
+                    let a = self.int(ctx);
+                    let b = self.small_int_const(3);
+                    return (prim(Primitive::Mul, vec![a, b]), K::Int);
+                }
+                5 | 6 => {
+                    let op =
+                        [Primitive::Lt, Primitive::Le, Primitive::NumEq][self.below(3) as usize];
+                    let a = self.int(ctx);
+                    let b = self.int(ctx);
+                    return (prim(op, vec![a, b]), K::Bool);
+                }
+                7 => {
+                    let a = self.any(ctx).0;
+                    let b = self.any(ctx).0;
+                    return (prim(Primitive::Eq, vec![a, b]), K::Bool);
+                }
+                8 => {
+                    let a = self.any(ctx).0;
+                    let op = [Primitive::Not, Primitive::IsNull, Primitive::IsPair]
+                        [self.below(3) as usize];
+                    return (prim(op, vec![a]), K::Bool);
+                }
+                9 | 10 => {
+                    let a = self.any(ctx).0;
+                    let b = self.any(ctx).0;
+                    return (prim(Primitive::Cons, vec![a, b]), K::Pair);
+                }
+                11 => {
+                    if let Some((p, _)) = self.var_of(ctx, |k| k == K::Pair) {
+                        let op = if self.chance(50) {
+                            Primitive::Car
+                        } else {
+                            Primitive::Cdr
+                        };
+                        return (prim(op, vec![v(p)]), K::Any);
+                    }
+                }
+                12 => {
+                    if let Some((p, _)) = self.var_of(ctx, |k| k == K::Pair) {
+                        let op = if self.chance(50) {
+                            Primitive::SetCar
+                        } else {
+                            Primitive::SetCdr
+                        };
+                        let x = self.int(ctx);
+                        return (prim(op, vec![v(p), x]), K::Any);
+                    }
+                }
+                13 => {
+                    let n = self.small_int_const(3);
+                    let len = match n {
+                        Operand::Const(k) => match self.consts[k.0 as usize].0 {
+                            Constant::Integer(n) => n as u8,
+                            _ => unreachable!(),
+                        },
+                        _ => unreachable!(),
+                    };
+                    let fill = self.any(ctx).0;
+                    return (prim(Primitive::MakeVector, vec![n, fill]), K::Vector(len));
+                }
+                14 => {
+                    if let Some((x, K::Vector(n))) =
+                        self.var_of(ctx, |k| matches!(k, K::Vector(n) if n > 0))
+                    {
+                        let i = self.small_int_const(n as i64 - 1);
+                        if self.chance(50) {
+                            return (prim(Primitive::VectorRef, vec![v(x), i]), K::Any);
+                        }
+                        // An int: anything else could make a cycle.
+                        let y = self.int(ctx);
+                        return (prim(Primitive::VectorSet, vec![v(x), i, y]), K::Any);
+                    }
+                    if let Some((x, _)) = self.var_of(ctx, |k| matches!(k, K::Vector(_))) {
+                        return (prim(Primitive::VectorLength, vec![v(x)]), K::Int);
+                    }
+                }
+                15 => {
+                    let x = self.int(ctx);
+                    return (Value::Box(x), K::BoxInt);
+                }
+                16 => {
+                    if let Some((b, _)) = self.var_of(ctx, |k| k == K::BoxInt) {
+                        if self.chance(50) {
+                            return (Value::Unbox(v(b)), K::Int);
+                        }
+                        let x = self.int(ctx);
+                        return (Value::SetBox(v(b), x), K::Any);
+                    }
+                }
+                17 => {
+                    let n = self.sigs.len() as u32;
+                    if self.fun + 1 < n {
+                        let j = self.fun + 1 + self.below((n - self.fun - 1) as u64) as u32;
+                        let free = (0..self.sigs[j as usize].free)
+                            .map(|_| self.int(ctx))
+                            .collect();
+                        return (
+                            Value::Closure {
+                                function: FunId(j),
+                                free,
+                            },
+                            K::Clo(j),
+                        );
+                    }
+                }
+                18..=20 => {
+                    if let Some((f, k)) = self.var_of(ctx, |k| matches!(k, K::Clo(_) | K::Prim)) {
+                        let args = self.call_args(ctx, k);
+                        let rk = if k == K::Prim { K::Int } else { K::Any };
+                        return (Value::Call { callee: v(f), args }, rk);
+                    }
+                }
+                21 => {
+                    if self.chance(50) {
+                        return (Value::Global(GlobalId(G_DEFINED)), K::Int);
+                    }
+                    if self.chance(50) {
+                        return (Value::Global(GlobalId(G_PLUS)), K::Prim);
+                    }
+                    let x = self.int(ctx);
+                    return (Value::SetGlobal(GlobalId(G_DEFINED), x), K::Any);
+                }
+                22 => {
+                    if let Some((f, K::Clo(j))) = self.var_of(ctx, |k| matches!(k, K::Clo(_))) {
+                        let n = self.sigs[j as usize].free;
+                        if n > 0 {
+                            let index = self.below(n as u64) as u32;
+                            let x = self.int(ctx);
+                            return (
+                                Value::SetFree {
+                                    closure: v(f),
+                                    index,
+                                    value: x,
+                                },
+                                K::Any,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let a = self.int(ctx);
+                    let b = self.int(ctx);
+                    return (prim(Primitive::Add, vec![a, b]), K::Int);
+                }
+            }
+        }
+    }
+
+    fn term(&mut self, ctx: &mut Ctx, depth: u32) -> TermId {
+        self.budget -= 1;
+        if depth > 40 || self.budget <= 0 {
+            return self.leaf(ctx);
+        }
+        let choice = self.below(100);
+        if choice < 45 {
+            let (value, k) = self.value(ctx);
+            let x = self.fb.var();
+            ctx.vars.push((x, k));
+            let body = self.term(ctx, depth + 1);
+            ctx.vars.pop();
+            let_(&mut self.fb, x, value, body)
+        } else if choice < 58 {
+            // A comparison and an `if`, usually fusible.
+            let x = self.fb.var();
+            let op = [
+                Primitive::Lt,
+                Primitive::Le,
+                Primitive::NumEq,
+                Primitive::Eq,
+                Primitive::IsNull,
+                Primitive::IsPair,
+            ][self.below(6) as usize];
+            let args = match op {
+                Primitive::IsNull | Primitive::IsPair => vec![self.any(ctx).0],
+                Primitive::Eq => vec![self.any(ctx).0, self.any(ctx).0],
+                _ => vec![self.int(ctx), self.int(ctx)],
+            };
+            let reuse = self.chance(15);
+            ctx.vars.push((x, K::Bool));
+            if !reuse {
+                ctx.vars.pop();
+            }
+            let then = self.term(ctx, depth + 1);
+            let otherwise = self.term(ctx, depth + 1);
+            if reuse {
+                ctx.vars.pop();
+            }
+            let iff = self.fb.push(Term::If {
+                test: v(x),
+                then,
+                otherwise,
+            });
+            let_(&mut self.fb, x, Value::Primitive { op, args }, iff)
+        } else if choice < 64 {
+            let (test, _) = self.any(ctx);
+            let then = self.term(ctx, depth + 1);
+            let otherwise = self.term(ctx, depth + 1);
+            self.fb.push(Term::If {
+                test,
+                then,
+                otherwise,
+            })
+        } else if choice < 74 {
+            // A join point.
+            let j = self.fb.join();
+            let n = self.below(4) as usize;
+            let kinds: Vec<K> = (0..n)
+                .map(|_| if self.chance(60) { K::Int } else { K::Any })
+                .collect();
+            let params: Vec<Var> = (0..n).map(|_| self.fb.var()).collect();
+            let saved = ctx.vars.len();
+            for (p, k) in params.iter().zip(&kinds) {
+                ctx.vars.push((*p, *k));
+            }
+            let handler = self.term(ctx, depth + 1);
+            ctx.vars.truncate(saved);
+            ctx.joins.push(JoinCtx {
+                id: j,
+                kinds,
+                first: None,
+            });
+            let body = self.term(ctx, depth + 1);
+            ctx.joins.pop();
+            self.fb.push(Term::Join {
+                join: j,
+                params,
+                recursive: false,
+                handler,
+                body,
+            })
+        } else if choice < 84 {
+            // A loop: rec join j(i, ...) = if i < K then (let i1 = i + 1 in ...) else ...
+            let j = self.fb.join();
+            let n = self.below(3) as usize;
+            let mut kinds = vec![K::Int];
+            kinds.extend((0..n).map(|_| if self.chance(60) { K::Int } else { K::Any }));
+            let params: Vec<Var> = kinds.iter().map(|_| self.fb.var()).collect();
+            let saved = ctx.vars.len();
+            for (p, k) in params.iter().zip(&kinds) {
+                ctx.vars.push((*p, *k));
+            }
+            let t = self.fb.var();
+            let i1 = self.fb.var();
+            ctx.vars.push((i1, K::Int));
+            ctx.joins.push(JoinCtx {
+                id: j,
+                kinds: kinds.clone(),
+                first: Some(v(i1)),
+            });
+            let then_body = self.term(ctx, depth + 1);
+            ctx.joins.pop();
+            ctx.vars.pop();
+            let one = self.const_of(1);
+            let then = let_(
+                &mut self.fb,
+                i1,
+                Value::Primitive {
+                    op: Primitive::Add,
+                    args: vec![v(params[0]), one],
+                },
+                then_body,
+            );
+            let otherwise = self.term(ctx, depth + 1);
+            let iff = self.fb.push(Term::If {
+                test: v(t),
+                then,
+                otherwise,
+            });
+            let bound = self.small_int_const(3);
+            let handler = let_(
+                &mut self.fb,
+                t,
+                Value::Primitive {
+                    op: Primitive::Lt,
+                    args: vec![v(params[0]), bound],
+                },
+                iff,
+            );
+            ctx.vars.truncate(saved);
+            let start = self.small_int_const(1);
+            ctx.joins.push(JoinCtx {
+                id: j,
+                kinds,
+                first: Some(start),
+            });
+            let body = self.term(ctx, depth + 1);
+            ctx.joins.pop();
+            self.fb.push(Term::Join {
+                join: j,
+                params,
+                recursive: true,
+                handler,
+                body,
+            })
+        } else if choice < 88 && self.pressure {
+            // Many values live at once, consumed together.
+            let wide = self.chance(20);
+            let n = 5 + self.below(if wide { 250 } else { 60 }) as usize;
+            let xs: Vec<Var> = (0..n).map(|_| self.fb.var()).collect();
+            let mut values = Vec::new();
+            for _ in 0..n {
+                let a = self.int(ctx);
+                let b = self.int_const();
+                values.push(Value::Primitive {
+                    op: Primitive::Add,
+                    args: vec![a, b],
+                });
+            }
+            let saved = ctx.vars.len();
+            // Consume: acc_0 = cons(x_0, '()), acc_i = cons(x_i, acc_{i-1}) in reverse.
+            let accs: Vec<Var> = (0..n).map(|_| self.fb.var()).collect();
+            for &a in &accs {
+                let _ = a;
+            }
+            ctx.vars.push((accs[n - 1], K::Pair));
+            let rest = self.term(ctx, depth + 1);
+            ctx.vars.truncate(saved);
+            let mut t = rest;
+            let nil = self
+                .consts
+                .iter()
+                .position(|(k, _)| matches!(k, Constant::EmptyList))
+                .unwrap() as u32;
+            for i in (0..n).rev() {
+                let prev = if i == 0 { c(nil) } else { v(accs[i - 1]) };
+                // Consume in the opposite order to definition so all stay live.
+                t = let_(
+                    &mut self.fb,
+                    accs[i],
+                    Value::Primitive {
+                        op: Primitive::Cons,
+                        args: vec![v(xs[n - 1 - i]), prev],
+                    },
+                    t,
+                );
+            }
+            for i in (0..n).rev() {
+                t = let_(&mut self.fb, xs[i], values[i].clone(), t);
+            }
+            t
+        } else {
+            self.leaf(ctx)
+        }
+    }
+}
+
+fn random_module(r: &mut impl Random) -> Module {
+    let pressure = r.below(3) == 0;
+    let nfun = 1 + r.below(5) as usize;
+    let mut sigs = vec![Sig {
+        required: 0,
+        optional: 0,
+        rest: false,
+        free: 0,
+    }];
+    for _ in 1..nfun {
+        let rest = r.below(5) == 0;
+        sigs.push(Sig {
+            required: if r.below(4) == 0 {
+                r.below(9) as u8
+            } else {
+                r.below(4) as u8
+            },
+            optional: if r.below(6) == 0 { 1 } else { 0 },
+            rest,
+            free: r.below(4) as usize,
+        });
+    }
+    let mut consts: Vec<(Constant, K)> = vec![
+        (Constant::Integer(0), K::Int),
+        (Constant::Integer(1), K::Int),
+        (Constant::Integer(2), K::Int),
+        (Constant::Integer(3), K::Int),
+        (Constant::Integer(-1), K::Int),
+        (Constant::Integer(127), K::Int),
+        (Constant::Integer(128), K::Int),
+        (Constant::Integer(-129), K::Int),
+        (Constant::Integer(40000), K::Int),
+        (Constant::Integer(1 << 33), K::Int),
+        (Constant::Boolean(true), K::Bool),
+        (Constant::Boolean(false), K::Bool),
+        (Constant::EmptyList, K::Any),
+        (Constant::Unspecified, K::Any),
+        (Constant::String("s".into()), K::Any),
+        (
+            Constant::Pair(
+                Box::new(Constant::Integer(1)),
+                Box::new(Constant::EmptyList),
+            ),
+            K::Any,
+        ),
+    ];
+    // Shuffle a little so the pool order varies.
+    if r.below(2) == 0 {
+        consts.reverse();
+    }
+    let globals = vec![
+        Global {
+            name: "g".into(),
+            link: GlobalLink::Defined,
+        },
+        Global {
+            name: "+".into(),
+            link: GlobalLink::Primitive,
+        },
+    ];
+    let mut functions = Vec::new();
+    let budget = if pressure {
+        60
+    } else {
+        10 + r.below(50) as i64
+    };
+    let call_heavy = r.below(2) == 0;
+    let prelude_max = match r.below(4) {
+        0 | 1 => 0,
+        2 => 20,
+        _ => 250,
+    };
+    let mut g = Gen {
+        r,
+        sigs: sigs.clone(),
+        consts: consts.clone(),
+        fb: FB::default(),
+        fun: 0,
+        budget,
+        pressure,
+        prelude: Vec::new(),
+    };
+    for (i, sig) in sigs.iter().enumerate() {
+        g.fun = i as u32;
+        g.fb = FB::default();
+        g.budget = budget;
+        let mut ctx = Ctx::default();
+        let nparams = sig.required as usize + sig.optional as usize + sig.rest as usize;
+        let params: Vec<Var> = (0..nparams).map(|_| g.fb.var()).collect();
+        let free: Vec<Var> = (0..sig.free).map(|_| g.fb.var()).collect();
+        for (k, p) in params.iter().enumerate() {
+            let kind = if sig.rest && k == nparams - 1 {
+                K::Any
+            } else {
+                K::Int
+            };
+            ctx.vars.push((*p, kind));
+        }
+        for f in &free {
+            ctx.vars.push((*f, K::Int));
+        }
+        // Preludes: closures of every later function, and values every
+        // leaf uses.
+        let mut wrap: Vec<(Var, Value)> = Vec::new();
+        if call_heavy {
+            for (j, later) in sigs.iter().enumerate().skip(i + 1) {
+                let free = (0..later.free).map(|_| g.int(&ctx)).collect();
+                let k = g.fb.var();
+                wrap.push((
+                    k,
+                    Value::Closure {
+                        function: FunId(j as u32),
+                        free,
+                    },
+                ));
+                ctx.vars.push((k, K::Clo(j as u32)));
+            }
+        }
+        g.prelude.clear();
+        let n = if prelude_max == 0 {
+            0
+        } else {
+            g.below(prelude_max) as usize
+        };
+        for _ in 0..n {
+            let a = g.int(&ctx);
+            let b = g.int_const();
+            let x = g.fb.var();
+            wrap.push((
+                x,
+                Value::Primitive {
+                    op: Primitive::Add,
+                    args: vec![a, b],
+                },
+            ));
+            ctx.vars.push((x, K::Int));
+            g.prelude.push(x);
+        }
+        let mut body = g.term(&mut ctx, 0);
+        for (x, value) in wrap.into_iter().rev() {
+            body = let_(&mut g.fb, x, value, body);
+        }
+        if i == 0 {
+            // The body sets the global first.
+            let u = g.fb.var();
+            let one = g.const_of(1);
+            body = let_(
+                &mut g.fb,
+                u,
+                Value::SetGlobal(GlobalId(G_DEFINED), one),
+                body,
+            );
+        }
+        let fb = std::mem::take(&mut g.fb);
+        functions.push(fb.finish(
+            &format!("f{i}"),
+            Arity {
+                required: sig.required,
+                optional: sig.optional,
+                rest: sig.rest,
+            },
+            params,
+            free,
+            body,
+        ));
+    }
+    Module {
+        name: "random".into(),
+        constants: consts.into_iter().map(|(k, _)| k).collect(),
+        globals,
+        exports: Vec::new(),
+        functions,
+        body: FunId(0),
+        sources: Vec::new(),
+    }
+}
+
+/// Runs one seed: Ok(true) if it ran and matched, Ok(false) if skipped.
+fn check_seed(seed: u64) -> Result<bool, String> {
+    let m = random_module(&mut XorShift::new(seed));
+    if let Err(e) = ir::validate(&m) {
+        return Err(format!("GENERATOR BUG: {e}\n{m}"));
+    }
+    let expected = interpret(&m);
+    if std::env::var("IR_PRINT").is_ok() {
+        eprintln!("{m}\nexpected {expected:?}");
+    }
+    let bc = match convert_checked(&m) {
+        Ok(bc) => bc,
+        Err(e) if e.starts_with("convert error") => return Ok(false),
+        Err(e) => return Err(format!("{e}\n{m}")),
+    };
+    let expected = match expected {
+        Ok(s) => Some(s),
+        Err(Stop::Overflow) | Err(Stop::Timeout) => return Ok(false),
+        Err(Stop::Error(e)) => {
+            return Err(format!("GENERATOR TYPE BUG: {e}\n{m}"));
+        }
+    };
+    for (s, r) in run_all(&bc) {
+        let got = r.map(|x| normalise(&x));
+        if got.as_ref().ok() != expected.as_ref() {
+            return Err(format!(
+                "MISMATCH under {s}: got {got:?}, expected {expected:?}\n{m}\n{}",
+                dis(&bc)
+            ));
+        }
+    }
+    Ok(true)
+}
+
+#[test]
+fn random_valid_ir() {
+    let n: u64 = std::env::var("IR_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let first: u64 = std::env::var("IR_FIRST")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    let mut skipped = 0;
+    let trace = std::env::var("IR_TRACE").is_ok();
+    for seed in first..first + n {
+        if trace {
+            eprintln!("seed {seed}");
+        }
+        match check_seed(seed) {
+            Ok(true) => ran += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                if failures.len() < 3 {
+                    eprintln!("seed {seed}: {e}");
+                }
+                failures.push(seed);
+            }
+        }
+    }
+    eprintln!(
+        "ran {ran}, skipped {skipped}, failed {}: {:?}",
+        failures.len(),
+        &failures[..failures.len().min(50)]
+    );
+    assert!(failures.is_empty());
+}
+
+#[test]
+#[ignore = "one seed"]
+fn one_seed() {
+    let seed: u64 = std::env::var("IR_SEED").unwrap().parse().unwrap();
+    match check_seed(seed) {
+        Ok(x) => eprintln!("ok {x}"),
+        Err(e) => panic!("{e}"),
+    }
+}
