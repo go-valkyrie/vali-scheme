@@ -702,7 +702,8 @@ impl Handle {
         }
     }
 
-    /// Sets a vector's `i`th element.
+    /// Sets a vector's `i`th element; an error if the vector is a
+    /// literal, which is immutable.
     pub fn vector_set<S: Strategy>(
         &self,
         cx: &mut Cx<S>,
@@ -715,6 +716,12 @@ impl Handle {
         unsafe {
             if i >= cx.vector_length(v) {
                 return Err(Error::OutOfRange);
+            }
+            if cx.header_flags(v, vali_abi::TypeCode::Vector) & vali_abi::data::IMMUTABLE != 0 {
+                return Err(Error::scheme(format!(
+                    "the vector {} is immutable",
+                    cx.written(v)
+                )));
             }
             cx.vector_set(v, i, x);
         }

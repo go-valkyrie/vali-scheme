@@ -12,6 +12,7 @@ use crate::cx::Cx;
 use crate::handle::Error;
 use crate::records;
 use crate::strategy::Strategy;
+use crate::strings::mutable_vector;
 use crate::value::Value;
 use crate::vm::type_error;
 
@@ -251,6 +252,7 @@ fn vector_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Erro
 
 fn vector_set<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let i = vector_index(cx, "vector-set!", args[0], args[1])?;
+    mutable_vector(cx, "vector-set!", args[0])?;
     // SAFETY: checked above.
     unsafe { cx.vector_set(args[0], i, args[2]) };
     Ok(Value::UNSPECIFIED)
@@ -435,8 +437,22 @@ fn list_to_vector<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, 
     vector(cx, &items)
 }
 
+/// `(%check-mutable-vector name v)`: raises, naming the string `name`,
+/// unless `v` is a mutable vector. A Scheme-level mutator calls it to
+/// refuse a literal before it stores anything, even over an empty range.
+fn check_mutable_vector<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let name = if args[0].tag() == Tag::String {
+        // SAFETY: a live string, copied before anything can change it.
+        unsafe { cx.string_str(args[0]) }.to_owned()
+    } else {
+        "vector mutation".to_owned()
+    };
+    mutable_vector(cx, &name, args[1])?;
+    Ok(Value::UNSPECIFIED)
+}
+
 fn vector_fill<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let v = vector_arg(cx, "vector-fill!", args[0])?;
+    let v = mutable_vector(cx, "vector-fill!", args[0])?;
     // SAFETY: a live vector.
     unsafe {
         for i in 0..cx.vector_length(v) {
@@ -498,6 +514,11 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("vector->list", Arity::exactly(1), vector_to_list),
         ("list->vector", Arity::exactly(1), list_to_vector),
         ("vector-fill!", Arity::exactly(2), vector_fill),
+        (
+            "%check-mutable-vector",
+            Arity::exactly(2),
+            check_mutable_vector,
+        ),
         ("boolean?", Arity::exactly(1), is_boolean),
         ("procedure?", Arity::exactly(1), is_procedure),
         ("vector?", Arity::exactly(1), is_vector),

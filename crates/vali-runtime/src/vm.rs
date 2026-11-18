@@ -740,6 +740,7 @@ impl<S: Strategy> Cx<S> {
                     // SAFETY: `v` has `items.len()` elements.
                     unsafe { self.vector_set(v, i, x) };
                 }
+                self.make_immutable(v);
                 v
             }
         })
@@ -2509,6 +2510,11 @@ impl<S: Strategy> Cx<S> {
                             if op == Opcode::VectorRef {
                                 self.store(fp, a, self.vector_ref(vector, i as usize));
                             } else {
+                                if self.header_flags(vector, TypeCode::Vector) & data::IMMUTABLE
+                                    != 0
+                                {
+                                    fail!(self.immutable_vector(name, vector));
+                                }
                                 self.vector_set(vector, i as usize, slot(fp, c));
                             }
                             pc += 1;

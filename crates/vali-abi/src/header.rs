@@ -24,9 +24,9 @@ pub enum TypeCode {
     Symbol = 7,
     /// A string; the data holds [`data::IMMUTABLE`] and [`data::ASCII`].
     String = 9,
-    /// A vector.
+    /// A vector; the data holds [`data::IMMUTABLE`], set on a literal.
     Vector = 11,
-    /// A bytevector.
+    /// A bytevector; the data holds [`data::IMMUTABLE`].
     Bytevector = 13,
     /// A box: an assigned variable that a closure captures.
     Box = 15,

@@ -4,7 +4,8 @@
 ;;; correct, though not in linear time.
 
 (define-library (srfi 132)
-  (import (scheme base))
+  (import (scheme base)
+          (only (vali primitive) %check-mutable-vector))
   (export list-sorted? vector-sorted?
           list-sort list-stable-sort list-sort! list-stable-sort!
           vector-sort vector-stable-sort vector-sort! vector-stable-sort!
@@ -24,9 +25,13 @@
 
     ;; Stores the elements of `xs` into `v` from `i` on; returns the index
     ;; past the last.
-    (define (%fill! v i xs)
+    (define (%fill! name v i xs)
+      (%check-mutable-vector name v)
+      (%store! v i xs))
+
+    (define (%store! v i xs)
       (if (pair? xs)
-          (begin (vector-set! v i (car xs)) (%fill! v (+ i 1) (cdr xs)))
+          (begin (vector-set! v i (car xs)) (%store! v (+ i 1) (cdr xs)))
           i))
 
     (define (list-sorted? less? lis)
@@ -70,7 +75,7 @@
 
     (define (vector-stable-sort! v less? . opt)
       (let-values (((start end) (%range v opt)))
-        (%fill! v start (list-stable-sort less? (vector->list v start end)))
+        (%fill! "vector-stable-sort!" v start (list-stable-sort less? (vector->list v start end)))
         (if #f #f)))
     (define vector-sort! vector-stable-sort!)
 
@@ -81,7 +86,7 @@
                    (vector->list v2 (%opt opt 2 0) (%opt opt 3 (vector-length v2))))))
 
     (define (vector-merge! less? to v1 v2 . opt)
-      (%fill! to (%opt opt 0 0)
+      (%fill! "vector-merge!" to (%opt opt 0 0)
               (list-merge less?
                           (vector->list v1 (%opt opt 1 0) (%opt opt 2 (vector-length v1)))
                           (vector->list v2 (%opt opt 3 0) (%opt opt 4 (vector-length v2)))))
@@ -105,7 +110,7 @@
     ;; Returns the end of the deduplicated range.
     (define (vector-delete-neighbor-dups! same? v . opt)
       (let-values (((start end) (%range v opt)))
-        (%fill! v start (list-delete-neighbor-dups same? (vector->list v start end)))))
+        (%fill! "vector-delete-neighbor-dups!" v start (list-delete-neighbor-dups same? (vector->list v start end)))))
 
     (define (vector-find-median less? v knil . mean)
       (let ((mean (if (pair? mean) (car mean) (lambda (a b) (/ (+ a b) 2))))

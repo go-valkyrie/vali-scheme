@@ -447,3 +447,38 @@ fn required_then_optional_then_rest_is_accepted() {
         },
     );
 }
+
+/// A host cannot write the elements of a literal vector, as Scheme code
+/// cannot; a fresh vector, or a copy of a literal, takes writes.
+#[test]
+fn host_writes_to_literal_vectors() {
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    let mut eval = |source: &str| {
+        let program = vali_compiler::compile_program(
+            &format!("(import (scheme base)) {source}"),
+            &Identity::new("test"),
+            &Bridges,
+        )
+        .unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap()
+    };
+    let literal = eval("'#(1 (#(2)) 3)");
+    let copy = eval("(vector-copy '#(1 2 3))");
+    let fresh = eval("(vector 1 2 3)");
+    let x = Handle::fixnum(9).unwrap();
+    let error = literal.vector_set(&mut cx, 0, &x).unwrap_err();
+    assert!(error.to_string().contains("is immutable"), "{error}");
+    let nested = literal.vector_ref(&mut cx, 1).unwrap();
+    let nested = nested.car(&mut cx).unwrap();
+    assert!(nested.vector_set(&mut cx, 0, &x).is_err());
+    // The index is checked before the flag, as for a fresh vector.
+    assert_eq!(
+        literal.vector_set(&mut cx, 3, &x).unwrap_err(),
+        Error::OutOfRange
+    );
+    for v in [copy, fresh] {
+        v.vector_set(&mut cx, 0, &x).unwrap();
+        assert_eq!(v.vector_ref(&mut cx, 0).unwrap().as_fixnum(), Some(9));
+    }
+}

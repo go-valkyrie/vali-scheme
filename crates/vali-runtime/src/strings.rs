@@ -5,7 +5,7 @@
 //! change that alters how many bytes a character takes replaces the
 //! bytevector; a change that does not is made in place. Literals and the
 //! names `symbol->string` returns are immutable, and so are literal
-//! bytevectors.
+//! bytevectors and vectors.
 
 use vali_abi::{Header, Tag, TypeCode, data};
 use vali_bytecode::Arity;
@@ -25,7 +25,7 @@ impl<S: Strategy> Cx<S> {
     /// # Safety
     ///
     /// `v` must be a live object of type `t`, which has a header.
-    unsafe fn header_flags(&self, v: Value, t: TypeCode) -> u32 {
+    pub(crate) unsafe fn header_flags(&self, v: Value, t: TypeCode) -> u32 {
         let offset = Self::LAYOUT.header(t).expect("a headered type");
         // SAFETY: passed on to the caller.
         Header(unsafe { get(v, offset) }).data()
@@ -51,15 +51,29 @@ impl<S: Strategy> Cx<S> {
         }
     }
 
-    /// Makes `v`, a new string or bytevector, immutable, as a literal is.
+    /// Makes `v`, a new string, vector or bytevector, immutable, as a
+    /// literal is.
     pub(crate) fn make_immutable(&mut self, v: Value) {
         let t = if v.tag() == Tag::String {
             TypeCode::String
         } else {
-            TypeCode::Bytevector
+            // SAFETY: the caller passes a live value.
+            unsafe { self.header_type(v) }.expect("a vector or bytevector")
         };
-        // SAFETY: the caller passes a live string or bytevector.
+        debug_assert!(matches!(
+            t,
+            TypeCode::String | TypeCode::Vector | TypeCode::Bytevector
+        ));
+        // SAFETY: the caller passes a live string, vector or bytevector.
         unsafe { self.set_header_flag(v, t, data::IMMUTABLE, true) };
+    }
+
+    /// An error saying `name` cannot change the immutable vector `v`.
+    pub(crate) fn immutable_vector(&self, name: &str, v: Value) -> Error {
+        Error::scheme(format!(
+            "{name}: the vector {} is immutable",
+            self.written(v)
+        ))
     }
 
     /// A bytevector's bytes, to change.
@@ -117,6 +131,23 @@ fn mutable_string<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value
             "{name}: the string {} is immutable",
             cx.written(v)
         )));
+    }
+    Ok(v)
+}
+
+/// A vector `name` changes: an error if it is not a vector, or is immutable.
+pub(crate) fn mutable_vector<S: Strategy>(
+    cx: &Cx<S>,
+    name: &str,
+    v: Value,
+) -> Result<Value, Error> {
+    // SAFETY: a valid value.
+    if unsafe { cx.header_type(v) } != Some(TypeCode::Vector) {
+        return Err(wrong_type(cx, name, "a vector", v));
+    }
+    // SAFETY: a live vector.
+    if unsafe { cx.header_flags(v, TypeCode::Vector) } & data::IMMUTABLE != 0 {
+        return Err(cx.immutable_vector(name, v));
     }
     Ok(v)
 }
