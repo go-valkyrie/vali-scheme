@@ -2,7 +2,7 @@
 
 The instruction set the VM interprets and the JIT compiles from (ADR 0005). This is a specification, not an ADR: it changes with the format version, and there is no compatibility promise between versions. Any mismatch means rebuilding from source or from the distribution artifact. The `vali-bytecode` crate implements it.
 
-**Format version:** 1.
+**Format version:** 4.
 
 ## Modules and functions
 
@@ -144,6 +144,23 @@ Conditional branches continue to the next instruction when their condition holds
 |---|---|---|---|
 | 44 | `set-free closure, i, src` | `a b c` | Free variable `i` of the closure in `closure` now holds `src`. `letrec` uses it to close the references between closures that refer to each other. The VM checks `i` against the closure's free-variable count |
 
+### Ownership, placed at load time
+
+| Opcode | Mnemonic | Layout | Meaning |
+|---|---|---|---|
+| 48 | `move dst, src` | `a b` | `dst ← src`, and `src` is cleared: the reference moves, uncounted, and what `dst` held is counted out |
+| 49 | `drop r` | `a` | Counts the value in `r` out, and clears `r` |
+
+No module may contain these: the validator refuses them. An isolate that counts precisely (ADR 0003) places them itself as it loads a module, from the slots' liveness (`vali_bytecode::ownership`), and runs that code instead; the module it was given is unchanged, and so is the code every other strategy runs. One misplaced `drop` would free an object still in use, so untrusted code has no way to say one.
+
+The rewritten code keeps a contract the VM relies on, so that a returning frame counts out only its closure. Writing a slot still counts the value it held out. Slot 0 is the VM's throughout:
+
+- at `call base, argc` and `call-direct base, argc`, no slot past the arguments holds a reference: the callee's frame takes those slots over. The VM counts out the three header slots itself;
+- at `tail-call` and `tail-call-direct`, no slot holds a reference but the procedure and arguments, and slots 1 to `argc`, which they move into, counting out what those held;
+- at `return r`, no slot holds a reference but `r`, whose value moves out.
+
+So the pass drops each slot that may still hold a reference right before an instruction that needs it clear, and turns a `mov` whose source dies into a `move`.
+
 Everything else is a call to a procedure: primitives are procedures implemented in Rust, bound to variables like any other.
 
 ## Validation
@@ -151,12 +168,13 @@ Everything else is a call to a procedure: primitives are procedures implemented 
 The loader rejects a module unless:
 
 - its body exists, and takes no arguments and no free variables;
-- every function has at most 256 slots, and enough for slot 0 and its parameters;
+- every function has at most 65,535 slots, and enough for slot 0 and its parameters;
 - every function's code decodes, and its last instruction is `jump`, `tail-call`, `tail-call-direct` or `return`, so execution cannot run off the end;
 - every slot operand lies inside the frame, including the header, procedure and arguments of every `call` and `call-direct`;
 - every constant, variable, function and free-variable index exists, and every `closure` captures as many slots as its function has free variables;
 - every direct call's function has no free variables and takes the call's argument count;
 - no `set-variable` assigns an imported variable, and no name is exported twice;
+- no instruction is a `move` or a `drop`;
 - every branch lands on the start of an instruction.
 
 A module that passes can be run without further checks in the dispatch loop (ADR 0005 #7).

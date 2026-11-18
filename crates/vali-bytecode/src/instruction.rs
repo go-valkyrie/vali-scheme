@@ -27,7 +27,11 @@ macro_rules! opcodes {
             /// Every opcode, in numeric order.
             pub const ALL: &'static [Opcode] = &[$(Opcode::$name),*];
 
-            /// The opcode numbered `n`, if there is one.
+            /// The opcode numbered `n`, if there is one. The VM calls it on
+            /// every instruction it dispatches: past a few dozen opcodes,
+            /// Rust stops inlining it into another crate unasked, and the
+            /// call costs the dispatch loop about a tenth.
+            #[inline]
             pub fn from_u8(n: u8) -> Option<Opcode> {
                 match n {
                     $($value => Some(Opcode::$name),)*
@@ -93,6 +97,17 @@ opcodes! {
     Wide = 45, "wide";
     CallDirect = 46, "call-direct";
     TailCallDirect = 47, "tail-call-direct";
+    Move = 48, "move";
+    Drop = 49, "drop";
+}
+
+impl Opcode {
+    /// Whether only the runtime may emit the opcode: the ownership
+    /// operations it inserts as a module loads under precise counting
+    /// ([`crate::ownership`]). The validator refuses them in a module.
+    pub fn is_internal(self) -> bool {
+        matches!(self, Opcode::Move | Opcode::Drop)
+    }
 }
 
 /// A frame slot (a register). Slots up to 255 fit an instruction's 8-bit
@@ -230,6 +245,12 @@ pub enum Instruction {
         index: u16,
         src: Slot,
     },
+    /// `dst ← src`, moving the reference: under precise counting nothing is
+    /// counted, and `src` is cleared. Only the runtime emits it.
+    Move { dst: Slot, src: Slot },
+    /// Counts the value in `slot` out and clears the slot. Only the runtime
+    /// emits it.
+    Drop { slot: Slot },
 }
 
 /// The range of a [`Instruction::Jump`] offset.
@@ -366,6 +387,8 @@ impl Instruction {
             I::VectorSet { .. } => Opcode::VectorSet,
             I::VectorLength { .. } => Opcode::VectorLength,
             I::SetFree { .. } => Opcode::SetFree,
+            I::Move { .. } => Opcode::Move,
+            I::Drop { .. } => Opcode::Drop,
         }
     }
 
@@ -408,6 +431,7 @@ impl Instruction {
         let op = self.opcode();
         match *self {
             I::Mov { dst, src }
+            | I::Move { dst, src }
             | I::MakeBox { dst, src }
             | I::Unbox { dst, src }
             | I::Not { dst, src }
@@ -486,6 +510,7 @@ impl Instruction {
                 code.push(function);
             }
             I::Return { src } => abc(code, op, src, 0, 0),
+            I::Drop { slot } => abc(code, op, slot, 0, 0),
             I::Add { dst, a, b }
             | I::Sub { dst, a, b }
             | I::Mul { dst, a, b }
@@ -549,6 +574,8 @@ impl Instruction {
         let branch = || next(1).map(|w| w as i32);
         let instruction = match op {
             Opcode::Mov => I::Mov { dst: a, src: b },
+            Opcode::Move => I::Move { dst: a, src: b },
+            Opcode::Drop => I::Drop { slot: a },
             Opcode::LoadConstant => I::LoadConstant {
                 dst: a,
                 constant: d,
@@ -728,6 +755,7 @@ impl fmt::Display for Instruction {
         let m = self.opcode().mnemonic();
         match self {
             I::Mov { dst, src }
+            | I::Move { dst, src }
             | I::MakeBox { dst, src }
             | I::Unbox { dst, src }
             | I::Not { dst, src }
@@ -781,6 +809,7 @@ impl fmt::Display for Instruction {
                 function,
             } => write!(f, "{m} r{a}, {argc}, f{function}"),
             I::Return { src } => write!(f, "{m} r{src}"),
+            I::Drop { slot } => write!(f, "{m} r{slot}"),
             I::Add { dst, a, b }
             | I::Sub { dst, a, b }
             | I::Mul { dst, a, b }

@@ -160,6 +160,15 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             let slot = |s: u16| usize::from(s) < slots;
             let span = |first: u16, count: usize| usize::from(first) + count < slots;
             let ok = match instruction {
+                // One wrong ownership operation frees an object still in
+                // use, so only the runtime's own pass may place them.
+                Instruction::Move { .. } | Instruction::Drop { .. } => {
+                    return fail(format!(
+                        "{} is inserted by the runtime as a module loads, \
+                         and a loaded module cannot contain it",
+                        instruction.opcode().mnemonic()
+                    ));
+                }
                 Instruction::Mov { dst, src }
                 | Instruction::MakeBox { dst, src }
                 | Instruction::Unbox { dst, src }
@@ -331,6 +340,7 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
 fn written_slot(instruction: &Instruction) -> Option<u16> {
     match *instruction {
         Instruction::Mov { dst, .. }
+        | Instruction::Move { dst, .. }
         | Instruction::MakeBox { dst, .. }
         | Instruction::Unbox { dst, .. }
         | Instruction::Not { dst, .. }
@@ -377,6 +387,7 @@ fn written_slot(instruction: &Instruction) -> Option<u16> {
         | Instruction::SetCar { .. }
         | Instruction::SetCdr { .. }
         | Instruction::VectorSet { .. }
-        | Instruction::SetFree { .. } => None,
+        | Instruction::SetFree { .. }
+        | Instruction::Drop { .. } => None,
     }
 }

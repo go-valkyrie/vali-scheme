@@ -9,6 +9,7 @@ mod handles;
 mod isolate;
 mod linking;
 mod objects;
+mod ownership;
 mod primitives;
 mod printer;
 mod read;

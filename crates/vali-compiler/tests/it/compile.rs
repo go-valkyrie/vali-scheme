@@ -2775,6 +2775,16 @@ fn frames_leave_nothing_counted() {
         "(with-exception-handler (lambda (e) (ring)) (lambda () (guard (e ((string? e) 'no)) (raise-continuable (ring)))))",
         "(guard (e (#t e)) (with-exception-handler (lambda (e) (ring)) (lambda () (car 5))))",
         "(parameterize ((current-output-port (current-output-port))) (ring))",
+        // What precise counting's ownership pass places: results written
+        // over their own operands (flonums, bignums, lists), a value used
+        // on one branch only, a call's unused result, a captured and
+        // assigned parameter, and a `%catch` whose thunk takes no slots.
+        "(let loop ((i 0) (a 1.5) (b (expt 10 30)) (l '())) (if (< i 50) (loop (+ i 1) (+ a 1.5) (* b 3) (cons (ring) l)) (list a b l)))",
+        "(let ((r (ring)) (f (lambda (x) x))) (if (pair? (f 1)) (car r) (cadr r)))",
+        "(begin (ring) (list (ring)) (ring))",
+        "(let ((g (lambda (x) (set! x (ring)) (lambda () x)))) ((g (ring))))",
+        "(%catch (lambda () 1) (lambda (c) (ring)))",
+        "(%catch (lambda () (raise (ring))) (lambda (c) c))",
     ];
     for body in repeated {
         // Each must run, or it would check nothing.

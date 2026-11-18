@@ -11,7 +11,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use vali_bytecode::{Arity, Module};
+use vali_bytecode::{Arity, Function, Module};
 
 use crate::cx::Cx;
 use crate::debug::{DebugFunction, DebugLayout, DebugStr};
@@ -141,7 +141,11 @@ impl<S: Strategy> Code<S> {
 
 /// A validated module, with a descriptor for each of its functions.
 pub(crate) struct Loaded<S: Strategy> {
+    /// The module as it was loaded.
     pub(crate) module: Module,
+    /// Under precise counting, its functions as the ownership pass rewrote
+    /// them, which are what runs (`vali_bytecode::ownership`).
+    owned: Option<Box<[Function]>>,
     pub(crate) functions: Box<[Code<S>]>,
     /// The module's source names, as the debugger extensions read them;
     /// they point into `module`. Only debuggers read it, through the
@@ -151,8 +155,26 @@ pub(crate) struct Loaded<S: Strategy> {
 }
 
 impl<S: Strategy> Loaded<S> {
-    /// Builds the descriptors for `module`, which must be valid.
-    pub(crate) fn new(module: Module) -> Arc<Loaded<S>> {
+    /// Function `index` as it runs: rewritten under precise counting.
+    pub(crate) fn function(&self, index: usize) -> Option<&Function> {
+        match &self.owned {
+            Some(owned) => owned.get(index),
+            None => self.module.functions.get(index),
+        }
+    }
+
+    /// Builds the descriptors for `module`, which must be valid, placing
+    /// ownership operations in its code under precise counting.
+    pub(crate) fn new(module: Module) -> Result<Arc<Loaded<S>>, String> {
+        let owned: Option<Box<[Function]>> = if S::PRECISE {
+            Some(
+                vali_bytecode::ownership::insert(&module)
+                    .map_err(|e| format!("placing ownership operations: {e}"))?
+                    .into(),
+            )
+        } else {
+            None
+        };
         let names: Vec<Box<str>> = module
             .functions
             .iter()
@@ -173,16 +195,17 @@ impl<S: Strategy> Loaded<S> {
         };
         let debug_sources: Box<[DebugStr]> =
             module.sources.iter().map(|s| DebugStr::of(s)).collect();
-        Arc::new_cyclic(|this| {
+        Ok(Arc::new_cyclic(|this| {
             let this = this.as_ptr();
-            let functions = module
-                .functions
+            let functions = owned
+                .as_deref()
+                .unwrap_or(&module.functions)
                 .iter()
                 .zip(names)
                 .enumerate()
                 .map(|(i, (f, name))| Code {
-                    // The name, positions and sources stay where they are as
-                    // their owners move into the `Loaded`.
+                    // The name, code, positions and sources stay where they
+                    // are as their owners move into the `Loaded`.
                     debug: DebugFunction {
                         version: crate::debug::DEBUG_VERSION,
                         slots: u32::from(f.slots),
@@ -209,10 +232,11 @@ impl<S: Strategy> Loaded<S> {
                 .collect();
             Loaded {
                 module,
+                owned,
                 functions,
                 debug_sources,
             }
-        })
+        }))
     }
 
     /// The strategy's layout, for the debugger extensions.

@@ -253,8 +253,11 @@ fn frames_of<S: Strategy>(code: &Code<S>, pc: usize) -> Vec<crate::handle::Frame
     };
     // SAFETY: a function's descriptor points to the module that owns it,
     // which outlives it.
-    let module = unsafe { &(*module).module };
-    let Some(function) = module.functions.get(index as usize) else {
+    let loaded = unsafe { &*module };
+    let module = &loaded.module;
+    // The code that runs: under precise counting, `pc` is the rewritten
+    // code's.
+    let Some(function) = loaded.function(index as usize) else {
         return vec![frame(code.name(), None)];
     };
     let located = |source: u16, line: u32, column: u32| {
@@ -368,7 +371,9 @@ impl<S: Strategy> Cx<S> {
         // Modules link to the primitives as they load, so the first load
         // installs them.
         self.install_primitives()?;
-        let loaded = Loaded::<S>::new(module);
+        let name = module.name.clone();
+        let loaded = Loaded::<S>::new(module)
+            .map_err(|e| Error::scheme(format!("invalid bytecode in {name}: {e}")))?;
         let mut constants = Vec::with_capacity(loaded.module.constants.len());
         for constant in &loaded.module.constants {
             let value = self.constant(constant)?;
@@ -874,6 +879,40 @@ impl<S: Strategy> Cx<S> {
         }
     }
 
+    /// Moves the value in slot `from` to slot `to` of the frame at `fp`,
+    /// clearing `from`. Under precise counting the reference moves with it,
+    /// and the value `to` held is counted out.
+    ///
+    /// # Safety
+    ///
+    /// As `store`, for both slots, which must differ.
+    #[inline(always)]
+    unsafe fn shift(&mut self, fp: *mut u64, from: usize, to: usize) {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            let v = Self::take(fp, from);
+            let old = slot(fp, to);
+            set(fp, to, v);
+            S::release(self.heap_mut(), old);
+        }
+    }
+
+    /// Takes the value in slot `i` of the frame at `fp`, clearing the slot:
+    /// under precise counting, its reference is the caller's now.
+    ///
+    /// # Safety
+    ///
+    /// Slot `i` must be inside the stack.
+    #[inline(always)]
+    unsafe fn take(fp: *mut u64, i: usize) -> Value {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            let v = slot(fp, i);
+            set(fp, i, Value::UNSPECIFIED);
+            v
+        }
+    }
+
     /// Under precise counting, counts slots `from` to `to` (exclusive) of
     /// the frame at `fp` out and clears them: they are dead. Every stack
     /// word outside a live frame is cleared this way, so a store over it
@@ -1202,21 +1241,29 @@ impl<S: Strategy> Cx<S> {
 
     /// What returning `value` to the continuation `k` comes to, once the
     /// live stack is dropped: copying its first frame in, or returning to
-    /// the host. Under precise counting, `k` and `value` come counted in,
-    /// and leave counted out.
+    /// the host. Under precise counting, `k` and `value` come counted in.
+    /// `k` leaves counted out, and so does `value`, unless it goes on to a
+    /// frame in [`Next::Underflow`], which takes its reference over.
     fn resume_into(&mut self, k: Value, value: Value) -> Next {
         let target = self.reinstate(k);
         if S::PRECISE {
             S::release(self.heap_mut(), k);
-            S::release(self.heap_mut(), value);
         }
         match target {
-            None => Next::Return(value),
+            None => {
+                if S::PRECISE {
+                    S::release(self.heap_mut(), value);
+                }
+                Next::Return(value)
+            }
             Some((caller, position)) => {
                 if position & CATCH != 0 {
                     self.catch_returned();
                 }
                 if position & RAISED != 0 {
+                    if S::PRECISE {
+                        S::release(self.heap_mut(), value);
+                    }
                     return Next::Raise(self.handler_returned());
                 }
                 Next::Underflow {
@@ -1339,12 +1386,15 @@ impl<S: Strategy> Cx<S> {
                     list = self.cons_raw(slot(fp, i), list)?;
                 }
                 self.store(fp, fixed + 1, list);
-                // The rest of the arguments are in the list now; those
-                // past the frame's slots are cleared, the others below.
-                self.release_slots(fp, slots.max(fixed + 2), argc + 1);
+                // The rest of the arguments are in the list now.
+                self.release_slots(fp, fixed + 2, argc + 1);
             }
+            // The locals: words of the caller's that hold no reference
+            // (the ownership pass sees to that under precise counting), or
+            // words outside every frame, which are cleared.
             for i in arity.parameter_slots() + 1..slots {
-                self.store(fp, i, Value::UNSPECIFIED);
+                debug_assert!(!S::PRECISE || !slot(fp, i).is_pointer());
+                set(fp, i, Value::UNSPECIFIED);
             }
         }
         self.fuel_used += 1;
@@ -1585,8 +1635,19 @@ impl<S: Strategy> Cx<S> {
                         // outermost frame now, and resume it. Failing to
                         // find room ends the run: the stack is empty.
                         let base = position_base(position);
-                        (fp, limit) = self.materialize(link, caller, base)?;
-                        self.store(fp, base + 3, value);
+                        (fp, limit) = match self.materialize(link, caller, base) {
+                            Ok(ends) => ends,
+                            Err(e) => {
+                                if S::PRECISE {
+                                    S::release(self.heap_mut(), value);
+                                }
+                                return Err(e);
+                            }
+                        };
+                        // Under precise counting the value comes with a
+                        // reference of its own, into a slot the copy left
+                        // clear.
+                        set(fp, base + 3, value);
                         clear_header(fp, base);
                         pc = position_resume(position) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
@@ -1720,6 +1781,12 @@ impl<S: Strategy> Cx<S> {
                             let roots = self.stack_roots(fp);
                             self.epoch(&roots);
                         }
+                        if S::PRECISE && resume != ENTRY {
+                            // The callee's header goes in these slots of
+                            // the caller's, which may hold dead values; and
+                            // whatever the callee is, they hold none after.
+                            self.release_slots(fp, base, base + 3);
+                        }
                         let procedure = slot(fp, base + 3);
                         let callee = if direct {
                             // The validator checked the function's arity.
@@ -1747,6 +1814,9 @@ impl<S: Strategy> Cx<S> {
                                     record: Value::FALSE,
                                 });
                                 self.store(fp, base + 3, slot(fp, base + 4));
+                                // The arguments are dead: the thunk was
+                                // copied, and the catch holds the handler.
+                                self.release_slots(fp, base + 4, base + 4 + argc);
                                 next = Next::Call {
                                     direct: false,
                                     base,
@@ -1816,6 +1886,8 @@ impl<S: Strategy> Cx<S> {
                                     for (i, &arg) in args.iter().enumerate() {
                                         self.store(fp, base + 4 + i, arg);
                                     }
+                                    // Arguments it does not pass on are dead.
+                                    self.release_slots(fp, base + 4 + args.len(), base + 4 + argc);
                                     if S::PRECISE && resume == ENTRY {
                                         frame_slots = frame_slots.max(args.len() + 1);
                                     }
@@ -1873,14 +1945,6 @@ impl<S: Strategy> Cx<S> {
                                     *callee_fp.add(1) = link.host_return;
                                     *callee_fp.add(3) = link.host_cfa;
                                 } else {
-                                    if S::PRECISE {
-                                        // The header goes in the caller's
-                                        // slots, which may hold values; or,
-                                        // in a chained segment, those slots
-                                        // are cleared without releasing when
-                                        // the callee returns.
-                                        self.release_slots(fp, base, base + 3);
-                                    }
                                     *callee_fp = fp as u64;
                                     *callee_fp.add(1) = current_stub;
                                 }
@@ -1958,6 +2022,7 @@ impl<S: Strategy> Cx<S> {
                                     record,
                                 });
                                 self.store(fp, 0, slot(fp, 1));
+                                self.release_slots(fp, 1, 1 + argc);
                                 *fp.add(2) = position | CATCH;
                                 next = Next::TailCall {
                                     argc: 0,
@@ -2024,6 +2089,8 @@ impl<S: Strategy> Cx<S> {
                                     for (i, &arg) in args.iter().enumerate() {
                                         self.store(fp, 1 + i, arg);
                                     }
+                                    // Arguments it does not pass on are dead.
+                                    self.release_slots(fp, 1 + args.len(), 1 + argc);
                                     if S::PRECISE {
                                         frame_slots = frame_slots.max(args.len() + 1);
                                     }
@@ -2032,6 +2099,12 @@ impl<S: Strategy> Cx<S> {
                                         direct: false,
                                     };
                                     continue;
+                                }
+                                if S::PRECISE {
+                                    // The arguments are dead, and the result
+                                    // returns with a reference of its own.
+                                    self.release_slots(fp, 1, 1 + argc);
+                                    S::retain(self.heap_mut(), result);
                                 }
                                 next = Next::Return(result);
                                 continue;
@@ -2103,10 +2176,21 @@ impl<S: Strategy> Cx<S> {
                     }
                     Next::Return(value) => {
                         let position = *fp.add(2);
-                        // The returning frame is dead: its value is counted
-                        // out with it, and back in where it is stored.
-                        self.release_slots(fp, 0, frame_slots);
+                        if S::PRECISE {
+                            // The returning frame's code dropped everything
+                            // but its closure, and `value` comes with a
+                            // reference of its own.
+                            debug_assert!(
+                                (1..frame_slots).all(|i| !slot(fp, i).is_pointer()),
+                                "a returning frame holds a reference"
+                            );
+                            let closure = Self::take(fp, 0);
+                            S::release(self.heap_mut(), closure);
+                        }
                         if position == ENTRY {
+                            if S::PRECISE {
+                                S::release(self.heap_mut(), value);
+                            }
                             return Ok(value);
                         }
                         let caller = *fp as *mut u64;
@@ -2116,6 +2200,9 @@ impl<S: Strategy> Cx<S> {
                                 self.catch_returned();
                             }
                             if position & RAISED != 0 {
+                                if S::PRECISE {
+                                    S::release(self.heap_mut(), value);
+                                }
                                 next = Next::Raise(self.handler_returned());
                                 continue;
                             }
@@ -2132,7 +2219,11 @@ impl<S: Strategy> Cx<S> {
                             }
                         }
                         let base = position_base(position);
-                        self.store(caller, base + 3, value);
+                        // The value's reference moves into the slot, where
+                        // the callee's closure was, or which its move to
+                        // another segment cleared.
+                        debug_assert!(!S::PRECISE || !slot(caller, base + 3).is_pointer());
+                        set(caller, base + 3, value);
                         clear_header(caller, base);
                         if position & BOUNDARY != 0 {
                             limit = self.pop_segment();
@@ -2212,13 +2303,27 @@ impl<S: Strategy> Cx<S> {
                             self.store(fp, a, slot(fp, b));
                             pc += 1;
                         }
+                        Opcode::Move => {
+                            // Only the ownership pass places it, under
+                            // precise counting: the reference moves.
+                            debug_assert!(S::PRECISE && a != b);
+                            self.shift(fp, b, a);
+                            pc += 1;
+                        }
+                        Opcode::Drop => {
+                            debug_assert!(S::PRECISE);
+                            let v = Self::take(fp, a);
+                            S::release(self.heap_mut(), v);
+                            pc += 1;
+                        }
                         Opcode::LoadConstant => {
                             self.store(fp, a, *constants.add(usize::from(field_d(word))));
                             pc += 1;
                         }
                         Opcode::LoadInt => {
                             let n = field_d(word) as i16;
-                            self.store(fp, a, Value::fixnum(i64::from(n)).expect("16 bits fit"));
+                            let v = Value::fixnum(i64::from(n)).expect("16 bits fit");
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::GetVariable => {
@@ -2273,11 +2378,8 @@ impl<S: Strategy> Cx<S> {
                         Opcode::Wide => wide_arm!($mode, a, b, c),
                         Opcode::Free => {
                             let closure = slot(fp, 0);
-                            self.store(
-                                fp,
-                                a,
-                                Value::from_raw(get(closure, Self::LAYOUT.closure_free(b))),
-                            );
+                            let v = Value::from_raw(get(closure, Self::LAYOUT.closure_free(b)));
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::MakeBox => {
@@ -2295,11 +2397,8 @@ impl<S: Strategy> Cx<S> {
                             if !self.is_other(cell, TypeCode::Box) {
                                 fail!(type_error("unbox", "a box", cell));
                             }
-                            self.store(
-                                fp,
-                                a,
-                                Value::from_raw(get(cell, Self::LAYOUT.field(TypeCode::Box, 0))),
-                            );
+                            let v = Value::from_raw(get(cell, Self::LAYOUT.field(TypeCode::Box, 0)));
+                            self.store(fp, a, v);
                             pc += 1;
                         }
                         Opcode::SetBox => {
@@ -2347,8 +2446,19 @@ impl<S: Strategy> Cx<S> {
                             };
                         }
                         Opcode::TailCall => {
-                            for i in 0..=b {
-                                self.store(fp, i, slot(fp, a + i));
+                            if S::PRECISE {
+                                // The procedure and arguments move down,
+                                // counting out the old closure and whatever
+                                // else they move over.
+                                if a != 0 {
+                                    for i in 0..=b {
+                                        self.shift(fp, a + i, i);
+                                    }
+                                }
+                            } else {
+                                for i in 0..=b {
+                                    set(fp, i, slot(fp, a + i));
+                                }
                             }
                             break Next::TailCall { argc: b, direct: false };
                         }
@@ -2372,13 +2482,39 @@ impl<S: Strategy> Cx<S> {
                             if closure == Value::FALSE {
                                 closure = attempt!(self.make_static(current_module, function));
                             }
-                            for i in 1..=b {
-                                self.store(fp, i, slot(fp, a + i));
+                            if S::PRECISE {
+                                if a != 0 {
+                                    for i in 1..=b {
+                                        self.shift(fp, a + i, i);
+                                    }
+                                }
+                                let old = slot(fp, 0);
+                                S::retain(self.heap_mut(), closure);
+                                set(fp, 0, closure);
+                                S::release(self.heap_mut(), old);
+                            } else {
+                                for i in 1..=b {
+                                    set(fp, i, slot(fp, a + i));
+                                }
+                                set(fp, 0, closure);
                             }
-                            self.store(fp, 0, closure);
                             break Next::TailCall { argc: b, direct: true };
                         }
-                        Opcode::Return => break Next::Return(slot(fp, a)),
+                        Opcode::Return => {
+                            let value = slot(fp, a);
+                            if S::PRECISE {
+                                // The value leaves with a reference of its
+                                // own: moved out of its slot, or counted in
+                                // again from slot 0, which the closure keeps
+                                // until the frame goes.
+                                if a == 0 {
+                                    S::retain(self.heap_mut(), value);
+                                } else {
+                                    set(fp, a, Value::UNSPECIFIED);
+                                }
+                            }
+                            break Next::Return(value);
+                        }
                         Opcode::Add => {
                             let v = arith!(Arith::Add, slot(fp, b), slot(fp, c), i64::checked_add);
                             self.store(fp, a, v);

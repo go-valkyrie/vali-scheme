@@ -145,8 +145,12 @@ fn examples() -> Vec<I> {
             index: 200,
             src: 3,
         },
+        I::Move { dst: 1, src: 2 },
+        I::Drop { slot: 3 },
         // Wide: a field above 255 needs the `wide` prefix.
         I::Mov { dst: 300, src: 2 },
+        I::Move { dst: 2, src: 300 },
+        I::Drop { slot: 65_000 },
         I::LoadConstant {
             dst: 256,
             constant: 7,
@@ -546,6 +550,22 @@ fn the_validator_rejects_each_write_to_slot_0() {
         let message = error.to_string();
         assert!(message.contains("slot 0"), "{write:?}: {message}");
     }
+}
+
+/// Only the runtime places ownership operations: a module may not.
+#[test]
+fn the_validator_rejects_ownership_operations() {
+    for instruction in [I::Move { dst: 1, src: 2 }, I::Drop { slot: 1 }] {
+        assert!(instruction.opcode().is_internal());
+        let module = module_with(3, |_, f| {
+            f.emit(I::LoadInt { dst: 2, value: 1 })
+                .emit(instruction.clone())
+                .emit(I::Return { src: 1 });
+        });
+        let message = rejected(&module);
+        assert!(message.contains("inserted by the runtime"), "{message}");
+    }
+    assert!(!Opcode::Mov.is_internal());
 }
 
 #[test]

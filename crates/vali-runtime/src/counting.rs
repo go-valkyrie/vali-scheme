@@ -9,11 +9,14 @@
 //! out again.
 //!
 //! Precise counting also counts every reference from a frame slot: the VM
-//! counts each slot store, and counts a frame's slots out as it returns.
-//! This first version is naive, with no ownership inference, its worst
-//! case. An object whose count reaches zero still waits in the zero-count
-//! table until the next epoch, which needs no stack scan; so a Rust
-//! procedure can hold a value whose count drops while it runs.
+//! counts each slot store, and the code it runs moves references between
+//! slots and drops dead ones before calls, tail calls and returns, as the
+//! ownership pass placed them when it loaded (`vali_bytecode::ownership`),
+//! so a returning frame counts out only its closure. There is no ownership
+//! inference yet: every slot holds a reference of its own. An object whose
+//! count reaches zero still waits in the zero-count table until the next
+//! epoch, which needs no stack scan; so a Rust procedure can hold a value
+//! whose count drops while it runs.
 //!
 //! Cycles of garbage are found by trial deletion (`cycles`), inside an
 //! epoch while every reference is counted, once the isolate has allocated

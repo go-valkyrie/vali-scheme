@@ -85,9 +85,10 @@ pub trait References: Allocate {
     const COUNTS: bool = false;
 
     /// Whether the strategy counts references from frame slots too: the VM
-    /// counts each slot store in and the value it replaces out, counts a
-    /// frame's slots out and clears them as it leaves, and an epoch scans
-    /// no stack. Implies `COUNTS`.
+    /// counts each slot store in and the value it replaces out, the
+    /// ownership pass places `move` and `drop` in each function as it loads
+    /// (`vali_bytecode::ownership`), so a returning frame counts out only
+    /// its closure, and an epoch scans no stack. Implies `COUNTS`.
     const PRECISE: bool = false;
 
     /// Whether an epoch is due at the next safepoint.

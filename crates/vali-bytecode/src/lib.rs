@@ -6,6 +6,8 @@
 //! - [`FunctionBuilder`] and [`ModuleBuilder`]: writing bytecode in Rust,
 //!   with labels for branches.
 //! - [`validate`]: the checks that make any loaded module safe to run.
+//! - [`ownership`]: the pass that places `move` and `drop` in a module's
+//!   code as an isolate that counts precisely loads it.
 //! - [`disassemble`]: a readable listing.
 //!
 //! The format is private and versioned ([`FORMAT_VERSION`]): it is a cache
@@ -15,6 +17,7 @@ mod builder;
 mod convert;
 mod instruction;
 mod module;
+pub mod ownership;
 mod validate;
 
 pub use builder::{BuildError, FunctionBuilder, Label, ModuleBuilder};
