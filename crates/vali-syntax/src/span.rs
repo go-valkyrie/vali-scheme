@@ -38,12 +38,33 @@ impl std::fmt::Display for Location {
     }
 }
 
-/// One source: its identity, its text, and where its lines start.
+/// One source: its identity, its text, where its lines start, and where
+/// its characters longer than one byte start.
 #[derive(Debug)]
 struct Source {
     identity: std::sync::Arc<str>,
     text: std::sync::Arc<str>,
     line_starts: Vec<u32>,
+    /// Each character longer than one byte: where it starts, and how many
+    /// bytes beyond one it and those before it take. Counting the
+    /// characters between two offsets is then two searches, however long
+    /// the line: one line of generated code can hold a whole program.
+    wide: Vec<(u32, u32)>,
+}
+
+impl Source {
+    /// How many characters there are from byte `from` to byte `to`: 0
+    /// unless both are character boundaries, in order.
+    fn chars(&self, from: u32, to: u32) -> u32 {
+        if self.text.get(from as usize..to as usize).is_none() {
+            return 0;
+        }
+        let extra = |at: u32| match self.wide.partition_point(|&(start, _)| start < at) {
+            0 => 0,
+            n => self.wide[n - 1].1,
+        };
+        (to - from) - (extra(to) - extra(from))
+    }
 }
 
 /// The sources read so far, which spans' `SourceId`s index from 1:
@@ -111,10 +132,20 @@ impl Sources {
                     .map(|(at, _)| u32::try_from(at + 1).expect("a source under 4 GiB")),
             )
             .collect();
+        let mut extra = 0;
+        let wide = text
+            .char_indices()
+            .filter(|(_, c)| c.len_utf8() > 1)
+            .map(|(at, c)| {
+                extra += c.len_utf8() as u32 - 1;
+                (u32::try_from(at).expect("a source under 4 GiB"), extra)
+            })
+            .collect();
         self.sources.push(std::sync::Arc::new(Source {
             identity: identity.into(),
             text: text.into(),
             line_starts,
+            wide,
         }));
         SourceId(u32::try_from(self.sources.len()).expect("fewer than 2^32 sources"))
     }
@@ -129,15 +160,11 @@ impl Sources {
             .get(usize::try_from(span.source.0).ok()?.checked_sub(1)?)?;
         let start = u32::from(span.range.start());
         let line = source.line_starts.partition_point(|&s| s <= start);
-        let line_start = source.line_starts[line - 1] as usize;
-        let column = source
-            .text
-            .get(line_start..start as usize)
-            .map_or(0, |s| s.chars().count());
+        let column = source.chars(source.line_starts[line - 1], start);
         Some((
             std::sync::Arc::clone(&source.identity),
             u32::try_from(line).unwrap_or(u32::MAX),
-            u32::try_from(column).unwrap_or(u32::MAX),
+            column,
         ))
     }
 
@@ -148,18 +175,13 @@ impl Sources {
             .get(usize::try_from(span.source.0).ok()?.checked_sub(1)?)?;
         let start = u32::from(span.range.start());
         let end = u32::from(span.range.end());
-        let text = &*source.text;
         let line = source.line_starts.partition_point(|&s| s <= start);
-        let line_start = source.line_starts[line - 1] as usize;
-        let chars = |from: usize, to: usize| {
-            u32::try_from(text.get(from..to).map_or(0, |s| s.chars().count())).unwrap_or(u32::MAX)
-        };
         Some(Location {
             source: std::sync::Arc::clone(&source.identity),
             line: u32::try_from(line).unwrap_or(u32::MAX),
-            column: chars(line_start, start as usize),
-            position: chars(0, start as usize) + 1,
-            span: chars(start as usize, end as usize),
+            column: source.chars(source.line_starts[line - 1], start),
+            position: source.chars(0, start) + 1,
+            span: source.chars(start, end),
         })
     }
 }
@@ -190,5 +212,31 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn columns_are_counted_without_walking_the_line() {
+        let mut text = String::from("(a\n  é b)\n");
+        for i in 0..200 {
+            text.push_str(["x ", "λ ", "日本 ", "😀"][i % 4]);
+        }
+        text.push_str("\nend");
+        let mut sources = Sources::new();
+        let id = sources.add("test", &text);
+        for (start, _) in text.char_indices() {
+            let span = Span {
+                source: id,
+                range: TextRange::new(TextSize::from(start as u32), TextSize::from(start as u32)),
+            };
+            let line_start = text[..start].rfind('\n').map_or(0, |n| n + 1);
+            let column = text[line_start..start].chars().count() as u32;
+            let (_, line, c) = sources.line_column(span).unwrap();
+            assert_eq!(c, column, "at {start}");
+            let located = sources.locate(span).unwrap();
+            assert_eq!((located.line, located.column), (line, column));
+            assert_eq!(located.position, text[..start].chars().count() as u32 + 1);
+        }
+        // Not a character boundary: inside `é`.
+        assert_eq!(sources.sources[0].chars(5, 6), 0);
     }
 }
