@@ -1,12 +1,14 @@
 ;;; requirement: Pair fields need no locks
 ;;; found-in: scheme-rs profiling
 ;;; kind: benchmark
-;;; expect: fail, needs the runtime and benchmarking (M1)
 
 ;; In scheme-rs, car and cdr each took a read lock and cloned: car alone was
 ;; 16% of queens(12). This n-queens search walks lists constantly. The
 ;; benchmark profiles it and records the share spent in car and cdr, which
 ;; should be plain loads (ADRs 0002 and 0008).
+
+;; For now the harness records its time under each memory strategy, in
+;; target/vali-benchmarks/; the share described above needs a profiler.
 
 (import (scheme base))
 

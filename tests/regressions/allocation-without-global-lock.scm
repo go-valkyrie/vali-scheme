@@ -1,12 +1,14 @@
 ;;; requirement: Allocation takes no global lock
 ;;; found-in: scheme-rs profiling
 ;;; kind: benchmark
-;;; expect: fail, needs the runtime and benchmarking (M1)
 
 ;; In scheme-rs, every allocation locked the global heap mutex and did a
 ;; hash-map lookup: 27 to 33% of allocation-heavy code. This benchmark
 ;; allocates many short-lived pairs, vectors and closures, and records the
 ;; time per allocation, which should involve no lock (ADR 0003).
+
+;; For now the harness records its time under each memory strategy, in
+;; target/vali-benchmarks/; the share described above needs a profiler.
 
 (import (scheme base))
 

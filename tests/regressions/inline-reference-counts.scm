@@ -1,12 +1,14 @@
 ;;; requirement: Reference counts are not out-of-line atomic calls
 ;;; found-in: scheme-rs profiling
 ;;; kind: benchmark
-;;; expect: fail, needs the runtime and benchmarking (M1)
 
 ;; In scheme-rs, each copy or drop of a heap value was a call, a match on its
 ;; tag and a locked atomic instruction: 19 to 32% of main-thread time. This
 ;; benchmark passes lists around constantly. It profiles memory management's
 ;; share of the time under each counting strategy (ADR 0003).
+
+;; For now the harness records its time under each memory strategy, in
+;; target/vali-benchmarks/; the share described above needs a profiler.
 
 (import (scheme base))
 

@@ -18,7 +18,12 @@
 //!   data. Compiling `(program (* 4 n))` must take at most twice as long
 //!   as linear growth would, eight times as long as `(program n)` for an
 //!   `n` large enough to time, where a quadratic pass would take sixteen.
-//! - `benchmark`: not run yet.
+//! - `benchmark`: run under every memory strategy, timing each run (not
+//!   compiling); it passes if every run ends. The times go to
+//!   `target/vali-benchmarks/<name>.json`, to track over time. What share of
+//!   the time goes where needs a sampling profiler, which comes later. One
+//!   marked `expect: fail` benchmarks something not built yet, and is not
+//!   run.
 
 mod header;
 
@@ -110,6 +115,11 @@ impl Backend for Evaluate {
                 return Outcome::Unsupported(format!("no host fixture named {other}"));
             }
             (Kind::Performance, _) => return performance(file, &host),
+            // Running one whose subject isn't built yet would time nothing.
+            (Kind::Benchmark, _) if header.expect_fail.is_some() => {
+                return Outcome::Unsupported("a benchmark of something not built yet".to_owned());
+            }
+            (Kind::Benchmark, _) => return benchmark(file, &host),
             (kind, _) => {
                 return Outcome::Unsupported(format!("cannot run {kind:?} tests yet"));
             }
@@ -118,6 +128,73 @@ impl Backend for Evaluate {
             Ok(_) => Outcome::Passed,
             Err(e) => Outcome::Failed(e),
         }
+    }
+}
+
+/// Compiles `file`, then runs it in a fresh isolate under strategy `S`,
+/// returning how long running took.
+fn timed<S: vali_runtime::Strategy>(file: &TestFile, host: &TestHost) -> Result<Duration, String> {
+    let identity = vali_compiler::Identity::new(&file.name);
+    let program = vali_compiler::compile_program(&file.source, &identity, host)
+        .map_err(|e| format!("compiling: {e}"))?;
+    let mut cx = vali_runtime::Cx::<S>::new(&Default::default());
+    let id = cx
+        .install_primitives()
+        .and_then(|()| vali_compiler::load_with(&mut cx, program, Arc::new(host.clone())))
+        .map_err(|e| e.to_string())?;
+    let start = Instant::now();
+    cx.run(id).map_err(|e| format!("under {}: {e}", S::NAME))?;
+    Ok(start.elapsed())
+}
+
+/// Runs a benchmark: see the module documentation.
+fn benchmark(file: &TestFile, host: &TestHost) -> Outcome {
+    use vali_runtime::{
+        DeferredHeadered, DeferredSideCounts, NoCollection, PreciseHeadered, PreciseSideCounts,
+        Strategy,
+    };
+    let runs = [
+        (NoCollection::NAME, timed::<NoCollection>(file, host)),
+        (
+            DeferredHeadered::NAME,
+            timed::<DeferredHeadered>(file, host),
+        ),
+        (
+            DeferredSideCounts::NAME,
+            timed::<DeferredSideCounts>(file, host),
+        ),
+        (PreciseHeadered::NAME, timed::<PreciseHeadered>(file, host)),
+        (
+            PreciseSideCounts::NAME,
+            timed::<PreciseSideCounts>(file, host),
+        ),
+    ];
+    let mut times = Vec::new();
+    for (strategy, run) in runs {
+        match run {
+            Ok(time) => times.push(format!(
+                "\"{strategy}\": {:.3}",
+                time.as_secs_f64() * 1000.0
+            )),
+            Err(e) => return Outcome::Failed(e),
+        }
+    }
+    let report = format!(
+        "{{\"benchmark\": \"{}\", \"build\": \"{}\", \"milliseconds\": {{{}}}}}\n",
+        file.name,
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        times.join(", ")
+    );
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/vali-benchmarks");
+    let written = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(dir.join(format!("{}.json", file.name)), report));
+    match written {
+        Ok(()) => Outcome::Passed,
+        Err(e) => Outcome::Failed(format!("writing the benchmark's times: {e}")),
     }
 }
 
