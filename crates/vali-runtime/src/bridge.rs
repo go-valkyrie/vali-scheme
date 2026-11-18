@@ -267,7 +267,12 @@ pub trait FromScheme: Sized {
 }
 
 /// A Rust type that converts to a Scheme value.
-pub trait IntoScheme {
+///
+/// # Safety
+///
+/// `into_scheme` must return a value valid in `cx`'s isolate: an
+/// immediate, or an object `cx` made during the call. The VM trusts it.
+pub unsafe trait IntoScheme {
     /// This as a Scheme value. An error is raised as a condition.
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error>;
 }
@@ -382,7 +387,8 @@ macro_rules! integers {
             }
         }
 
-        impl IntoScheme for $t {
+        // SAFETY: it returns an immediate, or a value `cx` makes in the call.
+        unsafe impl IntoScheme for $t {
             fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
                 match i64::try_from(self).ok().and_then(Value::fixnum) {
                     Some(v) => Ok(v),
@@ -407,7 +413,8 @@ impl FromScheme for f64 {
     }
 }
 
-impl IntoScheme for f64 {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for f64 {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.number_value(&Number::Real(self))
     }
@@ -422,7 +429,8 @@ impl FromScheme for Number {
     }
 }
 
-impl IntoScheme for Number {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for Number {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.number_value(&self)
     }
@@ -436,7 +444,8 @@ impl FromScheme for bool {
     }
 }
 
-impl IntoScheme for bool {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for bool {
     fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
         Ok(Value::boolean(self))
     }
@@ -450,7 +459,8 @@ impl FromScheme for char {
     }
 }
 
-impl IntoScheme for char {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for char {
     fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
         Ok(Value::character(self))
     }
@@ -465,13 +475,15 @@ impl FromScheme for String {
     }
 }
 
-impl IntoScheme for String {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for String {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.string_value(&self)
     }
 }
 
-impl IntoScheme for &str {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for &str {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.string_value(self)
     }
@@ -490,7 +502,8 @@ impl FromScheme for Bytes {
     }
 }
 
-impl IntoScheme for Bytes {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for Bytes {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.bytes_value(&self.0)
     }
@@ -505,13 +518,15 @@ impl FromScheme for Handle {
     }
 }
 
-impl IntoScheme for Handle {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for Handle {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.handle_value(&self)
     }
 }
 
-impl IntoScheme for () {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for () {
     fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
         Ok(Value::UNSPECIFIED)
     }
@@ -521,7 +536,8 @@ impl IntoScheme for () {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Eof;
 
-impl IntoScheme for Eof {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl IntoScheme for Eof {
     fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
         Ok(Value::EOF)
     }
@@ -543,7 +559,8 @@ impl<T: FromScheme> FromScheme for Vec<T> {
 }
 
 /// A list of the elements.
-impl<T: IntoScheme> IntoScheme for Vec<T> {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: IntoScheme> IntoScheme for Vec<T> {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         let items = self
             .into_iter()
@@ -574,7 +591,8 @@ impl<T: FromScheme> FromScheme for Vector<T> {
     }
 }
 
-impl<T: IntoScheme> IntoScheme for Vector<T> {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: IntoScheme> IntoScheme for Vector<T> {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         let items = self
             .0
@@ -587,7 +605,8 @@ impl<T: IntoScheme> IntoScheme for Vector<T> {
 }
 
 /// `None` is `#f`.
-impl<T: IntoScheme> IntoScheme for Option<T> {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: IntoScheme> IntoScheme for Option<T> {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         match self {
             Some(x) => x.into_scheme(cx),
@@ -597,7 +616,8 @@ impl<T: IntoScheme> IntoScheme for Option<T> {
 }
 
 /// An error is raised as a condition, its text the message.
-impl<T: IntoScheme, E: fmt::Display> IntoScheme for Result<T, E> {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: IntoScheme, E: fmt::Display> IntoScheme for Result<T, E> {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         match self {
             Ok(x) => x.into_scheme(cx),
@@ -607,7 +627,8 @@ impl<T: IntoScheme, E: fmt::Display> IntoScheme for Result<T, E> {
 }
 
 /// A Rust value moves into the isolate's table.
-impl<T: RustObject> IntoScheme for T {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: RustObject> IntoScheme for T {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.object_value(Box::new(self))
     }
@@ -657,7 +678,8 @@ impl<T: RustObject> FromScheme for Obj<T> {
     }
 }
 
-impl<T: RustObject> IntoScheme for Obj<T> {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: RustObject> IntoScheme for Obj<T> {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         cx.handle_value(&self.handle)
     }
@@ -1127,8 +1149,13 @@ impl NativeLibrary {
 
     /// Adds a function whose conversions are written out, as
     /// `#[vali::bridge]` writes them.
+    ///
+    /// # Safety
+    ///
+    /// `call` must return only values valid in the isolate it is called
+    /// with, as [`IntoScheme`] must, and keep none past the call.
     #[doc(hidden)]
-    pub fn raw(
+    pub unsafe fn raw(
         self,
         name: &str,
         arity: Arity,

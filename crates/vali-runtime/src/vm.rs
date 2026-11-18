@@ -178,7 +178,7 @@ unsafe fn clear_header(fp: *mut u64, base: usize) {
 #[inline(always)]
 pub(crate) unsafe fn slot(fp: *mut u64, i: usize) -> Value {
     // SAFETY: the caller guarantees slot `i` is inside the frame.
-    Value::from_raw(unsafe { *fp.sub(i + 1) })
+    unsafe { Value::from_raw(*fp.sub(i + 1)) }
 }
 
 #[inline(always)]
@@ -507,7 +507,12 @@ impl<S: Strategy> Cx<S> {
     /// with `args` in place of the Rust procedure's own result, which is
     /// then ignored (ADR 0004 #10). This is how a Rust procedure calls
     /// Scheme without running Scheme code inside itself.
-    pub fn tail_call(&mut self, procedure: Value, args: Vec<Value>) {
+    ///
+    /// # Safety
+    ///
+    /// `procedure` and `args` must be values valid in this isolate, as a
+    /// Rust procedure's own result must be.
+    pub unsafe fn tail_call(&mut self, procedure: Value, args: Vec<Value>) {
         self.tail_call = Some((procedure, args));
     }
 
@@ -576,7 +581,14 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// A procedure implemented in Rust, bound to the global `name`.
-    pub fn define_native(
+    ///
+    /// # Safety
+    ///
+    /// `f` must return only values valid in this isolate: its arguments,
+    /// immediates, or objects the isolate made during the call. It must not
+    /// keep a raw value past the call, since the isolate may free it. A
+    /// bridge (ADR 0016) needs none of this.
+    pub unsafe fn define_native(
         &mut self,
         name: &str,
         arity: Arity,

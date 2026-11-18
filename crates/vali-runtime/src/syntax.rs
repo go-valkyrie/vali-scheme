@@ -46,7 +46,7 @@ impl<S: Strategy> Cx<S> {
             return None;
         }
         // SAFETY: `v` is a live syntax object, whose field is its index.
-        let index = Value::from_raw(unsafe { get(v, Self::LAYOUT.field(TypeCode::Syntax, 0)) });
+        let index = unsafe { Value::from_raw(get(v, Self::LAYOUT.field(TypeCode::Syntax, 0))) };
         self.syntaxes.get(usize::try_from(index.as_fixnum()?).ok()?)
     }
 

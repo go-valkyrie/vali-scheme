@@ -244,7 +244,9 @@ fn expand_bridge(attr: Tokens, item: Tokens) -> syn::Result<Tokens> {
             /// Adds this block's bridged functions and methods to `library`.
             #[allow(unused_mut, unused_unsafe, clippy::all)]
             pub fn #register(library: ::vali_runtime::NativeLibrary) -> ::vali_runtime::NativeLibrary {
-                library #(#additions)*
+                // SAFETY: each function returns what its result converts
+                // to, through IntoScheme, and keeps no raw value.
+                unsafe { library #(#additions)* }
             }
         }
     })

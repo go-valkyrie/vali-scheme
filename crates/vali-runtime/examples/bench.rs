@@ -337,10 +337,9 @@ fn time(
 
 fn main() {
     let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
-    cx.define_native("length", Arity::exactly(1), length)
-        .unwrap();
-    cx.define_native("remainder", Arity::exactly(2), remainder)
-        .unwrap();
+    // SAFETY: both return only fixnums and errors, and keep nothing.
+    unsafe { cx.define_native("length", Arity::exactly(1), length) }.unwrap();
+    unsafe { cx.define_native("remainder", Arity::exactly(2), remainder) }.unwrap();
     let n = |n: i64| Handle::fixnum(n).unwrap();
 
     let module = load(&mut cx, "fib", fib);

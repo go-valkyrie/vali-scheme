@@ -382,8 +382,9 @@ fn remainder(_cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error>
 #[test]
 fn native_procedures() {
     let mut cx = cx();
-    cx.define_native("remainder", Arity::exactly(2), remainder)
-        .unwrap();
+    // SAFETY: these procedures return only their arguments, immediates
+    // and errors, and keep nothing.
+    unsafe { cx.define_native("remainder", Arity::exactly(2), remainder) }.unwrap();
     let m = module("natives", |m| {
         let remainder = m.variable("remainder");
         let mut call = FunctionBuilder::new(Some("rem7"), Arity::exactly(1), 8, 0);
@@ -732,7 +733,8 @@ fn one(_cx: &mut Cx<NoCollection>, _args: &[Value]) -> Result<Value, Error> {
 
 /// Asks for a tail call to its argument, then fails anyway.
 fn tail_then_fail(cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
-    cx.tail_call(args[0], Vec::new());
+    // SAFETY: the procedure is this procedure's own argument.
+    unsafe { cx.tail_call(args[0], Vec::new()) };
     Err(Error::scheme("tail-then-fail: failed"))
 }
 
@@ -745,11 +747,12 @@ fn boom(_cx: &mut Cx<NoCollection>, _args: &[Value]) -> Result<Value, Error> {
 #[test]
 fn failed_procedures_leave_no_tail_call() {
     let mut cx = cx();
-    let seven = cx.define_native("seven", Arity::exactly(0), seven).unwrap();
-    let one = cx.define_native("one", Arity::exactly(0), one).unwrap();
-    let fail = cx
-        .define_native("tail-then-fail", Arity::exactly(1), tail_then_fail)
-        .unwrap();
+    // SAFETY: these procedures return only their arguments, immediates
+    // and errors, and keep nothing.
+    let seven = unsafe { cx.define_native("seven", Arity::exactly(0), seven) }.unwrap();
+    let one = unsafe { cx.define_native("one", Arity::exactly(0), one) }.unwrap();
+    let fail =
+        unsafe { cx.define_native("tail-then-fail", Arity::exactly(1), tail_then_fail) }.unwrap();
     assert!(cx.call(&fail, &[seven]).is_err());
     assert_eq!(cx.call(&one, &[]).unwrap().as_fixnum(), Some(1));
 }
@@ -759,8 +762,10 @@ fn failed_procedures_leave_no_tail_call() {
 #[test]
 fn panics_in_procedures_become_errors() {
     let mut cx = cx();
-    let boom = cx.define_native("boom", Arity::exactly(0), boom).unwrap();
-    let one = cx.define_native("one", Arity::exactly(0), one).unwrap();
+    // SAFETY: these procedures return only their arguments, immediates
+    // and errors, and keep nothing.
+    let boom = unsafe { cx.define_native("boom", Arity::exactly(0), boom) }.unwrap();
+    let one = unsafe { cx.define_native("one", Arity::exactly(0), one) }.unwrap();
     let Error::Scheme(e) = cx.call(&boom, &[]).unwrap_err() else {
         panic!("expected a Scheme error");
     };

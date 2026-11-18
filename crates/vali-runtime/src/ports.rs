@@ -62,7 +62,8 @@ pub enum Read<T> {
     Eof,
 }
 
-impl<T: IntoScheme> IntoScheme for Read<T> {
+// SAFETY: it returns an immediate, or a value `cx` makes in the call.
+unsafe impl<T: IntoScheme> IntoScheme for Read<T> {
     fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
         match self {
             Read::Value(x) => x.into_scheme(cx),

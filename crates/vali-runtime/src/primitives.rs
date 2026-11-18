@@ -451,7 +451,9 @@ fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
     let mut call_args = rest.to_vec();
     call_args.extend(elements(cx, "apply", last)?);
-    cx.tail_call(args[0], call_args);
+    // SAFETY: the procedure and the arguments are values `apply` was
+    // called with, or elements of its last argument's list.
+    unsafe { cx.tail_call(args[0], call_args) };
     Ok(Value::UNSPECIFIED)
 }
 

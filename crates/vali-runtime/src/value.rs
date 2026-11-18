@@ -29,7 +29,13 @@ impl Value {
     pub const UNBOUND: Value = Value(immediate::marker(Marker::Unbound));
 
     /// The value whose word is `word`.
-    pub const fn from_raw(word: u64) -> Value {
+    ///
+    /// # Safety
+    ///
+    /// `word` must be a valid value's word: an immediate, or a pointer to
+    /// a live object of the isolate it is used in, with that object's tag.
+    /// The VM and every primitive trust a value without checking it.
+    pub const unsafe fn from_raw(word: u64) -> Value {
         Value(word)
     }
 
@@ -106,7 +112,12 @@ impl Value {
 
     /// A pointer value: `address`, which must be 8-byte aligned, tagged with
     /// `tag`.
-    pub const fn from_address(tag: Tag, address: u64) -> Value {
+    ///
+    /// # Safety
+    ///
+    /// `address` must be a live object of the isolate the value is used
+    /// in, whose type has `tag`, as for [`Value::from_raw`].
+    pub const unsafe fn from_address(tag: Tag, address: u64) -> Value {
         Value(tag.tag_address(address))
     }
 }

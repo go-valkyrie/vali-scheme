@@ -303,7 +303,9 @@ impl RootTable {
         while index != NONE {
             let slot =
                 &owned.chunks[index as usize / SLOTS_PER_CHUNK][index as usize % SLOTS_PER_CHUNK];
-            let value = Value::from_raw(slot.value.swap(Value::FALSE.raw(), Ordering::Relaxed));
+            // SAFETY: a root slot holds a valid value, which it kept alive.
+            let value =
+                unsafe { Value::from_raw(slot.value.swap(Value::FALSE.raw(), Ordering::Relaxed)) };
             release(value);
             owned.free.push(index);
             index = slot.next.load(Ordering::Relaxed);
@@ -435,9 +437,12 @@ impl Handle {
                     return Err(Error::WrongIsolate);
                 }
                 // SAFETY: the slot lives as long as its table, which this
-                // handle keeps alive; the caller is the owning isolate.
-                let slot = unsafe { slot.as_ref() };
-                Ok(Value::from_raw(slot.value.load(Ordering::Relaxed)))
+                // handle keeps alive; the caller is the owning isolate. A
+                // root slot holds a valid value, which it keeps alive.
+                unsafe {
+                    let slot = slot.as_ref();
+                    Ok(Value::from_raw(slot.value.load(Ordering::Relaxed)))
+                }
             }
         }
     }

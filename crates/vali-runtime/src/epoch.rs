@@ -63,7 +63,7 @@ impl<S: Strategy> Cx<S> {
     /// `fp` must be a bytecode function's frame.
     unsafe fn frame_slots(&self, fp: *mut u64) -> usize {
         // SAFETY: passed on to the caller.
-        let closure = Value::from_raw(unsafe { *fp.sub(1) });
+        let closure = unsafe { Value::from_raw(*fp.sub(1)) };
         // SAFETY: as above.
         match unsafe { self.procedure_code(closure) }.map(|c| &c.kind) {
             Ok(Kind::Bytecode { slots, .. }) => usize::from(*slots),

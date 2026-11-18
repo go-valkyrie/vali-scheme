@@ -41,7 +41,7 @@ impl<S: Strategy> Cx<S> {
     pub(crate) unsafe fn record_type_name(&self, v: Value) -> Option<&str> {
         let rtd = if self.is_other(v, TypeCode::Record) {
             // SAFETY: a live record, whose first field is its type.
-            Value::from_raw(unsafe { get(v, Self::LAYOUT.field(TypeCode::Record, 0)) })
+            unsafe { Value::from_raw(get(v, Self::LAYOUT.field(TypeCode::Record, 0))) }
         } else if self.is_record_type(v) {
             v
         } else {
@@ -190,7 +190,7 @@ pub(crate) fn make_record<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result
 fn is_record_of<S: Strategy>(cx: &Cx<S>, v: Value, rtd: Value) -> bool {
     cx.is_other(v, TypeCode::Record)
         // SAFETY: a live record, whose first field is its type.
-        && Value::from_raw(unsafe { get(v, Cx::<S>::LAYOUT.field(TypeCode::Record, 0)) }) == rtd
+        && unsafe { Value::from_raw(get(v, Cx::<S>::LAYOUT.field(TypeCode::Record, 0))) } == rtd
 }
 
 /// `(%record? obj rtd)`.
@@ -224,7 +224,7 @@ fn checked<S: Strategy>(cx: &Cx<S>, v: Value, rtd: Value, i: Value) -> Result<i3
 pub(crate) fn record_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let offset = checked(cx, args[0], args[1], args[2])?;
     // SAFETY: a live record of that type, which has the field.
-    Ok(Value::from_raw(unsafe { get(args[0], offset) }))
+    Ok(unsafe { Value::from_raw(get(args[0], offset)) })
 }
 
 /// `(%record-set! obj rtd i value)`.
@@ -268,8 +268,8 @@ impl<S: Strategy> Cx<S> {
     fn internal_field(&self, v: Value, rtd: Option<Value>, i: usize) -> Option<Value> {
         let rtd = rtd?;
         // SAFETY: a live record of that type, which has the field.
-        is_record_of(self, v, rtd).then(|| {
-            Value::from_raw(unsafe { get(v, Self::LAYOUT.field(TypeCode::Record, 1 + i)) })
+        is_record_of(self, v, rtd).then(|| unsafe {
+            Value::from_raw(get(v, Self::LAYOUT.field(TypeCode::Record, 1 + i)))
         })
     }
 

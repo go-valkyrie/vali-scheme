@@ -30,7 +30,8 @@ fn stop(_cx: &mut Cx<NoCollection>, args: &[Value]) -> Result<Value, Error> {
 /// call is a tail call, so every frame stays on the stack.
 fn run_scheme() -> i64 {
     let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
-    cx.define_native("stop", Arity::exactly(1), stop).unwrap();
+    // SAFETY: `stop` returns only immediates, and keeps nothing.
+    unsafe { cx.define_native("stop", Arity::exactly(1), stop) }.unwrap();
     let mut m = ModuleBuilder::new("debugger");
     let f_var = m.variable("f");
     let stop_var = m.variable("stop");

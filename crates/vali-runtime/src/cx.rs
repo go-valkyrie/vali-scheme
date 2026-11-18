@@ -247,7 +247,8 @@ impl<S: Strategy> Cx<S> {
         }
         let words = Self::LAYOUT.words(t, fields);
         let memory = S::allocate(&mut self.heap, space, words)?;
-        let v = Value::from_address(t.tag(), memory.as_ptr() as u64);
+        // SAFETY: the memory was just allocated for an object of type `t`.
+        let v = unsafe { Value::from_address(t.tag(), memory.as_ptr() as u64) };
         if let Some(offset) = Self::LAYOUT.header(t) {
             let header = Header::new(t, data).expect("runtime data fits in 24 bits");
             // SAFETY: the object was just allocated with room for its header.
@@ -289,7 +290,7 @@ impl<S: Strategy> Cx<S> {
     #[inline(always)]
     pub(crate) unsafe fn write_field(&mut self, v: Value, offset: i32, x: Value) {
         // SAFETY: passed on to the caller.
-        let old = Value::from_raw(unsafe { get(v, offset) });
+        let old = unsafe { Value::from_raw(get(v, offset)) };
         // SAFETY: as above.
         unsafe { put(v, offset, x.raw()) };
         S::write(&mut self.heap, old, x);
@@ -416,7 +417,7 @@ impl<S: Strategy> Cx<S> {
     /// `v` must be a live pair.
     pub unsafe fn car(&self, v: Value) -> Value {
         // SAFETY: passed on to the caller.
-        Value::from_raw(unsafe { get(v, Self::LAYOUT.car()) })
+        unsafe { Value::from_raw(get(v, Self::LAYOUT.car())) }
     }
 
     /// A pair's `cdr`.
@@ -426,7 +427,7 @@ impl<S: Strategy> Cx<S> {
     /// `v` must be a live pair.
     pub unsafe fn cdr(&self, v: Value) -> Value {
         // SAFETY: passed on to the caller.
-        Value::from_raw(unsafe { get(v, Self::LAYOUT.cdr()) })
+        unsafe { Value::from_raw(get(v, Self::LAYOUT.cdr())) }
     }
 
     /// Sets a pair's `car`.
@@ -476,7 +477,7 @@ impl<S: Strategy> Cx<S> {
     /// `v` must be a live vector with more than `i` elements.
     pub unsafe fn vector_ref(&self, v: Value, i: usize) -> Value {
         // SAFETY: passed on to the caller.
-        Value::from_raw(unsafe { get(v, Self::LAYOUT.vector_element(i)) })
+        unsafe { Value::from_raw(get(v, Self::LAYOUT.vector_element(i))) }
     }
 
     /// Sets a vector's `i`th element.

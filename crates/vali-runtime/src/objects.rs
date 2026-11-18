@@ -86,7 +86,7 @@ impl<S: Strategy> Cx<S> {
         let field = |i: usize| -> Value {
             // SAFETY: the caller guarantees a live object of type `t`, and
             // `i` is one of its value-holding fields.
-            Value::from_raw(unsafe { get(v, Self::LAYOUT.field(t, i)) })
+            unsafe { Value::from_raw(get(v, Self::LAYOUT.field(t, i))) }
         };
         // SAFETY: as above.
         let fields = unsafe { Self::object_fields(v, t) };
