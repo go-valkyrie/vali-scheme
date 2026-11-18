@@ -9,6 +9,7 @@ Each boundary below exists for a reason recorded in an ADR:
 - **A standalone executable must link the runtime without the expander and compiler** (ADR 0013).
 - **The distribution format is stable and versioned on its own, while run-format bytecode is private** (ADRs 0005 and 0012).
 - **The ABI has one source of truth that the code generator can read without instantiating a runtime** (ADR 0006).
+- **The linker optimises across libraries without the expander** (ADR 0017), so the optimiser is a crate of its own.
 
 | Crate | Holds | Depends on | Created in |
 |---|---|---|---|
@@ -16,11 +17,12 @@ Each boundary below exists for a reason recorded in an ADR:
 | `vali-syntax` | Spans and source identities, the lexer, the event parser and its sinks (ADR 0014), scope sets and syntax-object data structures | `vali-num` | M0 |
 | `vali-test` | The test harness: `.scm` test files, the regression list, compliance suites, determinism checks and runs under each memory strategy. Not published | grows with the others | M0 |
 | `vali-abi` | ABI facts: the tag table, object and frame layouts, the runtime function table, strategy descriptors, the ABI version (ADR 0006) | none | M1 |
-| `vali-dist` | The distribution format (ADR 0012): types, encoding, version and feature flags | `vali-num`, `vali-syntax` | M1 |
+| `vali-dist` | The distribution format (ADR 0012): the IR's types and encoding (ADR 0017), interfaces, version and feature flags | `vali-num`, `vali-syntax` | M1 |
+| `vali-opt` | The optimiser (ADR 0017): passes over the IR for each library, and the link-time optimiser across libraries | `vali-dist` | With the IR |
 | `vali-bytecode` | Run-format bytecode (ADR 0005): encoding, validator, disassembler, and conversion from the distribution format | `vali-abi`, `vali-dist` | M1 |
 | `vali-artifact` | The artifact container, fingerprints and cache store (ADR 0001) | `vali-bytecode`, `vali-dist` | M1 |
 | `vali-runtime` | Values, memory strategies, objects, frames and continuations, the trampoline, isolates and tasks, the VM, primitives, capability objects. The JIT is its `jit` feature | `vali-abi`, `vali-num`, `vali-syntax`, `vali-bytecode` | M1 |
-| `vali-compiler` | The expander and the compiler's front half: core forms, CPS, optimisation, the contract pass, producing distribution code. One crate because the expander must compile and run transformers. Today it holds the baseline compiler: core forms straight to run-format bytecode, with derived forms desugared until the expander lands. The CPS compiler follows soon, since the async integration and the JIT build on it | `vali-runtime`, `vali-dist` and others | M1 |
+| `vali-compiler` | The expander and the compiler's front half: core forms, conversion to the IR and optimisation of each library through `vali-opt` (ADR 0017), the contract pass, producing distribution code. One crate because the expander must compile and run transformers. Today it holds the baseline compiler: core forms straight to run-format bytecode, with derived forms desugared until the expander lands. The IR compiler follows soon, since the async integration and the JIT build on it | `vali-runtime`, `vali-dist` and others | M1 |
 | `vali` | The embedding API that hosts depend on. The compiler sits behind its default `eval` feature | `vali-runtime`, `vali-compiler` | M1 |
 | `vali-cli` | The `vali` binary: REPL, scripts, `vali build`, `vali lsp` | `vali`, `vali-build` | M1 |
 | `vali-macros` | `#[bridge]`. Procedural macros must be a crate of their own | none | M2 |

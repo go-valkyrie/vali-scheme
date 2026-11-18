@@ -2,7 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Related:** 0001 (interface sections), 0005 (removing checks), 0006 (AOT)
+- **Amended:** 2026-11-18, the linker chooses unchecked entry points and resolves dispatch, never distribution code (items 4 and 6, ADR 0017)
+- **Related:** 0001 (interface sections), 0005 (removing checks), 0006 (AOT), 0017 (link-time optimisation)
 
 ## Context
 
@@ -20,9 +21,9 @@ Schemas written with predicates such as `integer-in`, `one-of` and `string?` are
 1. **Declarative contracts** are built from a fixed vocabulary: type predicates, record predicates, `integer-in`, `one-of`, regular expressions, `or`, `and`, list-of and map-of, plus procedure signatures built from these. They are data, recorded in each library's interface section (ADR 0001).
 2. **Opaque contracts** are any other predicate. They are always checked at run time.
 3. **A violation names who broke the contract** (blame): the side of the boundary that supplied the bad value, at its source location.
-4. **Contracts are checked where values cross library boundaries, and trusted inside a library.** An exported procedure with a contract gets two entry points. The checked one is used by default. Compiled callers may use the unchecked one where the contract is proven at the call site.
+4. **Contracts are checked where values cross library boundaries, and trusted inside a library.** An exported procedure with a contract gets two entry points. The checked one is used by default. The linker chooses the unchecked one where the contract is proven at the call site (ADR 0017 #11). Distribution code always names the checked one, so an untrusted artifact cannot skip the check.
 5. **A compiler pass sorts each check** into proven (removed), refuted (a compile-time error at the source location) or unknown (kept as a run-time check).
-6. **AOT static dispatch** uses export signatures, bindings known to be constant, and sealed generic functions. AOT code keeps a generic slow path wherever a type isn't proven.
+6. **Static dispatch** uses export signatures, bindings known to be constant, and generic functions whose rules make a resolution final. The linker resolves dispatch sites when a program is loaded (ADR 0017 #11), and `vali build` may also seal generic functions (ADR 0013 #9). Code keeps a generic slow path wherever a type isn't proven.
 7. **Schemas for tools** are generated from the same data.
 
 ## Consequences
@@ -42,7 +43,7 @@ Schemas written with predicates such as `integer-in`, `one-of` and `string?` are
 - The surface syntax of contracts and the exact set of combinators.
 - How higher-order contracts on procedure arguments and results wrap values and keep blame.
 - Whether refuted contracts can be downgraded to warnings.
-- Type declarations as optimiser hints (CHICKEN-style), code specialised per argument type, and a typed dialect.
+- Type declarations as optimiser hints (CHICKEN-style), code specialised per argument type, and a typed dialect. ADR 0017 #11 says where specialisation happens.
 
 ## References
 

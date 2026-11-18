@@ -5,7 +5,8 @@
 - **Amended:** 2026-11-17, the expander: written in Rust, syntax objects as Rust values behind one heap type, `syntax-case` matching in Rust, and the core forms (items 12 to 17)
 - **Amended:** 2026-11-17, `syntax-rules` stays built into the expander (item 14)
 - **Amended:** 2026-11-17, the binding table keeps each symbol's entries by the newest scope in their sets, so resolving stays linear in the program (item 2)
-- **Related:** 0001 (phasing, determinism, stable scope identities), 0007 (`syntax-case` and the syntax procedures), 0012 (distribution format), 0013 (standalone executables, `eval`), 0014 (spans and macro origins)
+- **Amended:** 2026-11-18, calls to standard procedures become the IR's primitive operations (item 16, ADR 0017)
+- **Related:** 0001 (phasing, determinism, stable scope identities), 0007 (`syntax-case` and the syntax procedures), 0012 (distribution format), 0013 (standalone executables, `eval`), 0014 (spans and macro origins), 0017 (primitive operations)
 
 ## Context
 
@@ -59,7 +60,7 @@ Syntax objects are values that macros manipulate. Most exist only at expansion t
     - The compiler consumes the same Rust values, so expanded code never round-trips through the heap.
 14. **`syntax-case` and `syntax` are core forms, matched and built in Rust,** as psyntax does with `$syntax-dispatch`. The expander turns each pattern into a constant descriptor and a call to one primitive that returns `#f` or the pattern variables' matches, and each template into a call to one primitive that builds the output. Ellipsis depth and misused pattern variables are errors at expansion time. `syntax-rules` is built into the expander on the same matcher and builder: a `syntax-rules` macro runs no Scheme code at all, so it needs no phase-1 instance and expands at Rust speed. `with-syntax`, `quasisyntax` and the derived forms are macros, written in Scheme on top.
 15. **The core forms are** `quote`, `quote-syntax`, `if`, `begin`, `lambda`, `let`, `letrec*`, `set!`, the procedure call, `define`, `define-syntax`, `let-syntax`, `letrec-syntax`, `syntax-case` and `syntax`, plus the library forms. `let` is core because the compiler wants it as a node, and a macro producing `((lambda ...) ...)` would only make the compiler rediscover it. `case-lambda`, multiple values and continuation marks join when the runtime has them. Everything else, `cond`, `case`, `do`, `and`, `or`, `let*`, named `let`, `define-record-type`, `parameterize` and the rest, is a macro.
-16. **The expander produces the compiler's tree, with every identifier resolved.** References carry their binding, not their name. The compiler inlines a call to a standard procedure only when the callee resolves to that procedure's own binding, which importers cannot assign, so inlining is sound by construction rather than by checking that the program didn't redefine the name.
+16. **The expander produces the compiler's tree, with every identifier resolved.** References carry their binding, not their name. The compiler turns a call to a standard procedure into a primitive operation (ADR 0017 #3) only when the callee resolves to that procedure's own binding, which importers cannot assign, so this is sound by construction rather than by checking that the program didn't redefine the name.
 17. **The standard macros ship as Scheme source inside the binary,** expanded when a context first needs them, until cached artifacts (ADR 0001) make that a load.
 
 ## Consequences

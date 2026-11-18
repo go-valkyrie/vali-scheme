@@ -9,13 +9,14 @@
 - **Amended:** 2026-11-17, as built: a three-word frame header, three kinds of marker stub, signal frames where stacks switch, and the measured cost of keeping the chain current
 - **Amended:** 2026-11-17, continuations as built in tier 0: segments shared between the stack and continuations, an underflow flag that copies one frame at a time, and catches that point into sealed frames (item 8)
 - **Amended:** 2026-11-17, the dynamic environment as built: three registers every host call empties, `dynamic-wind` and parameters in Scheme over them, and errors that call `raise` where they happen (item 8)
-- **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit)
+- **Amended:** 2026-11-18, the compiler's IR is A-normal form with join points, which corresponds to CPS; return points become frames when it is converted to bytecode (ADR 0017)
+- **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit), 0017 (the IR)
 
 ## Context
 
 R7RS-small requires full `call/cc`, `dynamic-wind` and proper tail calls, and Vali also provides delimited continuations (SRFI 226). Vali's tasks must suspend at any call to await a Rust future (ADR 0008). Three tiers must call each other freely, the collector needs exact stack roots, and compiled code should be debuggable and profilable with native tools: GDB, LLDB, perf, Instruments.
 
-The compiler converts code to CPS, but CPS is only its intermediate representation. It does not mean continuations are heap-allocated closures at run time: return points become frames.
+The compiler's intermediate representation is A-normal form with join points (ADR 0017), which corresponds to CPS with second-class continuations. Continuations are never heap-allocated closures at run time: return points become frames when the IR is converted to bytecode.
 
 How frames are represented decides all of this:
 

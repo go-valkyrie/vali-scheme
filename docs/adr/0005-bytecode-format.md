@@ -7,7 +7,8 @@
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
 - **Amended:** 2026-11-17, variables are defined or imported, and belong to library instances (item 4)
 - **Amended:** 2026-11-17, every assigned local is boxed, captured or not, so re-entering a continuation shares it (item 4)
-- **Related:** 0001 (artifacts), 0002 (values), 0004 (frames), 0006 (versioning), 0009 (untrusted code), 0012 (distribution format)
+- **Amended:** 2026-11-18, instructions the IR needs: direct calls, dispatch sites with link slots, and ownership operations (item 5); constancy across libraries is used by the linker (item 4; ADR 0017)
+- **Related:** 0001 (artifacts), 0002 (values), 0004 (frames), 0006 (versioning), 0009 (untrusted code), 0012 (distribution format), 0017 (the IR)
 
 ## Context
 
@@ -42,12 +43,14 @@ Options **B and D**, as follows.
    - **Variables belong to library instances.** Each instance of a library, one per phase where it is used (ADR 0001 #2), has its own cell for each variable it defines. Loading a module links each imported entry to the cell of the instance it imports from. There is no table of globals shared by name, so a program defining `memv` cannot change what another library's `memv` means.
 
    **Bindings are cells only when they must be.** The compiler knows which bindings are ever `set!`:
-   - **A binding that is never assigned** is a constant, read straight from the constant pool or inlined. Calls to a known procedure that is never assigned are direct calls. The interface records which exports are constant (ADR 0001), so this holds across libraries.
+   - **A binding that is never assigned** is a constant, read straight from the constant pool or inlined. Calls to a known procedure that is never assigned are direct calls. The interface records which exports are constant (ADR 0001), and the linker uses that across libraries (ADR 0017 #11).
    - **An assigned library variable** is a plain slot in its module's variable table, read and written with ordinary loads and stores.
    - **An assigned local variable** lives in a heap-allocated box (assignment conversion). At first only captured ones did, but re-entering a continuation copies the frames it sealed (ADR 0004 #8), and a variable in a slot would be copied with them, so a `set!` after the capture would be undone by re-entering it. Loops rebind rather than assign, so their variables stay in slots. Flow analysis in the optimising compiler can unbox again what no continuation can copy.
 
    No variable access takes a lock. scheme-rs kept every global behind a lock and cloned it on each read, which cost a quarter of `fib`'s run time in our profiling.
 5. **Fast paths are in the instruction set** for what dominates Scheme loops: fixnum arithmetic with an overflow fallback, fixnum compare-and-branch, `car`, `cdr`, `null?`, `pair?`, `eq?`-and-branch, and vector access with a fixnum index. Generic operations call into the runtime function table, which the JIT shares.
+
+   **The IR adds** (ADR 0017): direct calls to a known function, with no procedure check; dispatch sites, each with a slot in a per-module table that the linker fills; and `dup`, `drop`, `drop-reuse` and constructors that build in a reused cell, which conversion leaves out under strategies that don't count references.
 6. **Function entry** checks arity, including optional and rest arguments and `case-lambda` clauses, decrements the fuel budget, and counts calls for tier-up. Loops are tail calls, so this is the only place either count is needed.
 7. **Safe by construction (D).** Every instruction checks its operands' types and bounds. The loader rejects artifacts whose slot indexes, constant indexes or jump targets are out of range, so the dispatch loop needs no checks of its own. Proven contract checks (ADR 0010) can be removed from bytecode. Memory-safety checks are removed only in native code.
 8. **Each function has side tables:** debug information (ADR 0014), meaning its name, a line table mapping instructions to resolved source positions, and the names and live ranges of its local variables by slot; and slot liveness at each safepoint (ADR 0003). Debug information is self-contained, so stack traces and debuggers work without the source files.

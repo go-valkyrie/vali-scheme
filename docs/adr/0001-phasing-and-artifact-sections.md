@@ -6,7 +6,8 @@
 - **Amended:** 2026-11-16, `cond-expand` features join the fingerprint; distribution artifacts (ADR 0012)
 - **Amended:** 2026-11-16, the runtime's own sources of non-determinism, and how each is closed
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
-- **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces)
+- **Amended:** 2026-11-18, the interface section records the library's ABI version, and offers no bodies for inlining: inlining across libraries happens at link time (item 5, ADRs 0017 and 0018)
+- **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces), 0017 (link-time optimisation), 0018 (library ABI versions)
 
 ## Context
 
@@ -42,7 +43,7 @@ R6RS lets an import say at which phase it is needed (`(import (for (lib) expand)
 
    | Section | Contains | Read when |
    |---|---|---|
-   | Interface | Exports and binding kinds (variable or macro); whether each variable is constant; static information; declared contracts and signatures; bodies offered for cross-library inlining | An importer is expanded or compiled |
+   | Interface | Exports and binding kinds (variable or macro); whether each variable is constant; static information; declared contracts and signatures; the library's ABI version (ADR 0018) | An importer is expanded or compiled |
    | Visit | Compiled transformers and other expansion-time code | An importer's expansion uses one of this library's macros |
    | Invoke | Run-time definitions and the library body | The library runs |
 

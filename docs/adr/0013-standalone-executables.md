@@ -7,6 +7,7 @@
 - **Amended:** 2026-11-16, which libraries `eval` keeps, what it brings in, and how its cost is contained (items 11 to 14)
 - **Amended:** 2026-11-17, `eval` as built in tier 0: the compiling expander kept only for programs that import `(scheme eval)`, and evaluated code run through thunks (item 14)
 - **Amended:** 2026-11-17, the interaction environment and the REPL: definitions as REPL globals, apart from the globals libraries link to (item 14)
+- **Amended:** 2026-11-18, `vali build` publishes an application, and runs the optimiser over the whole program; inlining across libraries needs no consent anywhere now (item 9, ADR 0017)
 - **Related:** 0003 (memory-management strategies), 0006 (code generator), 0009 (capabilities), 0010 (static dispatch), 0012 (distribution format), 0015 (run-time syntax objects)
 
 ## Context
@@ -29,7 +30,7 @@ A standalone build has needs that the embedded case doesn't:
 6. **The toolchain ships the runtime as a static archive for each strategy and target,** such as `libvali_rt-rc.a` or `libvali_rt-cms.a`. `vali build` links the program's object files with the archive for its target. Each archive is the runtime instantiated for one strategy (ADR 0003), so every hook is inlined. The archives for the host target ship with the toolchain; others are fetched when first needed.
 7. **The executable carries only what the program can use.** The expander, compiler and VM are linked in only if the program can compile code at run time: through `eval`, `environment`, `load`, or loading libraries dynamically. Otherwise the binary holds native code and the runtime alone. Items 11 to 14 say what such a binary carries.
 8. **Native code must cover the whole program.** If any reachable code cannot be compiled to native code for the target, the build fails with an error naming it. The exception is a binary that carries the VM; there, the code may run as bytecode, with a warning at build time.
-9. **Whole-program optimisation is allowed.** Every library in the binary is fixed at build time, so the build may inline across library boundaries without the consent rule of ADR 0012 (which protects libraries distributed separately). It may also seal generic functions and dispatch statically wherever contracts allow (ADR 0010).
+9. **The build optimises the whole program** (ADR 0017 #15). Every library in the binary is fixed at build time, so beyond what linking does when a program is loaded, the build may seal generic functions and dispatch statically wherever types and contracts allow (ADR 0010). `vali build` publishes an application, as `dotnet publish` does with ahead-of-time compilation; it is not a step in ordinary development.
 10. **Start-up runs each library's body as native code,** in dependency order. There is no artifact cache and nothing to validate.
 
 ### `eval` in a standalone executable
