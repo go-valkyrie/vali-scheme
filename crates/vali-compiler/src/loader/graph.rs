@@ -99,8 +99,21 @@ pub(crate) fn fetch(
     loader: &impl Loader,
     sources: &mut vali_syntax::Sources,
 ) -> Result<Graph> {
+    fetch_beyond(program, identity, loader, sources, &|_| false)
+}
+
+/// As `fetch`, leaving out the libraries `known` says are compiled
+/// already, and what only they import: evaluated code imports what the
+/// program has loaded without reading it again.
+pub(crate) fn fetch_beyond(
+    program: &Program,
+    identity: &Identity,
+    loader: &impl Loader,
+    sources: &mut vali_syntax::Sources,
+    known: &impl Fn(&LibraryName) -> bool,
+) -> Result<Graph> {
     let loader = Sync_(loader);
-    let future = pin!(walk(program, identity, &loader, sources));
+    let future = pin!(walk(program, identity, &loader, sources, known));
     // A synchronous loader's futures are ready at once, so the walk never
     // waits.
     match future.poll(&mut Context::from_waker(Waker::noop())) {
@@ -117,7 +130,7 @@ pub(crate) async fn fetch_async(
     sources: &mut vali_syntax::Sources,
 ) -> Result<Graph> {
     let loader = Async(loader);
-    walk(program, identity, &loader, sources).await
+    walk(program, identity, &loader, sources, &|_| false).await
 }
 
 pub(super) fn list(items: Vec<Datum>, span: Span) -> Datum {
@@ -446,6 +459,7 @@ pub(super) async fn walk(
     identity: &Identity,
     loader: &impl Fetch,
     sources: &mut vali_syntax::Sources,
+    known: &impl Fn(&LibraryName) -> bool,
 ) -> Result<Graph> {
     // Libraries the program defines itself need no loader, beyond what
     // they include.
@@ -483,7 +497,7 @@ pub(super) async fn walk(
         .collect();
     work.reverse();
     while let Some((name, importer)) = work.pop() {
-        if by_name.contains_key(&name) || library::is_builtin(&name) {
+        if by_name.contains_key(&name) || library::is_builtin(&name) || known(&name) {
             continue;
         }
         // Standard libraries come first, so no loader can replace them,

@@ -81,6 +81,23 @@ fn macros_persist() {
     ]);
 }
 
+/// A library compiled after the REPL defined a macro keeps its own macros
+/// apart from the REPL's: an input's unit is dropped once it is loaded, and
+/// the library may get its number.
+#[test]
+fn macros_of_libraries_imported_later() {
+    check(&[
+        (
+            "(define-syntax mine (syntax-rules () ((_) 'mine)))",
+            Ok(&[]),
+        ),
+        ("(import (srfi 64))", Ok(&[])),
+        ("(test-begin \"t\")", Ok(&[])),
+        ("(test-assert (= 1 1))", Ok(&[])),
+        ("(mine)", Ok(&["mine"])),
+    ]);
+}
+
 #[test]
 fn values_imports_and_several_data() {
     check(&[

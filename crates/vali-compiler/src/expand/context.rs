@@ -251,6 +251,27 @@ impl ContextState {
     }
 }
 
+/// The unit number of the interaction environment's macros
+/// (`Expander::add_macro`). No unit has it: there are fewer than 2^32.
+pub(super) const REPL_MACROS: u32 = u32::MAX;
+
+impl ContextState {
+    /// A state with nothing in it, to stand in for the live context while
+    /// no unit owns it.
+    pub(super) fn empty(core_scope: Scope, core: ScopeSetId) -> ContextState {
+        ContextState {
+            context: ScopeContext::new(),
+            table: BindingTable::new(),
+            core_scope,
+            core,
+            macros: HashMap::new(),
+            compiled: Default::default(),
+            imported: HashSet::new(),
+            next_macro: 0,
+        }
+    }
+}
+
 /// Who the live context belongs to.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ContextOwner {
@@ -342,9 +363,17 @@ impl Expander {
     }
 
     /// Notes `m`, a macro the current unit defines, and returns its name.
+    /// The interaction environment's macros are numbered as one unit's,
+    /// `REPL_MACROS`, across all its inputs: an input's unit is dropped
+    /// once it is loaded, and its number goes to the next unit compiled.
     pub(super) fn add_macro(&mut self, m: Macro) -> MacroId {
+        let unit = if matches!(self.owner, Some(ContextOwner::Repl)) {
+            REPL_MACROS
+        } else {
+            u32::try_from(self.units.len() - 1).expect("at most 2^32 units")
+        };
         let id = MacroId {
-            unit: u32::try_from(self.units.len() - 1).expect("at most 2^32 units"),
+            unit,
             index: self.next_macro,
         };
         self.next_macro += 1;

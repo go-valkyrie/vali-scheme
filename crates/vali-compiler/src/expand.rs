@@ -433,6 +433,11 @@ impl Expander {
         self.units.iter().position(|u| u.identity == identity)
     }
 
+    /// Whether the library `name` is compiled, under that name.
+    pub(crate) fn has_library(&self, name: &LibraryName) -> bool {
+        self.by_name.contains_key(name)
+    }
+
     /// Notes that `name` is also the name of the library `unit` is.
     pub(crate) fn name_unit(&mut self, name: LibraryName, unit: usize) {
         self.by_name.insert(name, unit);

@@ -211,14 +211,15 @@ fn prepare<S: Strategy>(
         internal: false,
     };
     let fetcher = Fetcher(evaluator.loader.as_deref());
-    let graph = loader::fetch(
-        &program,
-        &identity,
-        &fetcher,
-        &mut evaluator.expander.sources,
-    )
-    .map_err(compile_error)?;
     let expander = &mut evaluator.expander;
+    // Libraries compiled already are not fetched again, so their sources
+    // are not read again either.
+    let mut sources = std::mem::take(&mut expander.sources);
+    let graph = loader::fetch_beyond(&program, &identity, &fetcher, &mut sources, &|name| {
+        expander.has_library(name)
+    });
+    expander.sources = sources;
+    let graph = graph.map_err(compile_error)?;
     expander.add_includes(graph.includes);
     expander.add_available(graph.available);
     let mut names = vec![Vec::new(); graph.libraries.len()];
@@ -249,6 +250,10 @@ fn prepare<S: Strategy>(
             thunks.push(cx.module_body(id)?);
         }
     }
+    // What compiling the code adds to the expander is dropped once it is
+    // loaded, or fails to compile, so evaluating in a loop does not grow
+    // it. The libraries it fetched stay.
+    let mark = expander.mark();
     // Evaluated code gets no optimisation (ADR 0013 #13).
     expander.optimise = false;
     let body = if interactive {
@@ -257,15 +262,75 @@ fn prepare<S: Strategy>(
         expander.program(identity.as_str(), &sets, false, &body, false)
     };
     expander.optimise = true;
-    let body = body.map_err(compile_error)?;
+    let loaded = body.map_err(compile_error).and_then(|body| {
+        if crate::uses_syntax(&body) {
+            crate::merge_syntax_data(cx, expander.syntax_data())?;
+        }
+        cx.load(body)
+    });
+    expander.forget(mark);
+    let id = loaded?;
     if interactive {
         evaluator.interaction = sets;
     }
-    let expander = &mut evaluator.expander;
-    if crate::uses_syntax(&body) {
-        crate::merge_syntax_data(cx, expander.syntax_data())?;
-    }
-    let id = cx.load(body)?;
     thunks.push(cx.module_body(id)?);
     Ok(thunks)
+}
+
+#[cfg(test)]
+mod tests {
+    use vali_runtime::{DeferredHeadered, HeapConfig};
+
+    use super::*;
+
+    /// How many sources `expander` holds.
+    fn sources(expander: &Expander) -> usize {
+        (1..)
+            .take_while(|&i| expander.sources.source(SourceId(i)).is_some())
+            .count()
+    }
+
+    /// Evaluating in a loop leaves the expander as it was after the first
+    /// evaluation: its units, variables, `lambda`s and sources do not grow,
+    /// whatever the code defines, returns or fails to compile.
+    #[test]
+    fn evaluating_does_not_grow_the_expander() {
+        let source = "
+            (import (scheme base) (scheme eval) (scheme repl))
+            (define env (environment '(scheme base)))
+            (define (run n)
+              (let loop ((i 0) (kept '()))
+                (if (= i n)
+                    (length kept)
+                    (begin
+                      (eval '(begin (define x 5) (when (> x 0) (* x 2))) env)
+                      (eval '(define-syntax swap!
+                               (syntax-rules () ((_ a b) (let ((t a)) (set! a b) (set! b t)))))
+                            env)
+                      (guard (e (#t #f)) (eval '(if) env))
+                      (guard (e (#t #f)) (eval '(car 1) env))
+                      (eval `(define counter ,i) (interaction-environment))
+                      (eval '(define-syntax twice (syntax-rules () ((_ e) (begin e e))))
+                            (interaction-environment))
+                      (eval '(twice (set! counter (+ counter 1))) (interaction-environment))
+                      (loop (+ i 1)
+                            (cons (eval `(lambda (y) (+ y ,i)) env) kept))))))";
+        let program = crate::compile_program(source, &Identity::new("leak"), &Fetcher(None))
+            .expect("the program compiles");
+        let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = crate::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let run = cx.variable(id, "run").unwrap();
+        let measure = |cx: &mut Cx<DeferredHeadered>, n: i64| {
+            cx.call(&run, &[Handle::fixnum(n).unwrap()]).unwrap();
+            let data = cx.set_evaluator(None).unwrap();
+            let evaluator = data.downcast::<Evaluator>().unwrap();
+            let seen = (evaluator.expander.mark(), sources(&evaluator.expander));
+            cx.set_evaluator(Some(evaluator));
+            seen
+        };
+        let once = measure(&mut cx, 1);
+        assert_eq!(measure(&mut cx, 50), once);
+    }
 }

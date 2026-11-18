@@ -43,6 +43,14 @@ pub(super) struct Unit {
     pub(super) round_tripped: bool,
 }
 
+/// Where what an expander has compiled ends (`Expander::mark`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mark {
+    units: usize,
+    vars: usize,
+    lambdas: usize,
+}
+
 /// The sections a library's artifact has, all required.
 pub(super) const LIBRARY_SECTIONS: &[&str] = &["build", "library", "syntax", "invoke", "depends"];
 
@@ -183,22 +191,45 @@ impl Expander {
         let Some(owner) = self.owner.take() else {
             return Ok(());
         };
-        let placeholder = ContextState {
-            context: ScopeContext::new(),
-            table: BindingTable::new(),
-            core_scope: self.core_scope,
-            core: self.core,
-            macros: HashMap::new(),
-            compiled: Default::default(),
-            imported: HashSet::new(),
-            next_macro: 0,
-        };
-        let state = self.swap_state(placeholder);
+        let state = self.swap_state(ContextState::empty(self.core_scope, self.core));
         match owner {
             ContextOwner::Unit(unit) => self.units[unit].syntax = Some(Arc::new(state)),
             ContextOwner::Repl => self.repl_state = Some(state),
         }
         Ok(())
+    }
+
+    /// Where what the expander has compiled ends, to drop what is compiled
+    /// after it with `forget`.
+    pub(crate) fn mark(&self) -> Mark {
+        Mark {
+            units: self.units.len(),
+            vars: self.vars.len(),
+            lambdas: self.lambdas.len(),
+        }
+    }
+
+    /// Drops the units compiled since `mark`, which must be evaluated code
+    /// or REPL inputs, never libraries, once their modules are loaded,
+    /// whether they compiled or not: nothing names them, no unit imports
+    /// them, and their code holds what it needs. Their variables and
+    /// `lambda`s go too, and a unit's context, which would otherwise
+    /// become its syntax export. The interaction environment's context
+    /// stays, holding what its inputs defined.
+    pub(crate) fn forget(&mut self, mark: Mark) {
+        debug_assert!(
+            self.by_name.values().all(|&unit| unit < mark.units),
+            "only unnamed units are forgotten"
+        );
+        if matches!(self.owner, Some(ContextOwner::Unit(unit)) if unit >= mark.units) {
+            self.owner = None;
+            self.swap_state(ContextState::empty(self.core_scope, self.core));
+        }
+        self.units.truncate(mark.units);
+        self.vars.truncate(mark.vars);
+        self.lambdas.truncate(mark.lambdas);
+        self.last_ir = None;
+        self.last_lowered = None;
     }
 
     /// The artifact of `unit`, a library this build compiled or loaded:
