@@ -179,51 +179,88 @@ fn run_all(m: &vali_bytecode::Module) -> Vec<(&'static str, Result<String, Strin
 // ---------------------------------------------------------------------------
 // Targeted cases.
 
-/// f0 makes a closure of f1, which has 256 free variables, passing one
-/// variable 256 times. f1 would be rejected ("too many free variables"),
-/// but f0 is converted first and its `Closure` instruction's encoder
-/// panics.
+/// A closure over 256 free variables converts and runs, and every slot
+/// holds the value it was given. f0 binds 256 distinct integers (n for slot
+/// n-1), makes a closure of f1 over them in order, then calls it. f1 returns
+/// the sum of n * (value in slot n-1), which depends on every slot and on
+/// their order. Guards against the `Closure` instruction's encoder
+/// panicking, the converter rejecting the count, or the wide form capturing
+/// the wrong values.
 #[test]
-#[ignore = "known bug: the closure instruction's encoder panics before the converter checks the count"]
 fn closure_with_256_free_variables() {
+    const N: u32 = 256;
     let mut fb = FB::default();
-    let x = fb.var();
+    let xs: Vec<Var> = (0..N).map(|_| fb.var()).collect();
     let k = fb.var();
-    let ret = fb.push(Term::Return(v(k)));
-    let mk = let_(
+    let res = fb.var();
+    let ret = fb.push(Term::Return(v(res)));
+    let call = let_(
+        &mut fb,
+        res,
+        Value::Call {
+            callee: v(k),
+            args: vec![],
+        },
+        ret,
+    );
+    let mut body = let_(
         &mut fb,
         k,
         Value::Closure {
             function: FunId(1),
-            free: vec![v(x); 256],
+            free: xs.iter().map(|&x| v(x)).collect(),
         },
-        ret,
+        call,
     );
-    let body = let_(&mut fb, x, Value::Operand(c(0)), mk);
+    for (i, &x) in xs.iter().enumerate().rev() {
+        body = let_(&mut fb, x, Value::Operand(c(i as u32)), body);
+    }
     let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
 
     let mut fb = FB::default();
-    let free: Vec<Var> = (0..256).map(|_| fb.var()).collect();
-    let body = fb.push(Term::Return(v(free[0])));
-    let f1 = fb.finish("wide", Arity::exactly(0), vec![], free, body);
+    let free: Vec<Var> = (0..N).map(|_| fb.var()).collect();
+    let terms: Vec<Var> = (0..N).map(|_| fb.var()).collect();
+    let sums: Vec<Var> = (0..N).map(|_| fb.var()).collect();
+    // sums[0] = terms[0]; sums[i] = sums[i-1] + terms[i].
+    let mut body = fb.push(Term::Return(v(sums[N as usize - 1])));
+    for i in (1..N as usize).rev() {
+        body = let_(
+            &mut fb,
+            sums[i],
+            Value::Primitive {
+                op: Primitive::Add,
+                args: vec![v(sums[i - 1]), v(terms[i])],
+            },
+            body,
+        );
+    }
+    body = let_(&mut fb, sums[0], Value::Operand(v(terms[0])), body);
+    for i in (0..N as usize).rev() {
+        body = let_(
+            &mut fb,
+            terms[i],
+            Value::Primitive {
+                op: Primitive::Mul,
+                args: vec![c(i as u32), v(free[i])],
+            },
+            body,
+        );
+    }
+    let f1 = fb.finish("wide", Arity::exactly(0), vec![], free.clone(), body);
 
-    let m = module(vec![Constant::Integer(1)], vec![], vec![f0, f1]);
-    let r = convert_checked(&m);
-    eprintln!(
-        "closure_with_256_free_variables: {r:?}",
-        r = r.as_ref().map(|_| "ok")
-    );
-    assert!(
-        !matches!(&r, Err(e) if e.contains("PANICKED")),
-        "{r:?}",
-        r = r.err()
-    );
+    let constants = (1..=N as i64).map(Constant::Integer).collect();
+    let m = module(constants, vec![], vec![f0, f1]);
+    let out = convert_checked(&m).unwrap();
+    let expected: i64 = (1..=N as i64).map(|n| n * n).sum();
+    assert_eq!(expected, 5_625_216);
+    for (strategy, r) in run_all(&out) {
+        assert_eq!(r.unwrap(), expected.to_string(), "{strategy}");
+    }
 }
 
-/// 0.0 and -0.0 are different constants; the module builder's pool
-/// deduplicates with `==` on f64, so -0.0 becomes 0.0.
+/// 0.0 and -0.0 are different constants. Guards against the module
+/// builder's pool merging them, which would turn -0.0 into 0.0.
 #[test]
-#[ignore = "known bug: the constant pool merges -0.0 into 0.0, comparing flonums with =="]
 fn negative_zero_survives() {
     let mut fb = FB::default();
     let a = fb.var();
