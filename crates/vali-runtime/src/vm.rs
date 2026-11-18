@@ -159,6 +159,22 @@ unsafe extern "C-unwind" fn body<S: Strategy>(state: *mut c_void) {
     }
 }
 
+/// Clears the three slots at `base` of the frame at `fp`, where a returned
+/// callee's header was: its saved frame pointer, return address and
+/// position would otherwise read as fixnums, leaking addresses to the
+/// caller's code. The header was never counted, so nothing is released.
+///
+/// # Safety
+///
+/// The frame must have the three slots.
+#[inline(always)]
+unsafe fn clear_header(fp: *mut u64, base: usize) {
+    for i in base..base + 3 {
+        // SAFETY: passed on to the caller.
+        unsafe { *fp.sub(i + 1) = Value::UNSPECIFIED.raw() };
+    }
+}
+
 #[inline(always)]
 pub(crate) unsafe fn slot(fp: *mut u64, i: usize) -> Value {
     // SAFETY: the caller guarantees slot `i` is inside the frame.
@@ -207,6 +223,21 @@ fn constant_number(constant: &Constant) -> Option<vali_num::Number> {
         }
         _ => None,
     }
+}
+
+/// An error if `code` is `%catch`, `%call/cc` or `%continue` and does
+/// not take `argc` arguments. Function entry checks every other kind; these
+/// read their arguments straight from the call window, so a call with too
+/// few would read past it.
+fn control_arity<S: Strategy>(code: &Code<S>, argc: usize) -> Result<(), Error> {
+    if matches!(code.kind, Kind::Catch | Kind::Capture | Kind::Resume) && !code.arity.accepts(argc)
+    {
+        return Err(Error::scheme(format!(
+            "{}: wrong number of arguments: got {argc}",
+            code.name
+        )));
+    }
+    Ok(())
 }
 
 /// Where the instruction at `pc` of `code` came from, if its module says.
@@ -1438,6 +1469,7 @@ impl<S: Strategy> Cx<S> {
                         let base = position_base(position);
                         (fp, limit) = self.materialize(link, caller, base)?;
                         self.store(fp, base + 3, value);
+                        clear_header(fp, base);
                         pc = position_resume(position) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
                         if S::PRECISE
@@ -1566,6 +1598,7 @@ impl<S: Strategy> Cx<S> {
                         }
                         let procedure = slot(fp, base + 3);
                         let callee = attempt!(self.procedure_code(procedure));
+                        attempt!(control_arity(callee, argc));
                         match callee.kind {
                             Kind::Catch => {
                                 // `(%catch thunk handler)`: note where to
@@ -1753,6 +1786,7 @@ impl<S: Strategy> Cx<S> {
                     }
                     Next::TailCall { argc } => {
                         let callee = attempt!(self.procedure_code(slot(fp, 0)));
+                        attempt!(control_arity(callee, argc));
                         match callee.kind {
                             Kind::Catch => {
                                 // As a tail call, the handler takes this
@@ -1947,6 +1981,7 @@ impl<S: Strategy> Cx<S> {
                         }
                         let base = position_base(position);
                         self.store(caller, base + 3, value);
+                        clear_header(caller, base);
                         if position & BOUNDARY != 0 {
                             limit = self.pop_segment();
                         }
@@ -2303,6 +2338,18 @@ impl<S: Strategy> Cx<S> {
                                     "set-free: the closure has {count} free variables, not {}",
                                     b + 1
                                 )));
+                            }
+                            // `letrec` patches closures its own module made;
+                            // another module's closures are not this code's
+                            // to change.
+                            let own = matches!(
+                                self.procedure_code(closure).map(|c| &c.kind),
+                                Ok(Kind::Bytecode { module, .. }) if *module as usize == current_module
+                            );
+                            if !own {
+                                fail!(Error::scheme(
+                                    "set-free: the closure belongs to another module"
+                                ));
                             }
                             self.write_field(closure, Self::LAYOUT.closure_free(b), slot(fp, c));
                             pc += 1;

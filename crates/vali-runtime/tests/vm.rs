@@ -771,3 +771,13 @@ fn panics_in_procedures_become_errors() {
     );
     assert_eq!(cx.call(&one, &[]).unwrap().as_fixnum(), Some(1));
 }
+
+/// A vector too big for 32-bit field offsets is refused, not allocated
+/// with offsets that wrap.
+#[test]
+fn objects_too_big_to_address_are_refused() {
+    let mut cx = cx();
+    // SAFETY: the fill is a valid value.
+    let result = unsafe { cx.make_vector_raw(1 << 28, Value::FALSE) };
+    assert!(result.is_err());
+}

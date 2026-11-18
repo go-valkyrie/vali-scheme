@@ -2772,3 +2772,24 @@ fn backtraces_have_positions() {
         ]
     );
 }
+
+/// `%catch`, `%call/cc` and `%continue` read their arguments from the call
+/// window, so a call with the wrong number is an error, not a read past it.
+#[test]
+fn control_procedures_check_their_arity() {
+    for source in [
+        "(%catch)",
+        "(%call/cc)",
+        "(%continue)",
+        "(%catch (lambda () 1))",
+    ] {
+        let Err(Error::Scheme(e)) = run(source) else {
+            panic!("{source}: expected an error");
+        };
+        assert!(
+            e.message.contains("wrong number of arguments"),
+            "{source}: {}",
+            e.message
+        );
+    }
+}

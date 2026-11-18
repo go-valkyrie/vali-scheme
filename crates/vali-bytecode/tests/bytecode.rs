@@ -344,6 +344,22 @@ fn the_validator_rejects_out_of_range_operands() {
     assert!(rejected(&bad_free).contains("free variable 0 does not exist"));
 }
 
+/// Slot 0 holds the running closure, which the VM reads back for the code
+/// it runs: nothing may write it, and no call's header may cover it.
+#[test]
+fn the_validator_keeps_slot_0() {
+    let write = module_with(2, |_, f| {
+        f.emit(I::LoadInt { dst: 0, value: 1 })
+            .emit(I::Return { src: 0 });
+    });
+    assert!(rejected(&write).contains("slot 0"));
+    let call = module_with(8, |_, f| {
+        f.emit(I::Call { base: 0, argc: 1 })
+            .emit(I::Return { src: 3 });
+    });
+    assert!(rejected(&call).contains("slot 0"));
+}
+
 #[test]
 fn the_validator_rejects_bad_control_flow() {
     let mut runs_off = module_with(2, |_, f| {

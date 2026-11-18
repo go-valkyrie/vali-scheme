@@ -252,6 +252,14 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             if !ok {
                 return fail(format!("a slot is outside the {slots}-slot frame"));
             }
+            // Slot 0 holds the running closure, which the VM reads back for
+            // the code, constants and variables it runs with, and a call's
+            // header would overwrite it from base 0.
+            if written_slot(instruction) == Some(0)
+                || matches!(instruction, Instruction::Call { base: 0, .. })
+            {
+                return fail("slot 0 holds the running closure, and cannot be written".into());
+            }
             if let Some(offset) = instruction.offset() {
                 let target = branch_target(*pc, *len, offset);
                 if !target.is_some_and(|t| starts.contains(&t)) {
@@ -261,4 +269,37 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
         }
     }
     Ok(())
+}
+
+/// The slot `instruction` writes its result to, if it writes one.
+fn written_slot(instruction: &Instruction) -> Option<u8> {
+    match *instruction {
+        Instruction::Mov { dst, .. }
+        | Instruction::MakeBox { dst, .. }
+        | Instruction::Unbox { dst, .. }
+        | Instruction::Not { dst, .. }
+        | Instruction::IsNull { dst, .. }
+        | Instruction::IsPair { dst, .. }
+        | Instruction::Car { dst, .. }
+        | Instruction::Cdr { dst, .. }
+        | Instruction::VectorLength { dst, .. }
+        | Instruction::LoadInt { dst, .. }
+        | Instruction::LoadConstant { dst, .. }
+        | Instruction::GetVariable { dst, .. }
+        | Instruction::Closure { dst, .. }
+        | Instruction::Free { dst, .. }
+        | Instruction::Add { dst, .. }
+        | Instruction::Sub { dst, .. }
+        | Instruction::Mul { dst, .. }
+        | Instruction::Lt { dst, .. }
+        | Instruction::Le { dst, .. }
+        | Instruction::NumEq { dst, .. }
+        | Instruction::Eq { dst, .. }
+        | Instruction::Cons { dst, .. }
+        | Instruction::MakeVector { dst, .. }
+        | Instruction::VectorRef { dst, .. }
+        | Instruction::AddImm { dst, .. }
+        | Instruction::SubImm { dst, .. } => Some(dst),
+        _ => None,
+    }
 }

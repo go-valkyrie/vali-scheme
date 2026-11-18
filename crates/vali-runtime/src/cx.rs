@@ -21,6 +21,10 @@ use crate::stack::{Segment, View};
 use crate::strategy::{Space, Strategy};
 use crate::value::Value;
 
+/// The most fields an object can have, so that every field's offset from
+/// its value, in bytes, fits the 32 bits `Layout::field` computes in.
+const MAX_FIELDS: usize = (i32::MAX as usize / 8) - 2;
+
 /// A variable's cell that the isolate owns, boxed so it stays put.
 pub(crate) type OwnCell = Box<std::cell::UnsafeCell<Value>>;
 
@@ -233,6 +237,11 @@ impl<S: Strategy> Cx<S> {
             TypeCode::Flonum => Space::Flonum,
             _ => Space::General,
         };
+        // Field offsets are 32-bit (`Layout::field`): a bigger object's
+        // last fields would wrap around to addresses before it.
+        if fields > MAX_FIELDS {
+            return Err(OutOfMemory);
+        }
         let words = Self::LAYOUT.words(t, fields);
         let memory = S::allocate(&mut self.heap, space, words)?;
         let v = Value::from_address(t.tag(), memory.as_ptr() as u64);
