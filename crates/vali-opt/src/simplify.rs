@@ -98,27 +98,11 @@ fn fold(value: &Value, pool: &mut Pool<'_>) -> Option<Operand> {
         Primitive::Not => Constant::Boolean(matches!(constant(pool, 0)?, Constant::Boolean(false))),
         Primitive::IsNull => Constant::Boolean(matches!(constant(pool, 0)?, Constant::EmptyList)),
         Primitive::IsPair => Constant::Boolean(matches!(constant(pool, 0)?, Constant::Pair(..))),
-        Primitive::Car | Primitive::Cdr => match constant(pool, 0)? {
-            Constant::Pair(ref car, ref cdr) => {
-                let part = if *op == Primitive::Car { car } else { cdr };
-                // Only a part with no identity can be copied: a pair,
-                // string, vector or bytevector must stay the object the
-                // pair holds, or `eq?`, `memq` and `assq` miss it.
-                if !matches!(
-                    **part,
-                    Constant::Integer(_)
-                        | Constant::Boolean(_)
-                        | Constant::Character(_)
-                        | Constant::EmptyList
-                        | Constant::Unspecified
-                        | Constant::Symbol(_)
-                ) {
-                    return None;
-                }
-                return Some(Operand::Const(pool.add((**part).clone())));
-            }
-            _ => return None,
-        },
+        // `car`, `cdr` and `vector-ref` of a constant are not folded: a
+        // quoted pair or vector can be mutated (`set-car!`, `vector-set!`),
+        // so its contents at compile time need not be its contents when the
+        // read runs. Its type and a vector's length cannot change, so
+        // `pair?` and `vector-length` fold.
         Primitive::VectorLength => match constant(pool, 0)? {
             Constant::Vector(ref items) => Constant::Integer(i64::try_from(items.len()).ok()?),
             _ => return None,

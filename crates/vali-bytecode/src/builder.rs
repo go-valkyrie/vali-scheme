@@ -215,13 +215,22 @@ impl ModuleBuilder {
         }
     }
 
-    /// The index of `constant`, adding it if it is new.
+    /// The index of `constant`, adding it if it is new. Equal constants share
+    /// an entry, except pairs and vectors: each is a mutable object, and
+    /// two equal quoted lists are two objects, so changing one must not
+    /// change the other.
     ///
     /// # Panics
     ///
     /// If the pool would exceed 65,536 constants.
     pub fn constant(&mut self, constant: Constant) -> u16 {
-        let index = match self.constants.iter().position(|c| identical(c, &constant)) {
+        let mutable = matches!(constant, Constant::Pair(..) | Constant::Vector(_));
+        let found = if mutable {
+            None
+        } else {
+            self.constants.iter().position(|c| identical(c, &constant))
+        };
+        let index = match found {
             Some(index) => index,
             None => {
                 self.constants.push(constant);

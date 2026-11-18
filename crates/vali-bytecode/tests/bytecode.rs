@@ -651,3 +651,20 @@ fn constants_and_variables_are_shared() {
     assert_eq!(m.variable("b"), 1);
     assert_eq!(m.variable("a"), 0);
 }
+
+#[test]
+fn equal_pairs_and_vectors_are_not_shared() {
+    // Each is a mutable object: two equal quoted lists must stay two.
+    let pair = || {
+        Constant::Pair(
+            Box::new(Constant::Integer(1)),
+            Box::new(Constant::EmptyList),
+        )
+    };
+    let vector = || Constant::Vector(vec![Constant::Integer(1)]);
+    let mut m = ModuleBuilder::new("mutable");
+    assert_eq!(m.constant(pair()), 0);
+    assert_eq!(m.constant(pair()), 1);
+    assert_eq!(m.constant(vector()), 2);
+    assert_eq!(m.constant(vector()), 3);
+}

@@ -38,17 +38,23 @@ fn constants_fold() {
     let ir = ir("(define (f) (+ 1 (* 2 3)))");
     assert!(ir.contains("c0 = #<unspecified>\nc1 = 7\ng0"), "{ir}");
     assert!(ir.contains("fun f1 f () []:\n  return c1\n"), "{ir}");
+    // A vector's length and a constant's type cannot change.
     check(
-        "(define (q) (car '(1 2 3)))",
+        "(define (q) (vector-length '#(1 2 3)))",
+        "fun f1 q () []:\n  return c1\n",
+    );
+    check(
+        "(define (q) (pair? '(1 2 3)))",
         "fun f1 q () []:\n  return c1\n",
     );
 }
 
 #[test]
-fn parts_with_identity_are_not_folded() {
-    // A pair, string or vector inside a constant must stay the object the
-    // constant holds, or `eq?` and `memq` on it would miss.
+fn reads_of_literal_pairs_are_not_folded() {
+    // A quoted pair can be changed by `set-car!` and `set-cdr!`, so what
+    // `car` and `cdr` of it return is only known when they run.
     for source in [
+        "(define (q) (car '(1 2 3)))",
         "(define (q) (cdr '(1 2 3)))",
         "(define (q) (car '((1) 2)))",
         "(define (q) (car '(\"s\")))",
