@@ -1,0 +1,29 @@
+# Runs `mise run check` (formatting, Clippy, every test, documentation and
+# dependency licences) on every push and pull request.
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # jouet is a development aid, not needed to check the code.
+      MISE_DISABLE_TOOLS: jouet
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned toolchain and cargo-deny
+        run: bin/mise install
+      - name: Check
+        run: bin/mise run check

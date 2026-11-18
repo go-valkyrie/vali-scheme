@@ -10,7 +10,9 @@
 //! each file reads as Scheme.
 //!
 //! What [`Evaluate`] does depends on the file's kind:
-//! - `scheme`: runs it; it passes if it runs to the end.
+//! - `scheme`: runs it under every memory strategy; it passes if every run
+//!   ends. A strategy that frees too early shows up here as a wrong answer
+//!   or a crash, which the one strategy that never frees cannot show.
 //! - `host`: the same, in the host fixture `host:` names. `in-memory-loader`
 //!   also serves `(regression virtual)` from memory; `expansion-reads-scoped`
 //!   lets expansion read the test's `data/` directory and nothing else.
@@ -124,8 +126,8 @@ impl Backend for Evaluate {
                 return Outcome::Unsupported(format!("cannot run {kind:?} tests yet"));
             }
         }
-        match run(file, &host) {
-            Ok(_) => Outcome::Passed,
+        match run_everywhere(file, &host) {
+            Ok(()) => Outcome::Passed,
             Err(e) => Outcome::Failed(e),
         }
     }
@@ -200,26 +202,34 @@ fn benchmark(file: &TestFile, host: &TestHost) -> Outcome {
 
 /// Compiles and runs `file` in a fresh isolate, with `host`'s libraries,
 /// returning the isolate and the program's module.
-fn run(
+fn run<S: vali_runtime::Strategy>(
     file: &TestFile,
     host: &TestHost,
-) -> Result<
-    (
-        vali_runtime::Cx<vali_runtime::NoCollection>,
-        vali_runtime::ModuleId,
-    ),
-    String,
-> {
+) -> Result<(vali_runtime::Cx<S>, vali_runtime::ModuleId), String> {
     let identity = vali_compiler::Identity::new(&file.name);
     let program = vali_compiler::compile_program(&file.source, &identity, host)
         .map_err(|e| format!("compiling: {e}"))?;
-    let mut cx = vali_runtime::Cx::<vali_runtime::NoCollection>::new(&Default::default());
+    let mut cx = vali_runtime::Cx::<S>::new(&Default::default());
     let id = cx
         .install_primitives()
         .and_then(|()| vali_compiler::load_with(&mut cx, program, Arc::new(host.clone())))
-        .map_err(|e| e.to_string())?;
-    cx.run(id).map_err(|e| e.to_string())?;
+        .map_err(|e| format!("under {}: {e}", S::NAME))?;
+    cx.run(id).map_err(|e| format!("under {}: {e}", S::NAME))?;
     Ok((cx, id))
+}
+
+/// Compiles and runs `file` under every memory strategy, each in a fresh
+/// isolate, stopping at the first that fails.
+fn run_everywhere(file: &TestFile, host: &TestHost) -> Result<(), String> {
+    use vali_runtime::{
+        DeferredHeadered, DeferredSideCounts, NoCollection, PreciseHeadered, PreciseSideCounts,
+    };
+    run::<NoCollection>(file, host)?;
+    run::<DeferredHeadered>(file, host)?;
+    run::<DeferredSideCounts>(file, host)?;
+    run::<PreciseHeadered>(file, host)?;
+    run::<PreciseSideCounts>(file, host)?;
+    Ok(())
 }
 
 /// How much longer compiling four times as much may take, at most: twice
@@ -231,7 +241,7 @@ const MIN_TIME: Duration = Duration::from_millis(30);
 
 /// Runs a performance test: see the module documentation.
 fn performance(file: &TestFile, host: &TestHost) -> Outcome {
-    let (mut cx, id) = match run(file, host) {
+    let (mut cx, id) = match run::<vali_runtime::NoCollection>(file, host) {
         Ok(ran) => ran,
         Err(e) => return Outcome::Failed(e),
     };
