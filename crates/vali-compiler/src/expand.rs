@@ -1057,7 +1057,8 @@ impl Expander {
     /// variable the module defines under its own name.
     fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
         let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        if cfg!(debug_assertions) {
+        let through_ir = through_ir();
+        if cfg!(debug_assertions) || through_ir {
             let ir =
                 crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
             vali_dist::validate(&ir).map_err(|e| CompileError {
@@ -1065,6 +1066,20 @@ impl Expander {
                 span: None,
                 location: None,
             })?;
+            if through_ir {
+                let module = vali_bytecode::convert(&ir).map_err(|e| CompileError {
+                    message: format!("{name}: {e}"),
+                    span: None,
+                    location: None,
+                })?;
+                validate(&module).map_err(|e| CompileError {
+                    message: format!("{name}: conversion produced invalid bytecode: {e}"),
+                    span: None,
+                    location: None,
+                })?;
+                self.last_ir = Some(ir);
+                return Ok(module);
+            }
             self.last_ir = Some(ir);
         }
         let generator = crate::codegen::Generator {
@@ -2642,4 +2657,12 @@ impl Expander {
             Box::new(body),
         ))
     }
+}
+
+/// Whether modules are compiled through the IR (ADR 0017) rather than by
+/// the baseline compiler: while both exist, set by the `VALI_IR`
+/// environment variable, so the whole test suite can run either way.
+fn through_ir() -> bool {
+    static THROUGH_IR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *THROUGH_IR.get_or_init(|| std::env::var_os("VALI_IR").is_some())
 }

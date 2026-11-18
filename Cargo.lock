@@ -499,6 +499,9 @@ version = "0.0.0"
 [[package]]
 name = "vali-bytecode"
 version = "0.0.0"
+dependencies = [
+ "vali-dist",
+]
 
 [[package]]
 name = "vali-cli"

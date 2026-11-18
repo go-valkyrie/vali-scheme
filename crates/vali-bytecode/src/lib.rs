@@ -12,11 +12,13 @@
 //! format, rebuilt from source or a distribution artifact on any mismatch.
 
 mod builder;
+mod convert;
 mod instruction;
 mod module;
 mod validate;
 
 pub use builder::{BuildError, FunctionBuilder, Label, ModuleBuilder};
+pub use convert::{ConvertError, convert};
 pub use instruction::{
     DecodeError, Instruction, JUMP_RANGE, Opcode, Slot, field_d, field_e_signed, fields,
 };
