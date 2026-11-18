@@ -142,10 +142,10 @@ pub fn compile_program_with(
             .map(str::to_owned)
             .collect();
         program.imports.push(library::ImportSet::Only(
-            Box::new(library::ImportSet::Library(LibraryName::new([
-                "vali",
-                "primitive",
-            ]))),
+            Box::new(library::ImportSet::Library(
+                LibraryName::new(["vali", "primitive"]),
+                None,
+            )),
             internal,
         ));
     }

@@ -56,7 +56,10 @@ pub(crate) fn program(datums: &[Datum]) -> Result<Program> {
     let (mut imports, body) = library::program_imports(rest)?;
     let implicit = imports.is_empty();
     if implicit {
-        imports.push(ImportSet::Library(LibraryName::new(["scheme", "base"])));
+        imports.push(ImportSet::Library(
+            LibraryName::new(["scheme", "base"]),
+            None,
+        ));
     }
     Ok(Program {
         libraries,

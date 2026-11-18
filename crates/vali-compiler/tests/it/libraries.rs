@@ -583,3 +583,31 @@ fn a_changed_library_is_not_linked_silently() {
         "{error}"
     );
 }
+
+/// Refusing `(vali primitive)` points at the import set, not at the
+/// program's first form.
+#[test]
+fn the_internal_library_error_points_at_the_import() {
+    let locate = |source: &str, loader: &Map| {
+        compile_program(source, &Identity::new("main"), loader)
+            .unwrap_err()
+            .to_string()
+    };
+    let none = Map(Vec::new());
+    let error = locate(
+        "(import (scheme base)\n        (vali primitive))\n\n(display 1)",
+        &none,
+    );
+    assert!(error.starts_with("main:2:9: "), "{error}");
+    let error = locate(
+        "(import (scheme base)\n        (only (vali primitive) %raise))\n\n(display 1)",
+        &none,
+    );
+    assert!(error.starts_with("main:2:15: "), "{error}");
+    let loader = Map(vec![(
+        "(sneaky)",
+        "(define-library (sneaky)\n  (import (scheme base)\n          (vali primitive))\n  (export car))",
+    )]);
+    let error = locate("(import (sneaky)) 1", &loader);
+    assert!(error.starts_with("lib:(sneaky):3:11: "), "{error}");
+}

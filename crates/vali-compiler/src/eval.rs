@@ -46,9 +46,10 @@ impl Evaluator {
             expander,
             loader: None,
             count: 0,
-            interaction: vec![ImportSet::Library(library::LibraryName::new([
-                "scheme", "base",
-            ]))],
+            interaction: vec![ImportSet::Library(
+                library::LibraryName::new(["scheme", "base"]),
+                None,
+            )],
         }
     }
 }

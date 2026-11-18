@@ -68,9 +68,11 @@ impl fmt::Display for LibraryName {
 
 /// An import set (R7RS 5.6.1), naming which bindings of a library an
 /// import brings in, and under what names.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum ImportSet {
-    Library(LibraryName),
+    /// A library name, and where the program wrote it, if it did: the
+    /// compiler's own imports are written nowhere.
+    Library(LibraryName, Option<Span>),
     Only(Box<ImportSet>, Vec<String>),
     Except(Box<ImportSet>, Vec<String>),
     Prefix(Box<ImportSet>, String),
@@ -81,11 +83,22 @@ impl ImportSet {
     /// The library it imports from.
     pub(crate) fn library(&self) -> &LibraryName {
         match self {
-            ImportSet::Library(name) => name,
+            ImportSet::Library(name, _) => name,
             ImportSet::Only(set, _)
             | ImportSet::Except(set, _)
             | ImportSet::Prefix(set, _)
             | ImportSet::Rename(set, _) => set.library(),
+        }
+    }
+
+    /// Where the library's name was written, if it was.
+    pub(crate) fn span(&self) -> Option<Span> {
+        match self {
+            ImportSet::Library(_, span) => *span,
+            ImportSet::Only(set, _)
+            | ImportSet::Except(set, _)
+            | ImportSet::Prefix(set, _)
+            | ImportSet::Rename(set, _) => set.span(),
         }
     }
 }
@@ -206,12 +219,12 @@ pub(crate) fn import_set(d: &Datum) -> Result<ImportSet> {
             Ok(ImportSet::Rename(Box::new(import_set(set)?), renames))
         }
         [head, name] if symbol(head) == Some("library") => {
-            Ok(ImportSet::Library(library_name(name)?))
+            Ok(ImportSet::Library(library_name(name)?, Some(d.span)))
         }
         // Phases are implicit (ADR 0001 #1); for now an explicit level
         // imports at every phase too.
         [head, set, ..] if symbol(head) == Some("for") => import_set(set),
-        _ => Ok(ImportSet::Library(library_name(d)?)),
+        _ => Ok(ImportSet::Library(library_name(d)?, Some(d.span))),
     }
 }
 

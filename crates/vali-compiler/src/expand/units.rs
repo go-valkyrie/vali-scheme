@@ -693,7 +693,7 @@ impl Expander {
             error(format!("{library} does not export {name}"), span)
         };
         Ok(match set {
-            ImportSet::Library(name) => self.interface(name, span)?,
+            ImportSet::Library(name, _) => self.interface(name, span)?,
             ImportSet::Only(inner, names) => {
                 let all = self.import_bindings(inner, span)?;
                 let mut kept = Vec::new();
@@ -750,7 +750,7 @@ impl Expander {
                     "{} is internal to Vali: import the standard library that provides what you need",
                     set.library()
                 ),
-                span,
+                set.span().unwrap_or(span),
             ));
         }
         // Its macros, and what they refer to, come across first.
