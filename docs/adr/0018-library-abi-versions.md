@@ -1,7 +1,8 @@
 # 0018. Library ABI versions
 
-- **Status:** Accepted
+- **Status:** Accepted, not built
 - **Date:** 2026-11-18
+- **Amended:** 2026-11-18, after review: a procedural macro's reach through `datum->syntax` cannot be listed, so templates define the macro part of the ABI and per-binding facts catch the rest (items 1 and 3)
 - **Related:** 0001 (interface sections), 0006 (Vali's own ABI version), 0010 (contracts), 0012 (distribution, per-binding facts), 0017 (link-time optimisation)
 
 ## Context
@@ -16,12 +17,12 @@ A distributed library is linked against whatever version of each dependency is p
    - its exports, and each one's kind: variable, procedure, macro, record type or generic function;
    - each procedure's arity, and its contract or signature (ADR 0010);
    - whether each variable is constant;
-   - the private bindings its exported macros expand into, which other libraries' frozen expansions name even though they are not exported;
+   - the private bindings named in its exported macros' templates, which other libraries' frozen expansions name even though they are not exported. A procedural macro can reach other private bindings through `datum->syntax`; those cannot be listed in advance, and importers' per-binding facts catch their removal at link time (item 6);
    - the record types and generic functions it exports, and the methods it adds to other libraries' generic functions.
 2. **A library declares its ABI version in `define-library`,** as a major and a minor number: `(define-library (util) (abi-version 2 1) (export …) …)`. Other Schemes can be kept from seeing it with `(cond-expand (vali (abi-version 2 1)))`, which is a valid library declaration in R7RS.
 3. **The toolchain classifies every change to the ABI** as compatible or breaking:
    - **compatible:** adding an export; widening an arity; loosening an argument's contract or tightening a result's; making an assignable variable constant; adding a method on a type the library owns;
-   - **breaking:** removing or renaming an export, or a private binding an exported macro expands into; changing a binding's kind; narrowing an arity; tightening an argument's contract or loosening a result's; making a constant assignable; changing a record type's fields.
+   - **breaking:** removing or renaming an export, or a private binding named in an exported macro's template; changing a binding's kind; narrowing an arity; tightening an argument's contract or loosening a result's; making a constant assignable; changing a record type's fields.
 4. **Compiling a library for release checks its declared version against the last published interface.** A breaking change without a new major version, or a compatible change without at least a new minor version, is a compile error naming the binding and the change.
 5. **Each importer records, for each dependency, the ABI version it was compiled against,** next to its per-binding facts (ADR 0012 #6).
 6. **Linking requires both:**

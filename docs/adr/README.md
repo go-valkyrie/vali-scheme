@@ -9,6 +9,7 @@ Each record states one decision about Vali's design: the context that forced it,
 - A Proposed record can be edited freely while it is argued. It lays out the options and a recommendation, and lists the questions to settle before it is accepted.
 - While the design is being fleshed out, an Accepted record is amended in place, with an **Amended** line giving the date and what changed. A new record is written only for a new topic.
 - Once the design phase ends, Accepted records are frozen. A change of mind is then a new record that supersedes the old one, and the only edit to the old one is its status line.
+- A decision accepted but not yet built says so, in the status line or as **planned** at the item. Where built code differs from a record, an **As built** note says how.
 - An Accepted record may leave details open. They are listed under **Left open**, and settling one takes a new record.
 - New records start from [template.md](template.md).
 
@@ -32,7 +33,7 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0014](0014-reader-and-source-representation.md) | Reader and source representation | Accepted |
 | [0015](0015-scopes-and-syntax-objects.md) | Scopes and syntax objects | Accepted |
 | [0016](0016-rust-bridges-and-objects.md) | Rust bridges and objects | Accepted |
-| [0017](0017-intermediate-representation-and-optimisation.md) | Intermediate representation and where optimisation runs | Accepted |
-| [0018](0018-library-abi-versions.md) | Library ABI versions | Accepted |
+| [0017](0017-intermediate-representation-and-optimisation.md) | Intermediate representation and where optimisation runs | Accepted, not built |
+| [0018](0018-library-abi-versions.md) | Library ABI versions | Accepted, not built |
 
-Milestone M0 ended with 0002, 0004, 0005 and 0008 accepted. 0003 stays a proposal until M1's measurements choose a memory strategy.
+Milestone M0 ended with 0002, 0004, 0005 and 0008 accepted. 0003 stays a proposal. M1's measurements exist, but all five strategy variants stay built and tested until the optimising compiler's ownership inference can be measured too.

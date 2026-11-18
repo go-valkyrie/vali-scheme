@@ -20,7 +20,7 @@ The JVM and the CLR solve the same problem with two levels. They ship a stable b
 1. **Two representations of compiled code:**
    - The **distribution format** is stable, versioned and publicly specified. It is what compiled libraries ship as.
    - The **run format** is the bytecode of ADR 0005: private, an implementation detail, held only in the cache.
-2. **Converting from distribution to run format is fast:** one linear pass that resolves references, assigns slots, selects instructions and validates structure. Every optimisation that uses only the library's own code happens before the distribution format is written. Converting never needs whole-library analysis. Optimisation across libraries happens when the program is linked (item 11).
+2. **Converting from distribution to run format is fast:** a linear-time pass that resolves references, assigns slots, selects instructions and validates structure. Every optimisation that uses only the library's own code happens before the distribution format is written. Converting never needs whole-library analysis. Optimisation across libraries happens when the program is linked (item 11).
 3. **Every compile goes through the distribution format.** Compiling from source produces distribution code and then converts it, so there is a single path from compiler to VM, and it is tested by every build.
 4. **References between libraries are symbolic:** a library identity and a binding name, resolved when the library is linked. The distribution format never contains slot numbers, object layouts, runtime-table indexes or anything else private to one Vali version.
 5. **A distribution artifact contains:**
