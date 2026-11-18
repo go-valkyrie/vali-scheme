@@ -45,7 +45,7 @@ The design overview and ADR 0004 said the compiler would convert to CPS. CPS wit
 
 ### Where each optimisation runs
 
-9. **The compiler optimises each library using only that library's own code.** It needs each library to be expanded on its own, from fresh expansion-time instances and with its own numbering (ADRs 0001 #2 and #4, and 0015 #5). The expander does not do that yet; it is fixed before the IR is built. What the compiler does is everything that cannot go stale when a dependency changes:
+9. **The compiler optimises each library using only that library's own code.** It needs each library to be expanded on its own, from fresh expansion-time instances and with its own numbering (ADRs 0001 #2 and #4, and 0015 #5). The expander does, as of the work that made each unit expand with its own phase isolates, numbering and scope context. What the compiler does is everything that cannot go stale when a dependency changes:
    - contification of local functions into join points, and loops as `rec join`;
    - inlining, constant folding, copy propagation and dead-code elimination within the library;
    - closure conversion: known calls become direct calls, non-escaping functions are lambda-lifted, closures stay flat;
