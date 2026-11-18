@@ -222,9 +222,14 @@ impl Expander {
         let Some(owner) = self.owner.take() else {
             return Ok(());
         };
-        let state = self.swap_state(ContextState::empty(self.core_scope, self.core));
+        let mut state = self.swap_state(ContextState::empty(self.core_scope, self.core));
         match owner {
-            ContextOwner::Unit(unit) => self.units[unit].syntax = Some(Arc::new(state)),
+            ContextOwner::Unit(unit) => {
+                // Kept as the unit's syntax export for as long as the
+                // expander lives, so without the caches that only saved time.
+                state.context.clear_caches();
+                self.units[unit].syntax = Some(Arc::new(state));
+            }
             ContextOwner::Repl => self.repl_state = Some(state),
         }
         Ok(())

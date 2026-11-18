@@ -198,30 +198,31 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
             return Resolution::Unbound;
         };
         // Only entries kept by one of the identifier's own scopes can have
-        // sets that are subsets of its set.
-        // A symbol with fewer keys than the identifier has scopes, which is
-        // the usual case in deeply nested code, is cheaper to look at by
-        // its keys than to look up by the identifier's scopes.
+        // sets that are subsets of its set. A symbol with fewer keys than
+        // the identifier has scopes, which is the usual case in deeply
+        // nested code, is cheaper to look at by its keys than to look up
+        // by the identifier's scopes. Either way the candidates come in
+        // the same order: by key, `None` first, then by scope.
         let own = context.scopes(scopes);
-        let keys: Vec<Option<Scope>> = if by_key.len() <= own.len() {
-            let mut keys: Vec<Option<Scope>> = by_key
-                .keys()
-                .copied()
-                .filter(|k| k.is_none_or(|k| own.binary_search(&k).is_ok()))
+        let keep = |e: &&Entry<B>| e.phases.contains(phase) && context.is_subset(e.scopes, scopes);
+        let candidates: Vec<&Entry<B>> = if by_key.len() <= own.len() {
+            let mut keyed: Vec<(Option<Scope>, &Entry<B>)> = by_key
+                .iter()
+                .filter(|(k, _)| k.is_none_or(|k| own.binary_search(&k).is_ok()))
+                .flat_map(|(&k, entries)| entries.iter().map(move |e| (k, e)))
+                .filter(|(_, e)| keep(e))
                 .collect();
-            keys.sort_unstable();
-            keys
+            // Stable, so entries kept by one key stay in their order.
+            keyed.sort_by_key(|&(k, _)| k);
+            keyed.into_iter().map(|(_, e)| e).collect()
         } else {
             std::iter::once(None)
                 .chain(own.iter().copied().map(Some))
+                .filter_map(|k| by_key.get(&k))
+                .flatten()
+                .filter(keep)
                 .collect()
         };
-        let candidates: Vec<&Entry<B>> = keys
-            .iter()
-            .filter_map(|k| by_key.get(k))
-            .flatten()
-            .filter(|e| e.phases.contains(phase) && context.is_subset(e.scopes, scopes))
-            .collect();
         let Some(best) = candidates
             .iter()
             .max_by_key(|e| context.scopes(e.scopes).len())

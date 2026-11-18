@@ -90,19 +90,43 @@ const BIT_SET_BUDGET: usize = 256 << 20;
 type Batch = (ScopeSetId, Arc<[(Scope, Effect)]>);
 
 /// Numbers scopes and interns scope sets for one expansion.
-#[derive(Clone, Debug)]
+///
+/// Two caches speed up the work on large sets: bit sets, and the results
+/// of applying long lists of changes. They are this context's own and
+/// bounded (the bit sets by 256 MiB); a clone starts with empty ones, and
+/// [`ScopeContext::clear_caches`] drops them, so a finished context that is
+/// kept for its sets does not keep them too.
+#[derive(Debug)]
 pub struct ScopeContext {
     limit: u32,
     kinds: Vec<ScopeKind>,
     sets: Vec<Box<[Scope]>>,
     /// Each large set as a bit set, made when a subset test first needs it.
     bits: Vec<OnceLock<Box<[u64]>>>,
-    bits_bytes: Arc<AtomicUsize>,
+    /// How many bytes of `bits` this context has made, against its own
+    /// budget.
+    bits_bytes: AtomicUsize,
     interned: HashMap<Box<[Scope]>, ScopeSetId>,
     memo: HashMap<(ScopeSetId, Scope, Op), ScopeSetId>,
     /// Long lists of changes, applied whole, by the list's address. The
     /// list is kept, so its address stays its own.
     batches: HashMap<(ScopeSetId, usize), Batch>,
+}
+
+impl Clone for ScopeContext {
+    /// A copy of the scopes and sets, with empty caches.
+    fn clone(&self) -> Self {
+        ScopeContext {
+            limit: self.limit,
+            kinds: self.kinds.clone(),
+            sets: self.sets.clone(),
+            bits: self.sets.iter().map(|_| OnceLock::new()).collect(),
+            bits_bytes: AtomicUsize::new(0),
+            interned: self.interned.clone(),
+            memo: self.memo.clone(),
+            batches: HashMap::new(),
+        }
+    }
 }
 
 impl Default for ScopeContext {
@@ -127,11 +151,22 @@ impl ScopeContext {
             kinds: Vec::new(),
             sets: vec![empty.clone()],
             bits: vec![OnceLock::new()],
-            bits_bytes: Arc::new(AtomicUsize::new(0)),
+            bits_bytes: AtomicUsize::new(0),
             interned: HashMap::from([(empty, ScopeSetId::EMPTY)]),
             memo: HashMap::new(),
             batches: HashMap::new(),
         }
+    }
+
+    /// Drops the bit sets and the remembered lists of changes, which are
+    /// only there to save time. What the context numbers and interns is
+    /// untouched.
+    pub fn clear_caches(&mut self) {
+        self.bits
+            .iter_mut()
+            .for_each(|cell| *cell = OnceLock::new());
+        self.bits_bytes = AtomicUsize::new(0);
+        self.batches = HashMap::new();
     }
 
     /// A fresh scope.
@@ -208,6 +243,16 @@ impl ScopeContext {
         }
         let scopes = self.scopes(set);
         let words = scopes.last().map_or(0, |s| s.0 as usize / 64 + 1);
+        // A set is sized by its highest scope, not by how many it has. It
+        // is dense when that takes no more words than it has scopes, which
+        // is when a word-wise test beats the merge's one comparison per
+        // scope (deeply nested code adds scopes one after another, so its
+        // sets are). A sparse set, say a few dozen scopes late in a unit
+        // with many, would cost more words than comparisons, and more
+        // memory too.
+        if words > scopes.len() {
+            return None;
+        }
         let bytes = words * 8;
         if self.bits_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes > BIT_SET_BUDGET {
             self.bits_bytes.fetch_sub(bytes, Ordering::Relaxed);
@@ -503,5 +548,145 @@ impl Remap {
     /// identifier mapped so far have a set that holds it.
     pub fn has_met_all(&self, from: &ScopeContext, set: ScopeSetId) -> bool {
         from.scopes(set).iter().all(|s| self.scopes.contains_key(s))
+    }
+}
+
+#[cfg(test)]
+mod fast_paths {
+    use super::*;
+    use std::sync::Arc;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn random_set(cx: &mut ScopeContext, rng: &mut Rng, all: &[Scope], max: u64) -> ScopeSetId {
+        let n = rng.below(max + 1) as usize;
+        let mut v: Vec<Scope> = (0..n)
+            .map(|_| all[rng.below(all.len() as u64) as usize])
+            .collect();
+        v.sort();
+        v.dedup();
+        cx.intern(&v).unwrap()
+    }
+
+    #[test]
+    fn apply_changes_matches_one_at_a_time() {
+        let mut rng = Rng(0x9e3779b97f4a7c15);
+        let mut cx = ScopeContext::new();
+        let all: Vec<Scope> = (0..400)
+            .map(|_| cx.new_scope(ScopeKind::Binder).unwrap())
+            .collect();
+        for round in 0..20_000 {
+            let set = random_set(&mut cx, &mut rng, &all, 200);
+            let len = 1 + rng.below(80) as usize;
+            let mut scopes: Vec<Scope> = (0..len)
+                .map(|_| all[rng.below(all.len() as u64) as usize])
+                .collect();
+            scopes.sort();
+            scopes.dedup();
+            let changes: Vec<(Scope, Effect)> = scopes
+                .into_iter()
+                .map(|s| {
+                    (
+                        s,
+                        [Effect::Add, Effect::Remove, Effect::Flip][rng.below(3) as usize],
+                    )
+                })
+                .collect();
+            let changes: Arc<[(Scope, Effect)]> = changes.into();
+            let mut expected = set;
+            for &(s, e) in changes.iter() {
+                expected = e.apply(&mut cx, expected, s).unwrap();
+            }
+            assert_eq!(
+                cx.apply_changes(set, &changes).unwrap(),
+                expected,
+                "round {round}"
+            );
+            // And again, from the memo.
+            assert_eq!(
+                cx.apply_changes(set, &changes).unwrap(),
+                expected,
+                "memo, round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_subset_matches_naive() {
+        let mut rng = Rng(0x2545f4914f6cdd1d);
+        let mut cx = ScopeContext::new();
+        // Few enough scopes that the sets are dense, so the bit sets are
+        // used.
+        let all: Vec<Scope> = (0..600)
+            .map(|_| cx.new_scope(ScopeKind::Binder).unwrap())
+            .collect();
+        let mut subsets = 0;
+        let mut by_bits = 0;
+        for round in 0..20_000 {
+            let b = random_set(&mut cx, &mut rng, &all, 400);
+            // Half the time a is drawn from b (often a subset), else at
+            // random.
+            let a = if rng.below(2) == 0 {
+                let sb = cx.scopes(b).to_vec();
+                let mut v: Vec<Scope> = sb.into_iter().filter(|_| rng.below(8) != 0).collect();
+                if rng.below(4) == 0 {
+                    v.push(all[rng.below(all.len() as u64) as usize]);
+                }
+                v.sort();
+                v.dedup();
+                cx.intern(&v).unwrap()
+            } else {
+                random_set(&mut cx, &mut rng, &all, 400)
+            };
+            let naive = cx.scopes(a).iter().all(|s| cx.scopes(b).contains(s));
+            subsets += usize::from(naive);
+            if cx.scopes(a).len() >= BIT_SET_MIN
+                && cx.bit_set(a).is_some()
+                && cx.bit_set(b).is_some()
+            {
+                by_bits += 1;
+            }
+            assert_eq!(cx.is_subset(a, b), naive, "round {round}");
+        }
+        assert!(
+            subsets > 1000,
+            "{subsets} subsets: the true case is barely exercised"
+        );
+        assert!(
+            by_bits > 1000,
+            "{by_bits} tests by bit set: the path is barely exercised"
+        );
+    }
+
+    #[test]
+    fn sparse_sets_get_no_bit_set_and_clones_start_empty() {
+        let mut cx = ScopeContext::new();
+        let all: Vec<Scope> = (0..10_000)
+            .map(|_| cx.new_scope(ScopeKind::Binder).unwrap())
+            .collect();
+        let dense = cx.intern(&all[..100]).unwrap();
+        let sparse = cx.intern(&all[9_900..9_980]).unwrap();
+        assert!(cx.bit_set(dense).is_some());
+        assert!(cx.bit_set(sparse).is_none());
+        // Sparse sets still compare correctly, by the merge.
+        assert!(cx.is_subset(sparse, sparse));
+        assert!(!cx.is_subset(sparse, dense));
+        let clone = cx.clone();
+        assert!(clone.bits[dense.0 as usize].get().is_none());
+        cx.clear_caches();
+        assert!(cx.bits[dense.0 as usize].get().is_none());
+        assert_eq!(cx.scopes(dense), &all[..100]);
+        assert!(cx.is_subset(dense, dense));
     }
 }
