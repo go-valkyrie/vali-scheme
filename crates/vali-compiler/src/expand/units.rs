@@ -547,6 +547,10 @@ impl Expander {
         self.phases.clear();
         self.generation += 1;
         self.fresh = 0;
+        // A unit that failed to compile can leave its lambdas open, and
+        // `forget` reuses their numbers.
+        self.stack.clear();
+        self.floors.clear();
         let imported_at = imported;
         let mut imported = Vec::new();
         for set in imports {

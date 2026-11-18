@@ -121,3 +121,22 @@ fn incomplete_input() {
         assert!(!Repl::<DeferredHeadered>::is_incomplete(text), "{text}");
     }
 }
+
+/// An input that fails to compile leaves nothing behind that a later
+/// input trips over, whatever the later one expands to.
+#[test]
+fn inputs_after_a_failed_one() {
+    check(&[
+        ("(if)", Err("if: expected a test")),
+        (
+            "(let loop ((i 0)) (if (< i 3) (loop (+ i 1)) i))",
+            Ok(&["3"]),
+        ),
+        (
+            "(define-record-type point (make-point x) point? (x point-x))",
+            Ok(&[]),
+        ),
+        ("(point-x (make-point 5))", Ok(&["5"])),
+        ("((lambda (a b) (+ a b)) 1 2)", Ok(&["3"])),
+    ]);
+}
