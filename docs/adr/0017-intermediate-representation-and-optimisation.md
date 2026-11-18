@@ -61,6 +61,8 @@ The design overview and ADR 0004 said the compiler would convert to CPS. CPS wit
    - ownership inference: which parameters can be borrowed, recorded as hints (item 6).
 
    Distribution code contains only checked operations, and refers to other libraries only by name. It never contains another library's body, constant values, resolved methods or types.
+
+   **As built:** `vali-opt` simplifies each function: constant folding of primitive operations on constants that cannot raise, copy propagation, `if`s on constants, removing `let`s whose values are unused and may only allocate or read, join points nothing jumps to, and a join point whose body is just a jump to it; then the constants no code uses are dropped. Each round rebuilds the function without recursing, at most four rounds. It runs on libraries, programs and transformers, not on evaluated code or REPL inputs (ADR 0013 #13); the prebuilt standard libraries are optimised when built. Setting `VALI_NO_OPT` turns it off, so the suite can check it changes nothing a program can see. Inlining, closure conversion, type and ownership inference are not built.
 10. **Conversion to run format stays linear-time** (ADR 0012 #2): validating the IR, liveness for slot allocation, inserting ownership operations (item 6), instruction selection, positions. Liveness is computed in two passes over each function, using SSA liveness for reducible control flow (Boissinot et al.); loops are explicit `rec join`s, so control flow is always reducible. Its output is cached per artifact.
 11. **The linker optimises across libraries when the program is loaded** (planned, not scheduled), with the versions of every library actually present:
     - inlining other libraries' procedures, and folding their constants;

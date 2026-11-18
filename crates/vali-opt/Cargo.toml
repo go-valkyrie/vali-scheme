@@ -1,0 +1,17 @@
+[package]
+name = "vali-opt"
+description = "Vali's optimiser: passes over the IR for each library (ADR 0017)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vali-dist.workspace = true
+
+[dev-dependencies]
+vali-compiler.workspace = true
+
+[lints]
+workspace = true

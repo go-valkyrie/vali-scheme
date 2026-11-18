@@ -249,17 +249,18 @@ fn prepare<S: Strategy>(
             thunks.push(cx.module_body(id)?);
         }
     }
+    // Evaluated code gets no optimisation (ADR 0013 #13).
+    expander.optimise = false;
     let body = if interactive {
-        let module = expander
-            .interaction(identity.as_str(), &sets, &body)
-            .map_err(compile_error)?;
-        evaluator.interaction = sets;
-        module
+        expander.interaction(identity.as_str(), &sets, &body)
     } else {
-        expander
-            .program(identity.as_str(), &sets, false, &body, false)
-            .map_err(compile_error)?
+        expander.program(identity.as_str(), &sets, false, &body, false)
     };
+    expander.optimise = true;
+    let body = body.map_err(compile_error)?;
+    if interactive {
+        evaluator.interaction = sets;
+    }
     let expander = &mut evaluator.expander;
     if crate::uses_syntax(&body) {
         crate::merge_syntax_data(cx, expander.syntax_data())?;

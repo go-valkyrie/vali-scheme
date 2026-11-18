@@ -521,6 +521,7 @@ dependencies = [
  "vali-bytecode",
  "vali-dist",
  "vali-num",
+ "vali-opt",
  "vali-runtime",
  "vali-syntax",
 ]
@@ -545,6 +546,14 @@ dependencies = [
  "dashu-int",
  "dashu-ratio",
  "libm",
+]
+
+[[package]]
+name = "vali-opt"
+version = "0.0.0"
+dependencies = [
+ "vali-compiler",
+ "vali-dist",
 ]
 
 [[package]]

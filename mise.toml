@@ -15,11 +15,12 @@ description = "Build every crate"
 run = "cargo build --workspace --all-targets"
 
 [tasks.test]
-description = "Run every crate's tests, the native debugger tests with native frames on, and the library tests on artifacts"
+description = "Run every crate's tests, the native debugger tests with native frames on, the library tests on artifacts, and the library and bridge tests unoptimised"
 run = [
     "cargo test --workspace",
     "cargo test -p vali-runtime --features native-frames --test debugger",
     "VALI_ROUND_TRIP=1 cargo test -p vali-compiler --test libraries",
+    "VALI_NO_OPT=1 cargo test -p vali-compiler --test libraries --test bridges",
 ]
 
 [tasks.lint]

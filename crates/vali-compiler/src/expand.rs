@@ -273,6 +273,14 @@ fn remap_export(
     remap_bindings(&export.table, from, &mut remap, table, context)
 }
 
+/// Whether the optimiser runs: off when the `VALI_NO_OPT` environment
+/// variable is set, so the test suite can check that it changes nothing a
+/// program can see.
+fn optimising() -> bool {
+    static OPTIMISING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OPTIMISING.get_or_init(|| std::env::var_os("VALI_NO_OPT").is_none())
+}
+
 /// Whether every library's syntax export, and later its whole artifact, is
 /// encoded and decoded as it is finished, so the test suite runs on what
 /// artifacts hold: set by the `VALI_ROUND_TRIP` environment variable.
@@ -603,6 +611,9 @@ pub(crate) struct Expander {
     pub(crate) sources: vali_syntax::Sources,
     /// The IR of the last module compiled.
     pub(crate) last_ir: Option<vali_dist::Module>,
+    /// Whether what is compiled now is optimised: false while evaluated
+    /// code or a REPL input is.
+    pub(crate) optimise: bool,
 }
 
 impl Expander {
@@ -648,6 +659,7 @@ impl Expander {
             available: crate::loader::Available::new(),
             sources: vali_syntax::Sources::new(),
             last_ir: None,
+            optimise: true,
             repl: None,
         };
         Ok(expander)
@@ -1399,9 +1411,16 @@ impl Expander {
     }
 
     /// The `lambda` `body` lowered to the IR, as a module's body.
+    /// Optimised unless the unit is evaluated code or a REPL input, which
+    /// gets no passes (ADR 0013 #13), or optimising is off.
     fn lowered(&self, body: LambdaId, name: &str) -> Result<vali_dist::Module> {
         let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)
+        let mut ir =
+            crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
+        if self.optimise && optimising() {
+            vali_opt::optimise(&mut ir);
+        }
+        Ok(ir)
     }
 
     /// What the library `name` exports, by name.

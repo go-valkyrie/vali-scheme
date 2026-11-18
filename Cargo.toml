@@ -16,6 +16,7 @@ vali-compiler = { path = "crates/vali-compiler", version = "0.0.0" }
 vali-dist = { path = "crates/vali-dist", version = "0.0.0" }
 vali-macros = { path = "crates/vali-macros", version = "0.0.0" }
 vali-num = { path = "crates/vali-num", version = "0.0.0" }
+vali-opt = { path = "crates/vali-opt", version = "0.0.0" }
 vali-runtime = { path = "crates/vali-runtime", version = "0.0.0" }
 vali-stdlib = { path = "crates/vali-stdlib", version = "0.0.0" }
 vali-syntax = { path = "crates/vali-syntax", version = "0.0.0" }
