@@ -16,11 +16,13 @@ impl Loader for NoLibraries {
 
 /// The printed, optimised IR of `source`'s body.
 fn ir(source: &str) -> String {
-    vali_compiler::compile_internal_program(source, &Identity::new("test"), &NoLibraries)
-        .unwrap_or_else(|e| panic!("{source}\n{e}"))
-        .ir
-        .expect("every module is lowered")
-        .to_string()
+    let mut ir =
+        vali_compiler::compile_internal_program(source, &Identity::new("test"), &NoLibraries)
+            .unwrap_or_else(|e| panic!("{source}\n{e}"))
+            .ir
+            .expect("every module is lowered");
+    vali_opt::optimise(&mut ir);
+    ir.to_string()
 }
 
 /// Asserts that the optimised IR of `source` has `expected`.
@@ -53,6 +55,24 @@ fn ifs_on_constants_keep_one_arm() {
         "(define (k x) (+ 1 (if (< 1 2) x 0)))",
         "fun f1 k (v0) []:\n  let v3 = + c0 v0 @0:1:14\n  return v3\n",
     );
+}
+
+#[test]
+fn assigned_variables_need_no_box_without_calls() {
+    // i is assigned, but nothing captures it and nothing is called: it is
+    // a parameter of the loop and of the join point after it.
+    let counted = ir(
+        "(define (count n) (define i 0) (let loop () (if (< i n) (begin (set! i (+ i 1)) (loop)))) i)",
+    );
+    assert!(!counted.contains("box"), "{counted}");
+    println!("{counted}");
+    // A call in its scope could capture a continuation, which copies the
+    // frame: the box stays.
+    let called = ir("(define (f g) (define i 0) (g) (set! i 1) i)");
+    assert!(called.contains("box"), "{called}");
+    // So does a closure that captures it.
+    let captured = ir("(define (f) (define i 0) (lambda () (set! i 1) i))");
+    assert!(captured.contains("box"), "{captured}");
 }
 
 #[test]

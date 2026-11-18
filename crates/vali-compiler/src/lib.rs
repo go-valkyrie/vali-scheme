@@ -93,7 +93,8 @@ pub struct Program {
     /// What `eval` needs, if the program imports `(scheme eval)`: the
     /// expander that compiled it, which [`load`] keeps in the isolate.
     pub evaluator: Option<Evaluator>,
-    /// The body's IR, for Vali's own tests.
+    /// The body's IR as lowered, before it was optimised, for Vali's own
+    /// tests.
     #[doc(hidden)]
     pub ir: Option<vali_dist::Module>,
     /// Each library's artifact, in the order they were compiled, when
@@ -308,7 +309,7 @@ fn build(
     expander.sources = sources;
     match expand_all(&mut expander, program, graph, identity, &artifacts.read) {
         Ok((libraries, body, natives, names_eval)) => {
-            let ir = expander.last_ir.take();
+            let ir = expander.last_lowered.take();
             let loaded = libraries
                 .iter()
                 .filter(|(identity, _)| expander.loaded_from_artifact(identity.as_str()))

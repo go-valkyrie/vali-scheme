@@ -611,6 +611,8 @@ pub(crate) struct Expander {
     pub(crate) sources: vali_syntax::Sources,
     /// The IR of the last module compiled.
     pub(crate) last_ir: Option<vali_dist::Module>,
+    /// The same before it was optimised.
+    pub(crate) last_lowered: Option<vali_dist::Module>,
     /// Whether what is compiled now is optimised: false while evaluated
     /// code or a REPL input is.
     pub(crate) optimise: bool,
@@ -659,6 +661,7 @@ impl Expander {
             available: crate::loader::Available::new(),
             sources: vali_syntax::Sources::new(),
             last_ir: None,
+            last_lowered: None,
             optimise: true,
             repl: None,
         };
@@ -1404,23 +1407,35 @@ impl Expander {
     /// compiled goes through the IR (ADR 0017): the tree is
     /// lowered to it, then converted to run-format bytecode.
     fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
-        let ir = self.lowered(body, name)?;
+        let lowered = self.lower_only(body, name)?;
+        let mut ir = lowered.clone();
+        self.optimised(&mut ir);
         let module = converted(&ir)?;
+        self.last_lowered = Some(lowered);
         self.last_ir = Some(ir);
         Ok(module)
     }
 
-    /// The `lambda` `body` lowered to the IR, as a module's body.
-    /// Optimised unless the unit is evaluated code or a REPL input, which
-    /// gets no passes (ADR 0013 #13), or optimising is off.
+    /// The `lambda` `body` lowered to the IR, as a module's body, and
+    /// optimised (`optimised`).
     fn lowered(&self, body: LambdaId, name: &str) -> Result<vali_dist::Module> {
-        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        let mut ir =
-            crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
-        if self.optimise && optimising() {
-            vali_opt::optimise(&mut ir);
-        }
+        let mut ir = self.lower_only(body, name)?;
+        self.optimised(&mut ir);
         Ok(ir)
+    }
+
+    /// The `lambda` `body` lowered to the IR, as a module's body.
+    fn lower_only(&self, body: LambdaId, name: &str) -> Result<vali_dist::Module> {
+        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
+        crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)
+    }
+
+    /// Optimises `ir`, unless the unit is evaluated code or a REPL input,
+    /// which gets no passes (ADR 0013 #13), or optimising is off.
+    fn optimised(&self, ir: &mut vali_dist::Module) {
+        if self.optimise && optimising() {
+            vali_opt::optimise(ir);
+        }
     }
 
     /// What the library `name` exports, by name.

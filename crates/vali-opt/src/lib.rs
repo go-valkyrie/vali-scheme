@@ -10,9 +10,12 @@
 //!   constants, and removing `let`s whose values are unused and have no
 //!   effect beyond allocating or reading, and join points nothing jumps
 //!   to. Run to a fixed point, at most a few rounds.
+//! - [`unbox`](optimise): assigned variables that need no box become
+//!   values again, threaded through join points (ADR 0017 #5). Runs first.
 
 mod build;
 mod simplify;
+mod unbox;
 
 use vali_dist::{ConstantId, Module, Operand, Term, Value};
 
@@ -23,6 +26,7 @@ const ROUNDS: usize = 4;
 /// Optimises `module` in place. It stays valid.
 pub fn optimise(module: &mut Module) {
     for n in 0..module.functions.len() {
+        unbox::unbox(module, n);
         for _ in 0..ROUNDS {
             if !simplify::simplify(module, n) {
                 break;
