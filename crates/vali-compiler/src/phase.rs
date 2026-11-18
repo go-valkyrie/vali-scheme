@@ -17,7 +17,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use vali_bytecode::Arity;
-use vali_runtime::{Cx, Error, HeapConfig, NoCollection, Strategy, Value};
+use vali_runtime::{Cx, DeferredHeadered, Error, HeapConfig, Strategy, Value};
 use vali_syntax::{
     BindingTable, Origin, Phase, ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax,
     bound_identifier_eq, free_identifier_eq,
@@ -74,7 +74,9 @@ pub(crate) const SYNTAX_BUILD: &str = "%syntax-build";
 
 /// A new phase-1 isolate, with the standard procedures and the syntax
 /// procedures.
-pub(crate) fn instance() -> Result<Cx<NoCollection>, Error> {
+/// An isolate for expansion-time code. It counts references, deferred, so
+/// a macro that allocates heavily frees as it goes.
+pub(crate) fn instance() -> Result<Cx<DeferredHeadered>, Error> {
     let mut cx = Cx::new(&HeapConfig::default());
     cx.set_expanding(true);
     cx.install_primitives()?;

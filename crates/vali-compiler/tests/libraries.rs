@@ -227,6 +227,64 @@ fn each_phase_has_its_own_instance() {
     )]);
 }
 
+/// Each library expands from fresh expansion-time instances of what it
+/// imports, so it cannot see what expanding another library left behind,
+/// and compiling one library never changes another's output (ADR 0001 #2).
+#[test]
+fn each_library_expands_from_fresh_instances() {
+    check(&[(
+        &format!(
+            "(define-library (counter)
+               (import {BASE})
+               (export bump!)
+               (begin
+                 (define count 0)
+                 (define (bump!) (set! count (+ count 1)) count)))
+             (define-library (counting)
+               (import {BASE} (counter))
+               (export expansion-count)
+               (begin
+                 (define-syntax expansion-count
+                   (lambda (stx) (datum->syntax stx (bump!))))))
+             (define-library (a)
+               (import {BASE} (counting))
+               (export a)
+               (begin (define a (expansion-count))))
+             (define-library (b)
+               (import {BASE} (counting))
+               (export b)
+               (begin (define b (expansion-count))))
+             (import {BASE} (a) (b))
+             (list a b)"
+        ),
+        "(1 1)",
+    )]);
+}
+
+/// A transformer's own macros run at phase 2, with instances apart from
+/// phase 1's.
+#[test]
+fn phase_2_has_its_own_instances() {
+    check(&[(
+        &format!(
+            "(define-library (counter)
+               (import {BASE})
+               (export bump!)
+               (begin
+                 (define count 0)
+                 (define (bump!) (set! count (+ count 1)) count)))
+             (import {BASE} (counter))
+             (define-syntax m
+               (lambda (stx)
+                 (define-syntax at-phase-2
+                   (lambda (s) (datum->syntax s (bump!))))
+                 (datum->syntax stx (list 'quote (list (at-phase-2) (bump!))))))
+             (m)"
+        ),
+        "(1 1)",
+    )]);
+}
+
 #[test]
 fn a_loader_serves_libraries() {
     let loader = Map(vec![

@@ -30,7 +30,7 @@ use vali_syntax::{
 };
 
 use vali_bytecode::{Export, Link, Module, ModuleBuilder, validate};
-use vali_runtime::{Cx, Handle, NoCollection};
+use vali_runtime::{Cx, DeferredHeadered, Handle};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
@@ -127,8 +127,28 @@ struct Macro {
 enum Transformer {
     /// `syntax-rules`, run in Rust.
     Rules(Vec<Clause>),
-    /// A procedure in the phase-1 isolate.
-    Procedure(Handle),
+    /// A procedure written in Scheme.
+    Procedure(Procedure),
+}
+
+/// A transformer written in Scheme: compiled code, which each unit's
+/// expansion runs afresh in its own isolate for the phase the transformer
+/// runs at, so no expansion sees what another left behind (ADR 0001 #2).
+struct Procedure {
+    /// The module whose body evaluates to the procedure.
+    module: Module,
+    /// The isolate it runs in: 0 for phase 1, 1 for phase 2, and so on.
+    phase: usize,
+    /// The procedure, once made in the current unit's isolate, with the
+    /// unit's generation.
+    made: Option<(u64, Handle)>,
+}
+
+/// An isolate expansion-time code runs in, for one unit and one phase.
+struct PhaseIsolate {
+    cx: Cx<DeferredHeadered>,
+    /// The units instantiated in it, each a fresh instance.
+    units: HashSet<usize>,
 }
 
 struct Clause {
@@ -214,8 +234,6 @@ pub(crate) struct Expander {
     by_name: HashMap<LibraryName, usize>,
     /// What `(vali core)` exports: the core forms.
     core_interface: Vec<(String, Binding)>,
-    /// The units instantiated in the phase-1 isolate.
-    phase1_units: HashSet<usize>,
     /// The `lambda`s being expanded, outermost first.
     stack: Vec<LambdaId>,
     /// Suffixes for module variables that macros introduce.
@@ -223,8 +241,13 @@ pub(crate) struct Expander {
     macros: Vec<Macro>,
     /// Macro uses in expressions being expanded, one inside another.
     depth: usize,
-    /// The isolate transformers written in Scheme run in, once one exists.
-    phase1: Option<Cx<NoCollection>>,
+    /// The isolates expansion-time code runs in for the unit being
+    /// expanded: phase 1 first, then phase 2 and so on, each made on first
+    /// use and dropped when the next unit starts.
+    phases: Vec<PhaseIsolate>,
+    /// Counts the units started, so a transformer made in an earlier
+    /// unit's isolate is made again in the current one's.
+    generation: u64,
     /// What phase-1 code's syntax procedures look up by number.
     compiled: Compiled,
     /// For each transformer being expanded, one inside another, where its
@@ -280,12 +303,12 @@ impl Expander {
                 .iter()
                 .map(|&(name, form)| (name.to_owned(), Binding::Core(form)))
                 .collect(),
-            phase1_units: HashSet::new(),
             stack: Vec::new(),
             fresh: 0,
             macros: Vec::new(),
             depth: 0,
-            phase1: None,
+            phases: Vec::new(),
+            generation: 0,
             compiled: Compiled::default(),
             floors: Vec::new(),
             natives: Vec::new(),
@@ -378,8 +401,10 @@ impl Expander {
         identity: &str,
         library: std::sync::Arc<vali_runtime::NativeLibrary>,
     ) {
-        if let Some(cx) = self.phase1.as_mut() {
-            cx.register_native_library(identity, std::sync::Arc::clone(&library));
+        for phase in &mut self.phases {
+            phase
+                .cx
+                .register_native_library(identity, std::sync::Arc::clone(&library));
         }
         self.natives.push((identity.to_owned(), library));
     }
@@ -584,6 +609,9 @@ impl Expander {
         repl: bool,
     ) -> Result<Module> {
         let index = self.units.len();
+        // A new unit expands with fresh expansion-time instances.
+        self.phases.clear();
+        self.generation += 1;
         let imported_at = imported;
         let mut imported = Vec::new();
         for set in imports {
@@ -862,7 +890,10 @@ impl Expander {
                 name: name.to_owned(),
                 transformer: Transformer::Procedure(procedure),
             });
-            return Ok(self.macros.len() - 1);
+            // Made now, so a transformer that fails is an error here.
+            let m = self.macros.len() - 1;
+            self.made_transformer(m, spec.span())?;
+            return Ok(m);
         };
         // `(syntax-rules (literal ...) clause ...)`, or with a custom
         // ellipsis, `(syntax-rules ellipsis (literal ...) clause ...)`.
@@ -945,64 +976,94 @@ impl Expander {
         Ok(self.macros.len() - 1)
     }
 
-    /// Expands, compiles and runs a transformer written in Scheme, at
-    /// phase 1, returning the procedure it evaluates to.
-    fn procedure(&mut self, spec: &Syntax, name: &str) -> Result<Handle> {
+    /// Expands and compiles a transformer written in Scheme, which runs at
+    /// the phase above the code it is defined in.
+    fn procedure(&mut self, spec: &Syntax, name: &str) -> Result<Procedure> {
+        let phase = self.floors.len();
         let body = self.open_lambda(Some(name));
         self.floors.push(self.stack.len() - 1);
         let expr = self.named(spec, name);
         self.floors.pop();
         self.close_lambda(body, Vec::new(), None, expr?);
-        let module = self.module(body, name)?;
-        // Instantiate the libraries the transformer uses at phase 1.
-        let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), spec.span());
+        Ok(Procedure {
+            module: self.module(body, name)?,
+            phase,
+            made: None,
+        })
+    }
+
+    /// The procedure of the macro `m`, a transformer written in Scheme,
+    /// made in the current unit's isolate for its phase unless it was
+    /// already: the libraries it uses are instantiated there afresh, then
+    /// its module runs.
+    fn made_transformer(&mut self, m: usize, span: Span) -> Result<Handle> {
+        let Transformer::Procedure(procedure) = &self.macros[m].transformer else {
+            unreachable!("only procedures are made");
+        };
+        if let Some((generation, made)) = &procedure.made
+            && *generation == self.generation
+        {
+            return Ok(made.clone());
+        }
+        let (module, phase) = (procedure.module.clone(), procedure.phase);
+        let name = self.macros[m].name.clone();
+        let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), span);
         for variable in &module.variables {
             if let Link::Imported(identity) = &variable.link
                 && let Some(unit) = self.units.iter().position(|u| *u.identity == **identity)
             {
-                self.instantiate(unit).map_err(failed)?;
+                self.instantiate(unit, phase).map_err(failed)?;
             }
         }
-        let cx = self.phase1()?;
+        let cx = self.phase_isolate(phase)?;
         let id = cx.load(module).map_err(failed)?;
-        let procedure = cx.run(id).map_err(failed)?;
-        if cx.get(&procedure).map_err(failed)?.tag() != vali_abi::Tag::Closure {
+        let made = cx.run(id).map_err(failed)?;
+        if cx.get(&made).map_err(failed)?.tag() != vali_abi::Tag::Closure {
             return Err(error(
                 format!("{name}: the transformer is not a procedure"),
-                spec.span(),
+                span,
             ));
         }
-        Ok(procedure)
+        let Transformer::Procedure(procedure) = &mut self.macros[m].transformer else {
+            unreachable!("as above");
+        };
+        procedure.made = Some((self.generation, made.clone()));
+        Ok(made)
     }
 
-    /// Loads and runs `unit` in the phase-1 isolate, after what it imports,
-    /// unless it is there already: a fresh instance for this expansion
-    /// (ADR 0001 #2).
-    fn instantiate(&mut self, unit: usize) -> std::result::Result<(), vali_runtime::Error> {
-        if self.phase1_units.contains(&unit) {
+    /// Loads and runs `unit` in the current unit's isolate for `phase`,
+    /// after what it imports, unless it is there already: a fresh instance
+    /// for this expansion and this phase (ADR 0001 #2).
+    fn instantiate(
+        &mut self,
+        unit: usize,
+        phase: usize,
+    ) -> std::result::Result<(), vali_runtime::Error> {
+        let made = |e: CompileError| vali_runtime::Error::scheme(e.message);
+        self.phase_isolate(phase).map_err(made)?;
+        if self.phases[phase].units.contains(&unit) {
             return Ok(());
         }
         for dependency in self.units[unit].imports.clone() {
-            self.instantiate(dependency)?;
+            self.instantiate(dependency, phase)?;
         }
         let module = self.units[unit]
             .module
             .clone()
             .expect("an imported library is compiled before its importers");
         let identity = self.units[unit].identity.clone();
-        let cx = self
-            .phase1()
-            .map_err(|e| vali_runtime::Error::scheme(e.message))?;
+        let cx = self.phase_isolate(phase).map_err(made)?;
         let id = cx.load(module)?;
         cx.run(id)?;
         cx.register_library(&identity, id);
-        self.phase1_units.insert(unit);
+        self.phases[phase].units.insert(unit);
         Ok(())
     }
 
-    /// The phase-1 isolate, made on first use.
-    fn phase1(&mut self) -> Result<&mut Cx<NoCollection>> {
-        if self.phase1.is_none() {
+    /// The current unit's isolate for `phase`, made on first use with the
+    /// syntax procedures and the program's native libraries.
+    fn phase_isolate(&mut self, phase: usize) -> Result<&mut Cx<DeferredHeadered>> {
+        while self.phases.len() <= phase {
             let mut cx = phase::instance().map_err(|e| CompileError {
                 message: format!("the expander's isolate: {e}"),
                 span: None,
@@ -1011,9 +1072,12 @@ impl Expander {
             for (identity, library) in &self.natives {
                 cx.register_native_library(identity, std::sync::Arc::clone(library));
             }
-            self.phase1 = Some(cx);
+            self.phases.push(PhaseIsolate {
+                cx,
+                units: HashSet::new(),
+            });
         }
-        Ok(self.phase1.as_mut().expect("just made"))
+        Ok(&mut self.phases[phase].cx)
     }
 
     /// Calls a transformer written in Scheme on `input`, lending it the
@@ -1021,6 +1085,7 @@ impl Expander {
     fn run_transformer(
         &mut self,
         m: usize,
+        phase: usize,
         procedure: &Handle,
         input: Syntax,
         form: &Syntax,
@@ -1035,10 +1100,7 @@ impl Expander {
             origin: Some(origin),
             sources: self.sources.clone(),
         };
-        let cx = self
-            .phase1
-            .as_mut()
-            .expect("a procedure transformer has an isolate");
+        let cx = &mut self.phases[phase].cx;
         // Allocate first, so a failure leaves the state where it was.
         let input = match cx.syntax(input) {
             Ok(input) => input,
@@ -1059,7 +1121,7 @@ impl Expander {
         self.table = shared.table;
         self.compiled = shared.compiled;
         let output = result.map_err(failed)?;
-        let cx = self.phase1.as_mut().expect("as above");
+        let cx = &mut self.phases[phase].cx;
         let value = cx.get(&output).map_err(failed)?;
         // SAFETY: the handle keeps the value valid.
         unsafe { cx.value_syntax(value, ScopeSetId::EMPTY, form.span()) }.ok_or_else(|| {
@@ -1145,8 +1207,9 @@ impl Expander {
             parent: form.origin().cloned(),
         });
         if let Transformer::Procedure(procedure) = &self.macros[m].transformer {
-            let procedure = procedure.clone();
-            let output = self.run_transformer(m, &procedure, input, form, origin)?;
+            let phase = procedure.phase;
+            let procedure = self.made_transformer(m, form.span())?;
+            let output = self.run_transformer(m, phase, &procedure, input, form, origin)?;
             return output.flip(&mut self.context, scope).map_err(too_many);
         }
         let table = &self.table;
