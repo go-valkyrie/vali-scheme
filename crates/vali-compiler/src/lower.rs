@@ -362,6 +362,7 @@ impl Lowerer<'_> {
             source: u16::try_from(source).ok()?,
             line,
             column,
+            inlined: 0,
         })
     }
 
@@ -443,6 +444,7 @@ impl Lowerer<'_> {
             joins: f.joins,
             terms: f.terms,
             body,
+            inlined: Vec::new(),
         });
         Ok(id)
     }

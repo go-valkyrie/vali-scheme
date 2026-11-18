@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use vali_bytecode::{
-    Arity, Constant, DecodeError, FunctionBuilder, Instruction as I, JUMP_RANGE, Module,
+    Arity, Constant, DecodeError, FunctionBuilder, Inlined, Instruction as I, JUMP_RANGE, Module,
     ModuleBuilder, Opcode, disassemble, validate,
 };
 
@@ -411,6 +411,46 @@ fn the_validator_rejects_out_of_range_operands() {
             .emit(I::Return { src: 1 });
     });
     assert!(rejected(&bad_free).contains("free variable 0 does not exist"));
+}
+
+/// Direct calls name a function with no free variables that takes their
+/// arguments, and inlined copies' scopes name copies that exist, each
+/// called from an earlier one.
+#[test]
+fn the_validator_checks_direct_calls_and_inlined_copies() {
+    let direct = |argc, free| {
+        let mut m = ModuleBuilder::new("test");
+        let mut f = FunctionBuilder::new(None, Arity::exactly(0), 8, 0);
+        f.emit(I::CallDirect {
+            base: 1,
+            argc,
+            function: 1,
+        })
+        .emit(I::Return { src: 1 });
+        let body = m.function(f.finish().unwrap());
+        let mut g = FunctionBuilder::new(Some("g"), Arity::exactly(1), 2, free);
+        g.emit(I::Return { src: 1 });
+        m.function(g.finish().unwrap());
+        m.finish(body)
+    };
+    validate(&direct(1, 0)).unwrap();
+    assert!(rejected(&direct(2, 0)).contains("does not take 2 arguments"));
+    assert!(rejected(&direct(1, 1)).contains("has free variables"));
+
+    let scoped = |caller, scope| {
+        module_with(2, |_, f| {
+            f.inline(Inlined {
+                name: Some("g".into()),
+                call: None,
+                caller,
+            })
+            .scope(scope)
+            .emit(I::Return { src: 0 });
+        })
+    };
+    validate(&scoped(0, 1)).unwrap();
+    assert!(rejected(&scoped(0, 2)).contains("scopes must be"));
+    assert!(rejected(&scoped(1, 1)).contains("later caller"));
 }
 
 /// Slot 0 holds the running closure, which the VM reads back for the code

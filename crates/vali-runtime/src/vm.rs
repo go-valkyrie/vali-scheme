@@ -240,25 +240,57 @@ fn control_arity<S: Strategy>(code: &Code<S>, argc: usize) -> Result<(), Error> 
     Ok(())
 }
 
-/// Where the instruction at `pc` of `code` came from, if its module says.
-fn position_of<S: Strategy>(code: &Code<S>, pc: usize) -> Option<crate::handle::Position> {
+/// The backtrace frames of `code` stopped at instruction `pc`, innermost
+/// first: one for each inlined copy the instruction is in, at the
+/// instruction or the call the next copy in replaced, then `code`'s own.
+fn frames_of<S: Strategy>(code: &Code<S>, pc: usize) -> Vec<crate::handle::Frame> {
+    let frame = |name: &str, position| crate::handle::Frame {
+        name: name.to_owned(),
+        position,
+    };
     let Kind::Bytecode { module, index, .. } = code.kind else {
-        return None;
+        return vec![frame(code.name(), None)];
     };
     // SAFETY: a function's descriptor points to the module that owns it,
     // which outlives it.
     let module = unsafe { &(*module).module };
-    let function = module.functions.get(index as usize)?;
-    let at = function
+    let Some(function) = module.functions.get(index as usize) else {
+        return vec![frame(code.name(), None)];
+    };
+    let located = |source: u16, line: u32, column: u32| {
+        Some(crate::handle::Position {
+            source: module.sources.get(usize::from(source))?.clone(),
+            line,
+            column,
+        })
+    };
+    let mut position = function
         .positions
         .partition_point(|p| p.pc as usize <= pc)
-        .checked_sub(1)?;
-    let position = function.positions[at];
-    Some(crate::handle::Position {
-        source: module.sources.get(usize::from(position.source))?.clone(),
-        line: position.line,
-        column: position.column,
-    })
+        .checked_sub(1)
+        .and_then(|at| {
+            let p = function.positions[at];
+            located(p.source, p.line, p.column)
+        });
+    let mut scope = function
+        .scopes
+        .partition_point(|s| s.pc as usize <= pc)
+        .checked_sub(1)
+        .map_or(0, |at| function.scopes[at].inlined);
+    let mut frames = Vec::new();
+    // The validator checked that each copy's caller comes before it.
+    while let Some(copy) = scope
+        .checked_sub(1)
+        .and_then(|i| function.inlined.get(i as usize))
+    {
+        frames.push(frame(copy.name.as_deref().unwrap_or("(inlined)"), position));
+        position = copy
+            .call
+            .and_then(|(s, line, column)| located(s, line, column));
+        scope = copy.caller;
+    }
+    frames.push(frame(code.name(), position));
+    frames
 }
 
 /// FNV-1a: a fixed, deterministic hash for symbol names (ADR 0001 #4).
@@ -939,10 +971,7 @@ impl<S: Strategy> Cx<S> {
             // links to its caller, up to the entry frame.
             unsafe {
                 if let Ok(code) = self.procedure_code(slot(fp, 0)) {
-                    e.backtrace.push(crate::handle::Frame {
-                        name: code.name().to_owned(),
-                        position: position_of(code, pc),
-                    });
+                    e.backtrace.extend(frames_of(code, pc));
                 }
                 let position = *fp.add(2);
                 if position == ENTRY {

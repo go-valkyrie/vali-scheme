@@ -206,6 +206,14 @@ impl<'a> Checker<'a> {
         }
         self.define(&function.params)?;
         self.define(&function.free)?;
+        // Each copy was called from an earlier one, or the function's own
+        // code, so following calls out always ends.
+        for (i, copy) in function.inlined.iter().enumerate() {
+            self.position(&copy.call)?;
+            if copy.call.is_some_and(|call| call.inlined as usize > i) {
+                return Err(format!("inlined copy i{i} is called from a later one"));
+            }
+        }
         self.set_visible(&function.params, true);
         self.set_visible(&function.free, true);
         let mut tasks = vec![Task::Enter(function.body)];
@@ -436,6 +444,9 @@ impl<'a> Checker<'a> {
             Some(position) if usize::from(position.source) >= self.module.sources.len() => {
                 Err(format!("source {} does not exist", position.source))
             }
+            Some(position) if position.inlined as usize > self.function.inlined.len() => Err(
+                format!("inlined copy i{} does not exist", position.inlined - 1),
+            ),
             _ => Ok(()),
         }
     }

@@ -104,6 +104,36 @@ pub struct Function {
     /// position covers its instruction and those after it, up to the next
     /// (ADR 0014 #9).
     pub positions: Vec<Position>,
+    /// The copies of other functions inlined into it, for backtraces.
+    pub inlined: Vec<Inlined>,
+    /// Which copy its instructions are in, sorted by instruction as
+    /// `positions` is: each covers its instruction and those after it, up
+    /// to the next. Before the first, and where none says otherwise, the
+    /// function's own code.
+    pub scopes: Vec<Scope>,
+}
+
+/// A function's body inlined into another where it was called: the frame
+/// a backtrace shows for code in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inlined {
+    /// The name of the function copied.
+    pub name: Option<Box<str>>,
+    /// Where it was called: a source in the module's table, a line and a
+    /// column, as a [`Position`] has.
+    pub call: Option<(u16, u32, u32)>,
+    /// The copy the call was in: 0 for the function's own code, `i + 1`
+    /// for [`Function::inlined`] entry `i`, which must come before this
+    /// one.
+    pub caller: u32,
+}
+
+/// From instruction `pc` on, the code is in copy `inlined`: 0 for the
+/// function's own code, `i + 1` for [`Function::inlined`] entry `i`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scope {
+    pub pc: u32,
+    pub inlined: u32,
 }
 
 /// Where an instruction came from: its index in the code, then a source

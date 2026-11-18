@@ -18,7 +18,7 @@ Each boundary below exists for a reason recorded in an ADR:
 | `vali-test` | The test harness: `.scm` test files, the regression list, compliance suites, determinism checks and runs under each memory strategy. Not published | grows with the others | M0 |
 | `vali-abi` | ABI facts: the tag table, object and frame layouts, the runtime function table, strategy descriptors, the ABI version (ADR 0006) | none | M1 |
 | `vali-dist` | The distribution format (ADR 0012): the IR's types and encoding (ADR 0017), interfaces, version and feature flags | none yet; `vali-syntax` once syntax exports are encoded | M1 |
-| `vali-opt` | The optimiser (ADR 0017): passes over the IR for each library, and the link-time optimiser across libraries. Today it contifies local functions, unboxes assigned variables, makes calls to known procedures direct, and simplifies each function | `vali-dist` | M1 |
+| `vali-opt` | The optimiser (ADR 0017): passes over the IR for each library, and the link-time optimiser across libraries. Today it contifies local functions, unboxes assigned variables, makes calls to known procedures direct, inlines small ones, and simplifies each function | `vali-dist` | M1 |
 | `vali-bytecode` | Run-format bytecode (ADR 0005): encoding, validator, disassembler, and conversion from the distribution format | `vali-abi`, `vali-dist` | M1 |
 | `vali-artifact` | The artifact container, fingerprints and cache store (ADR 0001) | `vali-bytecode`, `vali-dist` | M1 |
 | `vali-runtime` | Values, memory strategies, objects, frames and continuations, the trampoline, isolates and tasks, the VM, primitives, capability objects. The JIT is its `jit` feature | `vali-abi`, `vali-num`, `vali-syntax`, `vali-bytecode` | M1 |

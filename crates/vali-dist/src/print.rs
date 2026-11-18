@@ -30,7 +30,11 @@ impl fmt::Display for Operand {
 
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "@{}:{}:{}", self.source, self.line, self.column)
+        write!(f, "@{}:{}:{}", self.source, self.line, self.column)?;
+        if self.inlined != 0 {
+            write!(f, "/i{}", self.inlined - 1)?;
+        }
+        Ok(())
     }
 }
 
@@ -265,6 +269,10 @@ impl Function {
                     located(position)
                 )?,
             }
+        }
+        for (i, copy) in self.inlined.iter().enumerate() {
+            let name = copy.name.as_deref().unwrap_or("?");
+            writeln!(f, "  inlined i{i} {name}{}", located(&copy.call))?;
         }
         Ok(())
     }

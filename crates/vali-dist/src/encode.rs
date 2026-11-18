@@ -19,8 +19,8 @@
 
 use crate::bytes::{DecodeError, Reader, Writer};
 use crate::ir::{
-    Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, JoinId, Module,
-    Operand, Position, Term, TermId, Value, Var,
+    Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, Inlined, JoinId,
+    Module, Operand, Position, Term, TermId, Value, Var,
 };
 use crate::primitive::Primitive;
 use crate::validate::{ValidationError, validate};
@@ -350,10 +350,14 @@ fn encode_position(w: &mut Writer, position: Option<Position>) {
     match position {
         None => w.byte(0),
         Some(p) => {
-            w.byte(1);
+            // Flag 2 is a position in an inlined copy, which follows.
+            w.byte(if p.inlined == 0 { 1 } else { 2 });
             w.uint(u64::from(p.source));
             w.u32(p.line);
             w.u32(p.column);
+            if p.inlined != 0 {
+                w.u32(p.inlined);
+            }
         }
     }
 }
@@ -370,6 +374,17 @@ fn encode_function(w: &mut Writer, f: &Function) {
     w.byte(f.arity.optional);
     w.bool(f.arity.rest);
     w.usize(f.free.len());
+    w.usize(f.inlined.len());
+    for copy in &f.inlined {
+        match &copy.name {
+            Some(name) => {
+                w.bool(true);
+                w.str(name);
+            }
+            None => w.bool(false),
+        }
+        encode_position(w, copy.call);
+    }
     let mut n = Numbering {
         vars: vec![None; f.vars as usize],
         next_var: 0,
@@ -552,15 +567,29 @@ impl Decoder {
     }
 
     fn position(r: &mut Reader<'_>) -> Result<Option<Position>, DecodeError> {
-        match r.byte()? {
-            0 => Ok(None),
-            1 => Ok(Some(Position {
-                source: r.u16()?,
-                line: r.u32()?,
-                column: r.u32()?,
-            })),
-            b => Err(r.error(format!("{b} is not a position flag"))),
+        let flag = r.byte()?;
+        if flag == 0 {
+            return Ok(None);
         }
+        if flag > 2 {
+            return Err(r.error(format!("{flag} is not a position flag")));
+        }
+        let (source, line, column) = (r.u16()?, r.u32()?, r.u32()?);
+        let inlined = if flag == 2 {
+            let n = r.u32()?;
+            if n == 0 {
+                return Err(r.error("an inlined position in no inlined copy"));
+            }
+            n
+        } else {
+            0
+        };
+        Ok(Some(Position {
+            source,
+            line,
+            column,
+            inlined,
+        }))
     }
 
     fn value(&mut self, r: &mut Reader<'_>) -> Result<Value, DecodeError> {
@@ -649,6 +678,17 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, DecodeError> {
         rest: r.bool()?,
     };
     let free_count = bounded(r, "free variables")?;
+    let inlined_count = bounded(r, "inlined copies")?;
+    let mut inlined = Vec::with_capacity(inlined_count);
+    for _ in 0..inlined_count {
+        let name = if r.bool()? {
+            Some(r.str()?.into())
+        } else {
+            None
+        };
+        let call = Decoder::position(r)?;
+        inlined.push(Inlined { name, call });
+    }
     let mut d = Decoder {
         terms: Vec::new(),
         vars: 0,
@@ -762,5 +802,6 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, DecodeError> {
         joins: d.joins,
         terms: d.terms,
         body: TermId(0),
+        inlined,
     })
 }

@@ -36,8 +36,8 @@ pub use bytes::{DecodeError, Reader, Writer};
 pub use encode::{decode, encode};
 
 pub use ir::{
-    Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, JoinId, Module,
-    Operand, Position, Term, TermId, Value, Var,
+    Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, Inlined, JoinId,
+    Module, Operand, Position, Term, TermId, Value, Var,
 };
 pub use primitive::{Effects, Primitive};
 pub use validate::{ValidationError, validate};

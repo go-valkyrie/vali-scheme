@@ -48,10 +48,11 @@ fn calls_to_known_procedures_are_direct() {
     );
     // A call in tail position stays one.
     assert!(fib.contains("  tail direct f1(c2) @0:1:64\n"), "{fib}");
-    // Another procedure of the module is known too.
-    let other = ir("(define (sq x) (* x x)) (define (f y) (+ (sq y) 1))");
+    // Another procedure of the module is known too; this one is recursive,
+    // so it is not inlined.
+    let other = ir("(define (down n) (if (= n 0) 0 (down (- n 1)))) (define (f y) (+ (down y) 1))");
     assert!(
-        other.contains("fun f2 f (v0) []:\n  let v2 = call direct f1(v0) @0:1:41\n"),
+        other.contains("fun f2 f (v0) []:\n  let v2 = call direct f1(v0)"),
         "{other}"
     );
 }

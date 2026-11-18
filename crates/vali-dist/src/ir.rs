@@ -157,12 +157,27 @@ pub struct Global {
 }
 
 /// Where code came from: a source in the module's table, a line from 1 and
-/// a column from 0 (ADR 0014 #9).
+/// a column from 0 (ADR 0014 #9), and the copy of an inlined function it
+/// is in, if it is in one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Position {
     pub source: u16,
     pub line: u32,
     pub column: u32,
+    /// 0 for the function's own code; `i + 1` for code inlined as its
+    /// function's [`Function::inlined`] entry `i`.
+    pub inlined: u32,
+}
+
+/// A function's body copied into another where it was called, so that a
+/// backtrace can show the frame the call would have made.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Inlined {
+    /// The name of the function copied.
+    pub name: Option<Box<str>>,
+    /// Where it was called, which is in an earlier copy or the function's
+    /// own code: its `inlined` is less than this copy's own number.
+    pub call: Option<Position>,
 }
 
 /// What a function's body is made of. Terms live in their function's
@@ -284,6 +299,9 @@ pub struct Function {
     /// Its terms, the arena its body and their parts are in.
     pub terms: Vec<Term>,
     pub body: TermId,
+    /// The copies of other functions inlined into it, which its positions
+    /// say they are in.
+    pub inlined: Vec<Inlined>,
 }
 
 impl Function {

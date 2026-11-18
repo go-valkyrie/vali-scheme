@@ -20,22 +20,28 @@
 //! loop.
 
 use vali_dist::{
-    Constant, ConstantId, FunId, Function, JoinId, Module, Operand, Position, Term, TermId, Value,
-    Var,
+    Constant, ConstantId, FunId, Function, Inlined, JoinId, Module, Operand, Position, Term,
+    TermId, Value, Var,
 };
 
 use crate::build::{Builder, Field, HOLE, Hole};
 
-/// What makes a closure a candidate, in the function that makes it.
-struct Candidate {
-    function: FunId,
-    free: Vec<Operand>,
-    /// The `let` making it, and the `set-free`s tying it to itself, by the
-    /// free variable each sets.
-    made_at: TermId,
-    ties: Vec<(TermId, u32)>,
-    /// Its one call.
-    call: TermId,
+/// A call to copy a function's body into: what makes a closure a
+/// candidate for contification, in the function that makes it, or a call
+/// to inline.
+pub(crate) struct Candidate {
+    pub(crate) function: FunId,
+    /// The operands the function's free variables become.
+    pub(crate) free: Vec<Operand>,
+    /// The `let` making the closure, which goes, and the `set-free`s tying
+    /// it to itself, by the free variable each sets.
+    pub(crate) made_at: Option<TermId>,
+    pub(crate) ties: Vec<(TermId, u32)>,
+    /// The call, which the body replaces.
+    pub(crate) call: TermId,
+    /// Whether the body's join point is a loop, which its tail calls
+    /// through the ties jump to.
+    pub(crate) recursive: bool,
 }
 
 /// How each variable of `f` is used, and where closures are made.
@@ -144,9 +150,10 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
         Some(Candidate {
             function,
             free,
-            made_at,
+            made_at: Some(made_at),
             ties: ties[v].clone(),
             call,
+            recursive: true,
         })
     })
 }
@@ -227,6 +234,14 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
     if c.function.0 as usize == n {
         return false;
     }
+    splice(module, n, &c);
+    true
+}
+
+/// Copies `c`'s function's body into function `n` in place of its call,
+/// as a join point jumped to with the call's arguments, the body's
+/// returns going where the call's result went.
+pub(crate) fn splice(module: &mut Module, n: usize, c: &Candidate) {
     let unspecified = match module
         .constants
         .iter()
@@ -248,6 +263,42 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
     let loop_join = JoinId(joins);
     joins += 1;
     let selves: Vec<Var> = c.ties.iter().map(|&(_, i)| g.free[i as usize]).collect();
+    // Where the copied code is, for backtraces: a copy of its own when it
+    // is inlined, since the call it replaces made a frame; otherwise, a
+    // loop, wherever the call was. g's own copies follow.
+    let call_position = match f.term(c.call) {
+        Term::Let { position, .. }
+        | Term::TailCall { position, .. }
+        | Term::TailCallDirect { position, .. } => *position,
+        _ => None,
+    };
+    let mut inlined = f.inlined.clone();
+    let base = if c.recursive {
+        call_position.map_or(0, |p| p.inlined)
+    } else {
+        inlined.push(Inlined {
+            name: g.name.clone(),
+            call: call_position,
+        });
+        inlined.len() as u32
+    };
+    let offset = inlined.len() as u32;
+    let rescope = |p: Option<Position>| {
+        p.map(|p| Position {
+            inlined: if p.inlined == 0 {
+                base
+            } else {
+                offset + p.inlined
+            },
+            ..p
+        })
+    };
+    for copy in &g.inlined {
+        inlined.push(Inlined {
+            name: copy.name.clone(),
+            call: rescope(copy.call),
+        });
+    }
     let map = |x: Operand| -> Operand {
         match x {
             Operand::Const(_) => x,
@@ -263,7 +314,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
     while let Some(task) = tasks.pop() {
         match task {
             Task::Own(id, hole) => match f.term(id) {
-                _ if id == c.made_at => {
+                _ if Some(id) == c.made_at => {
                     let Term::Let { body, .. } = f.term(id) else {
                         unreachable!("a closure is made by a let");
                     };
@@ -283,10 +334,12 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                 }
                 _ if id == c.call => {
                     let (args, continuation) = match f.term(id) {
-                        Term::TailCall { args, .. } => (args.clone(), None),
+                        Term::TailCall { args, .. } | Term::TailCallDirect { args, .. } => {
+                            (args.clone(), None)
+                        }
                         Term::Let {
                             var,
-                            value: Value::Call { args, .. },
+                            value: Value::Call { args, .. } | Value::CallDirect { args, .. },
                             body,
                             ..
                         } => (args.clone(), Some((*var, *body))),
@@ -316,7 +369,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                         Term::Join {
                             join: loop_join,
                             params,
-                            recursive: true,
+                            recursive: c.recursive,
                             handler: HOLE,
                             body: HOLE,
                         },
@@ -351,7 +404,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                             var: Var(var.0 + var_offset),
                             value: map_value(value, &map),
                             body: HOLE,
-                            position: *position,
+                            position: rescope(*position),
                         },
                     );
                     tasks.push(Task::Copied(*body, (at, Field::LetBody)));
@@ -430,7 +483,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                                 Term::TailCall {
                                     callee,
                                     args,
-                                    position: *position,
+                                    position: rescope(*position),
                                 },
                             );
                         }
@@ -438,7 +491,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                             let t = Var(vars);
                             vars += 1;
                             let call = Value::Call { callee, args };
-                            call_then_jump(&mut b, hole, t, call, *position, join);
+                            call_then_jump(&mut b, hole, t, call, rescope(*position), join);
                         }
                     }
                 }
@@ -455,7 +508,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                                 Term::TailCallDirect {
                                     function: *function,
                                     args,
-                                    position: *position,
+                                    position: rescope(*position),
                                 },
                             );
                         }
@@ -466,7 +519,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                                 function: *function,
                                 args,
                             };
-                            call_then_jump(&mut b, hole, t, call, *position, join);
+                            call_then_jump(&mut b, hole, t, call, rescope(*position), join);
                         }
                     }
                 }
@@ -479,7 +532,7 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
     f.body = root;
     f.vars = vars;
     f.joins = joins;
-    true
+    f.inlined = inlined;
 }
 
 /// A copied body's result: returned, or jumped with to `into`'s join.

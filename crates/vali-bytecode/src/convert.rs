@@ -26,8 +26,8 @@ use std::fmt;
 use vali_dist as ir;
 
 use crate::{
-    Arity, Constant, Function, FunctionBuilder, Instruction as I, Label, Module, ModuleBuilder,
-    Slot,
+    Arity, Constant, Function, FunctionBuilder, Inlined, Instruction as I, Label, Module,
+    ModuleBuilder, Slot,
 };
 
 /// Why a module could not be converted.
@@ -695,6 +695,15 @@ fn convert_function(tables: &Tables<'_>, f: &ir::Function) -> Result<Function> {
         scratch: 0,
     };
     e.joins = (0..f.joins).map(|_| e.b.label()).collect();
+    for copy in &f.inlined {
+        e.b.inline(Inlined {
+            name: copy.name.clone(),
+            call: copy
+                .call
+                .map(|p| (tables.sources[usize::from(p.source)], p.line, p.column)),
+            caller: copy.call.map_or(0, |p| p.inlined),
+        });
+    }
     e.run()?;
     let top = e.top;
     let mut function = e.b.finish().map_err(|e| e.to_string())?;
@@ -870,6 +879,7 @@ impl Emitter<'_> {
         if let Some(position) = position {
             let source = self.tables.sources[usize::from(position.source)];
             self.b.position(source, position.line, position.column);
+            self.b.scope(position.inlined);
         }
     }
 

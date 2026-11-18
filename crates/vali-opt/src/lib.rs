@@ -16,9 +16,13 @@
 //!   calls cannot capture a continuation.
 //! - [`known`](optimise): calls to the module's own procedures, through
 //!   globals nothing assigns again, become direct calls (ADR 0017 #5).
+//! - [`inline`](optimise): direct calls to small functions become copies
+//!   of their bodies. Runs once every function has had the passes above,
+//!   so what it copies is already simplified, then simplifies again.
 
 mod build;
 mod contify;
+mod inline;
 mod known;
 mod simplify;
 mod unbox;
@@ -81,6 +85,15 @@ pub fn optimise(module: &mut Module) {
         for _ in 0..ROUNDS {
             if !simplify::simplify(module, n, &procedures) {
                 break;
+            }
+        }
+    }
+    for n in 0..module.functions.len() {
+        if inline::inline(module, n) {
+            for _ in 0..ROUNDS {
+                if !simplify::simplify(module, n, &procedures) {
+                    break;
+                }
             }
         }
     }

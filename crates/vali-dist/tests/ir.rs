@@ -1,8 +1,9 @@
 //! The IR's validator and printer.
 
 use vali_dist::{
-    Arity, Constant, ConstantId, Effects, FunId, Function, Global, GlobalId, GlobalLink, JoinId,
-    Module, Operand, Position, Primitive, Term, TermId, Value, Var, validate,
+    Arity, Constant, ConstantId, Effects, FunId, Function, Global, GlobalId, GlobalLink, Inlined,
+    JoinId, Module, Operand, Position, Primitive, Term, TermId, Value, Var, decode, encode,
+    validate,
 };
 
 fn v(n: u32) -> Operand {
@@ -18,6 +19,7 @@ fn at(line: u32, column: u32) -> Option<Position> {
         source: 0,
         line,
         column,
+        inlined: 0,
     })
 }
 
@@ -91,6 +93,7 @@ fn sum() -> Module {
         joins: 1,
         terms: t.0,
         body,
+        inlined: vec![],
     };
 
     let mut t = Terms::default();
@@ -113,6 +116,7 @@ fn sum() -> Module {
         joins: 0,
         terms: t.0,
         body,
+        inlined: vec![],
     };
     Module {
         name: "(example sum)".into(),
@@ -351,6 +355,7 @@ fn deep_nesting_does_not_recurse() {
             joins: 0,
             terms: t.0,
             body,
+            inlined: vec![],
         }],
         body: FunId(0),
         sources: vec![],
@@ -457,6 +462,7 @@ mod encoding {
                 joins: 0,
                 terms: t.0,
                 body,
+                inlined: vec![],
             }],
             body: FunId(0),
             sources: vec![],
@@ -535,4 +541,53 @@ mod encoding {
             assert!(Artifact::decode(&bytes[..end], &["invoke", "debug"]).is_err());
         }
     }
+}
+
+/// `sum` with the `car` in its loop inside a copy of a function `first`,
+/// inlined where the function's own code called it.
+fn with_copy() -> Module {
+    let mut module = sum();
+    module.functions[1].inlined = vec![Inlined {
+        name: Some("first".into()),
+        call: at(2, 4),
+    }];
+    let Term::Let { position, .. } = &mut sum_terms(&mut module)[4] else {
+        panic!("term 4 is the car");
+    };
+    position.as_mut().expect("the car has a position").inlined = 1;
+    module
+}
+
+#[test]
+fn inlined_copies_print_round_trip_and_are_checked() {
+    let module = with_copy();
+    validate(&module).unwrap();
+    let printed = module.to_string();
+    assert!(printed.contains("car v1 @0:3:22/i0\n"), "{printed}");
+    assert!(printed.contains("  inlined i0 first @0:2:4\n"), "{printed}");
+    let bytes = encode(&module).unwrap();
+    let decoded = decode(&bytes).unwrap();
+    assert_eq!(decoded.to_string(), printed);
+    assert_eq!(encode(&decoded).unwrap(), bytes);
+    // A position in a copy that does not exist.
+    let mut missing = with_copy();
+    missing.functions[1].inlined.clear();
+    assert!(
+        validate(&missing)
+            .unwrap_err()
+            .to_string()
+            .contains("inlined copy i0 does not exist")
+    );
+    // A copy called from itself, which a backtrace would follow forever.
+    let mut cycle = with_copy();
+    cycle.functions[1].inlined[0].call = Some(Position {
+        inlined: 1,
+        ..at(2, 4).unwrap()
+    });
+    assert!(
+        validate(&cycle)
+            .unwrap_err()
+            .to_string()
+            .contains("called from a later one")
+    );
 }

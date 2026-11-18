@@ -10,13 +10,18 @@
 //!   allocate or read (ADR 0017 #4): raising, writing and capturing stay,
 //!   but reading a known procedure's global cannot raise;
 //! - an `if` on a constant keeps only the arm it takes;
-//! - a join point nothing jumps to keeps only its body.
+//! - a join point nothing jumps to keeps only its body, and one jumped to
+//!   once, not a loop, goes: its handler takes the place of the jump, with
+//!   the jump's arguments for its parameters. The jump is inside the join
+//!   point's scope, so whatever the handler uses is in scope there too.
+//!   Only a jump in the same loop as the join point is replaced: moving
+//!   code into a loop would keep what it uses live through the loop.
 //!
 //! What a dropped term made unused is found by the next round.
 
 use vali_dist::{
     Constant, ConstantId, Effects, FunId, Function, JoinId, Module, Operand, Primitive, Term,
-    TermId, Value,
+    TermId, Value, Var,
 };
 
 use crate::build::{Builder, Field, HOLE, Hole};
@@ -126,10 +131,14 @@ fn removable(value: &Value, known: &[Option<FunId>]) -> bool {
 use crate::operands as operands_of;
 
 /// How often each variable is used, and each join point jumped to, in
-/// what `f`'s body reaches.
-fn count(f: &Function) -> (Vec<u32>, Vec<u32>) {
+/// what `f`'s body reaches; and for each join point, whether its jumps
+/// are all in the loop it is in.
+fn count(f: &Function) -> (Vec<u32>, Vec<u32>, Vec<bool>) {
     let mut uses = vec![0u32; f.vars as usize];
     let mut jumps = vec![0u32; f.joins as usize];
+    // How many loops' handlers each join point, and each jump, is in.
+    let mut depth = vec![0u32; f.joins as usize];
+    let mut level = vec![true; f.joins as usize];
     let use_all = |xs: &[Operand], uses: &mut Vec<u32>| {
         for x in xs {
             if let Operand::Var(v) = x {
@@ -137,19 +146,29 @@ fn count(f: &Function) -> (Vec<u32>, Vec<u32>) {
             }
         }
     };
-    let mut pending = vec![f.body];
-    while let Some(id) = pending.pop() {
+    let mut pending = vec![(f.body, 0u32)];
+    while let Some((id, d)) = pending.pop() {
         match f.term(id) {
             Term::Let { value, body, .. } => {
                 use_all(&operands_of(value), &mut uses);
-                pending.push(*body);
+                pending.push((*body, d));
             }
-            Term::Join { handler, body, .. } => {
-                pending.push(*handler);
-                pending.push(*body);
+            Term::Join {
+                join,
+                recursive,
+                handler,
+                body,
+                ..
+            } => {
+                depth[join.0 as usize] = d;
+                pending.push((*handler, d + u32::from(*recursive)));
+                pending.push((*body, d));
             }
             Term::Jump { join, args } => {
                 jumps[join.0 as usize] += 1;
+                if depth[join.0 as usize] != d {
+                    level[join.0 as usize] = false;
+                }
                 use_all(args, &mut uses);
             }
             Term::If {
@@ -158,8 +177,8 @@ fn count(f: &Function) -> (Vec<u32>, Vec<u32>) {
                 otherwise,
             } => {
                 use_all(&[*test], &mut uses);
-                pending.push(*then);
-                pending.push(*otherwise);
+                pending.push((*then, d));
+                pending.push((*otherwise, d));
             }
             Term::Return(x) => use_all(&[*x], &mut uses),
             Term::TailCall { callee, args, .. } => {
@@ -169,7 +188,7 @@ fn count(f: &Function) -> (Vec<u32>, Vec<u32>) {
             Term::TailCallDirect { args, .. } => use_all(args, &mut uses),
         }
     }
-    (uses, jumps)
+    (uses, jumps, level)
 }
 
 /// `value` with each variable replaced as `subst` says.
@@ -214,7 +233,7 @@ fn substitute_value(value: &Value, sub: &dyn Fn(Operand) -> Operand) -> Value {
 /// globals are `known`. Returns whether it changed.
 pub(crate) fn simplify(module: &mut Module, n: usize, known: &[Option<FunId>]) -> bool {
     let f = &module.functions[n];
-    let (uses, jumps) = count(f);
+    let (uses, jumps, level) = count(f);
     let mut subst: Vec<Option<Operand>> = vec![None; f.vars as usize];
     let mut pool = Pool {
         base: &module.constants,
@@ -222,6 +241,8 @@ pub(crate) fn simplify(module: &mut Module, n: usize, known: &[Option<FunId>]) -
     };
     let mut b = Builder::default();
     let mut changed = false;
+    // The join points jumped to once, whose handlers replace the jumps.
+    let mut moved: Vec<Option<(&[Var], TermId)>> = vec![None; f.joins as usize];
     let mut pending: Vec<(TermId, Hole)> = vec![(f.body, (HOLE, Field::Root))];
     while let Some((mut id, mut hole)) = pending.pop() {
         loop {
@@ -269,18 +290,9 @@ pub(crate) fn simplify(module: &mut Module, n: usize, known: &[Option<FunId>]) -
                 } => {
                     if jumps[join.0 as usize] == 0 {
                         changed = true;
-                    } else if let (false, 1, Term::Jump { join: to, args }) =
-                        (*recursive, jumps[join.0 as usize], f.term(*body))
-                        && to == join
-                    {
-                        // `join j(p) = h in jump j(a)`: just `h`, with `a` for `p`.
-                        let args: Vec<Operand> = args.iter().map(|&a| sub(a)).collect();
-                        for (p, a) in params.iter().zip(args) {
-                            subst[p.0 as usize] = Some(a);
-                        }
+                    } else if !*recursive && jumps[join.0 as usize] == 1 && level[join.0 as usize] {
+                        moved[join.0 as usize] = Some((params, *handler));
                         changed = true;
-                        id = *handler;
-                        continue;
                     } else {
                         let at = b.place(
                             hole,
@@ -322,7 +334,14 @@ pub(crate) fn simplify(module: &mut Module, n: usize, known: &[Option<FunId>]) -
                     }
                 },
                 Term::Jump { join, args } => {
-                    let args = args.iter().map(|&x| sub(x)).collect();
+                    let args: Vec<Operand> = args.iter().map(|&x| sub(x)).collect();
+                    if let Some((params, handler)) = moved[join.0 as usize] {
+                        for (p, a) in params.iter().zip(args) {
+                            subst[p.0 as usize] = Some(a);
+                        }
+                        id = handler;
+                        continue;
+                    }
                     b.place(hole, jump(*join, args));
                     break;
                 }

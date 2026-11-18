@@ -103,6 +103,34 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             last = Some(position.pc);
         }
 
+        // Each copy was called from an earlier one or the function's own
+        // code, so a backtrace following calls out always ends.
+        for (i, copy) in function.inlined.iter().enumerate() {
+            if copy.caller as usize > i
+                || copy
+                    .call
+                    .is_some_and(|(source, ..)| usize::from(source) >= module.sources.len())
+            {
+                return fail(
+                    None,
+                    format!("inlined copy {i} has a later caller, or no such source"),
+                );
+            }
+        }
+        let mut last = None;
+        for scope in &function.scopes {
+            if scope.pc as usize >= function.code.len()
+                || last.is_some_and(|l| scope.pc <= l)
+                || scope.inlined as usize > function.inlined.len()
+            {
+                return fail(
+                    Some(scope.pc as usize),
+                    "scopes must be in order, at instructions, in the function's copies".into(),
+                );
+            }
+            last = Some(scope.pc);
+        }
+
         let mut starts = HashSet::new();
         let mut decoded = Vec::new();
         let mut pc = 0;

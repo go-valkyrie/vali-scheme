@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use crate::instruction::{Instruction, JUMP_RANGE};
-use crate::module::{Arity, Constant, Export, Function, Link, Module, Position, Variable};
+use crate::module::{
+    Arity, Constant, Export, Function, Inlined, Link, Module, Position, Scope, Variable,
+};
 
 /// A position in a function's code, bound once and used by any number of
 /// branches.
@@ -52,6 +54,8 @@ pub struct FunctionBuilder {
     labels: Vec<Option<usize>>,
     fixups: Vec<Fixup>,
     positions: Vec<Position>,
+    inlined: Vec<Inlined>,
+    scopes: Vec<Scope>,
 }
 
 impl FunctionBuilder {
@@ -67,6 +71,8 @@ impl FunctionBuilder {
             labels: Vec::new(),
             fixups: Vec::new(),
             positions: Vec::new(),
+            inlined: Vec::new(),
+            scopes: Vec::new(),
         }
     }
 
@@ -86,6 +92,26 @@ impl FunctionBuilder {
             Some(last) if (last.source, last.line, last.column) == (source, line, column) => {}
             _ => self.positions.push(position),
         }
+        self
+    }
+
+    /// Notes that the next instruction, and those after it, are in copy
+    /// `inlined` of another function: 0 for this function's own code,
+    /// `i + 1` for the `i`th copy [`FunctionBuilder::inline`] added.
+    pub fn scope(&mut self, inlined: u32) -> &mut Self {
+        let pc = u32::try_from(self.code.len()).expect("a function under 4 G instructions");
+        let current = self.scopes.last().map_or(0, |s| s.inlined);
+        match self.scopes.last_mut() {
+            Some(last) if last.pc == pc => last.inlined = inlined,
+            _ if current == inlined => {}
+            _ => self.scopes.push(Scope { pc, inlined }),
+        }
+        self
+    }
+
+    /// Adds a copy of another function inlined into this one.
+    pub fn inline(&mut self, copy: Inlined) -> &mut Self {
+        self.inlined.push(copy);
         self
     }
 
@@ -154,6 +180,7 @@ impl FunctionBuilder {
         // A position noted after the last instruction covers nothing.
         let end = self.code.len();
         self.positions.retain(|p| (p.pc as usize) < end);
+        self.scopes.retain(|s| (s.pc as usize) < end);
         Ok(Function {
             name: self.name,
             arity: self.arity,
@@ -161,6 +188,8 @@ impl FunctionBuilder {
             free: self.free,
             code: self.code,
             positions: self.positions,
+            inlined: self.inlined,
+            scopes: self.scopes,
         })
     }
 }

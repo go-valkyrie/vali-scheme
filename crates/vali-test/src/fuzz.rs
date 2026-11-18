@@ -157,6 +157,8 @@ pub fn module(random: &mut impl Random) -> Module {
                 free: shape.free,
                 code,
                 positions: Vec::new(),
+                inlined: Vec::new(),
+                scopes: Vec::new(),
             }
         })
         .collect();
