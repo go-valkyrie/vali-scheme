@@ -334,4 +334,45 @@ mod tests {
         let once = measure(&mut cx, 1);
         assert_eq!(measure(&mut cx, 50), once);
     }
+
+    /// Deep inputs to the REPL leave no cache behind: the scope context's
+    /// and the binding table's are dropped with each input, so they do not
+    /// grow for the whole session.
+    #[test]
+    fn interaction_inputs_leave_no_caches() {
+        let source = "
+            (import (scheme base) (scheme eval) (scheme repl))
+            (define (name i) (string->symbol (string-append \"x\" (number->string i))))
+            (define (same depth form)
+              (if (= depth 0)
+                  form
+                  (same (- depth 1) (list 'let '((y (+ y 1))) form))))
+            (define (nest depth)
+              (let loop ((i depth) (form (same depth (list '+ (name depth) 1))))
+                (if (= i 0)
+                    form
+                    (loop (- i 1)
+                          (list 'let (list (list (name i) (name (- i 1)))) form)))))
+            (define (run n depth)
+              (eval '(define x0 1) (interaction-environment))
+              (eval '(define y 1) (interaction-environment))
+              (do ((i 0 (+ i 1))) ((= i n))
+                (eval (nest depth) (interaction-environment))))";
+        let program = crate::compile_program(source, &Identity::new("caches"), &Fetcher(None))
+            .expect("the program compiles");
+        let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = crate::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let run = cx.variable(id, "run").unwrap();
+        for n in [1, 5] {
+            let args = [Handle::fixnum(n).unwrap(), Handle::fixnum(300).unwrap()];
+            cx.call(&run, &args).unwrap();
+            let data = cx.set_evaluator(None).unwrap();
+            let mut evaluator = data.downcast::<Evaluator>().unwrap();
+            let held = evaluator.expander.cache_len();
+            cx.set_evaluator(Some(evaluator));
+            assert_eq!(held, 0, "after {n} deep inputs");
+        }
+    }
 }

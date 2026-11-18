@@ -248,6 +248,16 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         }
     }
 
+    /// How many results resolving has memoised. For tests that the memos
+    /// stay in check.
+    #[doc(hidden)]
+    pub fn cache_len(&mut self) -> usize {
+        self.entries
+            .values_mut()
+            .map(|sym| sym.memo.get_mut().expect("memo").by_set.len())
+            .sum()
+    }
+
     /// Every entry: its symbol, scope set, phases and binding, in no
     /// particular order.
     pub fn entries(&self) -> impl Iterator<Item = (&S, ScopeSetId, &Phases, &B)> {

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::syntax::Effect;
 
@@ -91,10 +91,12 @@ type Batch = (ScopeSetId, Arc<[(Scope, Effect)]>);
 
 /// Numbers scopes and interns scope sets for one expansion.
 ///
-/// Two caches speed up the work on large sets: bit sets, and the results
-/// of applying long lists of changes. They are this context's own and
-/// bounded (the bit sets by 256 MiB); a clone starts with empty ones, and
-/// [`ScopeContext::clear_caches`] drops them, so a finished context that is
+/// Three caches speed up the work on large sets: bit sets, the results of
+/// applying long lists of changes, and the result of each single change.
+/// They are this context's own. Only the bit sets are bounded (by 256 MiB);
+/// the other two grow with the work done, so a context that lives long
+/// needs [`ScopeContext::clear_caches`], which drops all three, called now
+/// and then. A clone starts with empty ones, so a finished context that is
 /// kept for its sets does not keep them too.
 #[derive(Debug)]
 pub struct ScopeContext {
@@ -108,6 +110,9 @@ pub struct ScopeContext {
     /// How many bytes of `bits` this context has made, against its own
     /// budget.
     bits_bytes: AtomicUsize,
+    /// Which of `bits` are made, so clearing them costs what they do, not
+    /// what every set interned does.
+    bits_made: Mutex<Vec<u32>>,
     interned: HashMap<Box<[Scope]>, ScopeSetId>,
     memo: HashMap<(ScopeSetId, Scope, Op), ScopeSetId>,
     /// Long lists of changes, applied whole, by the list's address. The
@@ -125,8 +130,9 @@ impl Clone for ScopeContext {
             parents: self.parents.clone(),
             bits: self.sets.iter().map(|_| OnceLock::new()).collect(),
             bits_bytes: AtomicUsize::new(0),
+            bits_made: Mutex::default(),
             interned: self.interned.clone(),
-            memo: self.memo.clone(),
+            memo: HashMap::new(),
             batches: HashMap::new(),
         }
     }
@@ -156,21 +162,31 @@ impl ScopeContext {
             parents: vec![None],
             bits: vec![OnceLock::new()],
             bits_bytes: AtomicUsize::new(0),
+            bits_made: Mutex::default(),
             interned: HashMap::from([(empty, ScopeSetId::EMPTY)]),
             memo: HashMap::new(),
             batches: HashMap::new(),
         }
     }
 
-    /// Drops the bit sets and the remembered lists of changes, which are
-    /// only there to save time. What the context numbers and interns is
-    /// untouched.
+    /// Drops the bit sets, the remembered lists of changes and the results
+    /// of single changes, which are only there to save time. What the
+    /// context numbers and interns is untouched.
     pub fn clear_caches(&mut self) {
-        self.bits
-            .iter_mut()
-            .for_each(|cell| *cell = OnceLock::new());
+        self.memo = HashMap::new();
+        for i in self.bits_made.get_mut().expect("not poisoned").drain(..) {
+            self.bits[i as usize] = OnceLock::new();
+        }
         self.bits_bytes = AtomicUsize::new(0);
         self.batches = HashMap::new();
+    }
+
+    /// How many entries the caches hold: bit sets made, remembered lists of
+    /// changes and results of single changes. For tests that the caches
+    /// stay in check.
+    #[doc(hidden)]
+    pub fn cache_len(&self) -> usize {
+        self.bits_made.lock().expect("not poisoned").len() + self.batches.len() + self.memo.len()
     }
 
     /// A fresh scope.
@@ -263,6 +279,7 @@ impl ScopeContext {
             return None;
         }
         Some(cell.get_or_init(|| {
+            self.bits_made.lock().expect("not poisoned").push(set.0);
             let mut bits = vec![0u64; words];
             for s in scopes {
                 bits[s.0 as usize / 64] |= 1 << (s.0 % 64);

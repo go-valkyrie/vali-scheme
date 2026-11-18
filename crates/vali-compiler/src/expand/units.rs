@@ -497,7 +497,19 @@ impl Expander {
             }
         };
         // Imports bound before are bound again, which is a no-op.
-        self.unit(identity, imports, imported, top, body, &[], span, true)
+        let module = self.unit(identity, imports, imported, top, body, &[], span, true);
+        // The context lives as long as the REPL does, so what only saves
+        // time is dropped with each input, or it grows for the whole
+        // session. The next input rebuilds what it uses.
+        self.context.clear_caches();
+        self.table.clear_caches();
+        module
+    }
+
+    /// How many entries the live context's caches hold, for tests.
+    #[cfg(test)]
+    pub(crate) fn cache_len(&mut self) -> usize {
+        self.context.cache_len() + self.table.cache_len()
     }
 
     /// Whether the unit being compiled is a REPL's input.
