@@ -209,6 +209,36 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
                 | Instruction::IfNumEq { a, b, .. } => slot(*a) && slot(*b),
                 Instruction::Call { base, argc } => span(*base, 3 + usize::from(*argc)),
                 Instruction::TailCall { proc, argc } => span(*proc, usize::from(*argc)),
+                Instruction::CallDirect {
+                    base: first,
+                    argc,
+                    function: target,
+                }
+                | Instruction::TailCallDirect {
+                    proc: first,
+                    argc,
+                    function: target,
+                } => {
+                    // The VM gives the callee a closure of its own, with no
+                    // free variables, and checks no arity.
+                    let Some(target_function) = module.functions.get(*target as usize) else {
+                        return fail(format!("function {target} does not exist"));
+                    };
+                    if target_function.free != 0 {
+                        return fail(format!(
+                            "function {target} has free variables, and cannot be called directly"
+                        ));
+                    }
+                    if !target_function.arity.accepts(usize::from(*argc)) {
+                        return fail(format!("function {target} does not take {argc} arguments"));
+                    }
+                    let header = if matches!(instruction, Instruction::CallDirect { .. }) {
+                        3
+                    } else {
+                        0
+                    };
+                    span(*first, header + usize::from(*argc))
+                }
                 Instruction::Return { src } => slot(*src),
                 Instruction::Add { dst, a, b }
                 | Instruction::Sub { dst, a, b }
@@ -251,7 +281,10 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             // the code, constants and variables it runs with, and a call's
             // header would overwrite it from base 0.
             if written_slot(instruction) == Some(0)
-                || matches!(instruction, Instruction::Call { base: 0, .. })
+                || matches!(
+                    instruction,
+                    Instruction::Call { base: 0, .. } | Instruction::CallDirect { base: 0, .. }
+                )
             {
                 return fail("slot 0 holds the running closure, and cannot be written".into());
             }

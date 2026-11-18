@@ -236,6 +236,10 @@ unsafe impl Send for Cell {}
 pub(crate) struct Instance<S: Strategy> {
     pub(crate) loaded: Arc<Loaded<S>>,
     pub(crate) constants: Vec<Value>,
+    /// The closure direct calls give each function, made the first time
+    /// one calls it and `#f` until then. Only functions with no free
+    /// variables are called directly.
+    pub(crate) statics: Box<[Value]>,
     /// Boxed so the cells stay put as instances are added. Code reaches
     /// them only through `variables`.
     #[expect(dead_code, reason = "owns the cells that `variables` points into")]

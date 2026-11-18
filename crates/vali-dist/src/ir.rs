@@ -57,6 +57,12 @@ impl Arity {
         }
     }
 
+    /// Whether it takes `n` arguments.
+    pub fn accepts(self, n: usize) -> bool {
+        let required = usize::from(self.required);
+        n >= required && (self.rest || n <= required + usize::from(self.optional))
+    }
+
     /// How many parameters bind its arguments: required, optional, and one
     /// for the rest list.
     pub fn parameters(self) -> usize {
@@ -200,6 +206,13 @@ pub enum Term {
         args: Vec<Operand>,
         position: Option<Position>,
     },
+    /// Calls `function` with `args` in place of the function, as
+    /// [`Value::CallDirect`] calls it.
+    TailCallDirect {
+        function: FunId,
+        args: Vec<Operand>,
+        position: Option<Position>,
+    },
 }
 
 /// What a [`Term::Let`] binds its variable to.
@@ -212,6 +225,10 @@ pub enum Value {
     /// Calls `callee` with `args`; what follows the `let` is where it
     /// returns to.
     Call { callee: Operand, args: Vec<Operand> },
+    /// Calls the module's function `function`, which has no free variables
+    /// and takes `args`, without a procedure check or a closure load
+    /// (ADR 0017 #5): what calls to a library's own procedures become.
+    CallDirect { function: FunId, args: Vec<Operand> },
     /// A new closure of `function`, capturing `free` as its free
     /// variables, in order.
     Closure { function: FunId, free: Vec<Operand> },
@@ -241,7 +258,7 @@ impl Value {
         match self {
             Value::Operand(_) => Effects::PURE,
             Value::Primitive { op, .. } => op.effects(),
-            Value::Call { .. } => Effects::ALL,
+            Value::Call { .. } | Value::CallDirect { .. } => Effects::ALL,
             Value::Closure { .. } | Value::Box(_) => Effects::ALLOC,
             Value::Global(_) => Effects::READ | Effects::RAISE,
             Value::Unbox(_) => Effects::READ,

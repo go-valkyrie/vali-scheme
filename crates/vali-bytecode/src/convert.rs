@@ -234,7 +234,10 @@ fn linearise(f: &ir::Function) -> Vec<Event> {
                 pending.push(Event::Else(id));
                 pending.push(Event::Term(*then));
             }
-            ir::Term::Jump { .. } | ir::Term::Return(_) | ir::Term::TailCall { .. } => {}
+            ir::Term::Jump { .. }
+            | ir::Term::Return(_)
+            | ir::Term::TailCall { .. }
+            | ir::Term::TailCallDirect { .. } => {}
         }
     }
     events
@@ -261,6 +264,7 @@ fn value_operands(value: &ir::Value) -> Vec<ir::Operand> {
         ir::Value::Call { callee, args } => std::iter::once(*callee)
             .chain(args.iter().copied())
             .collect(),
+        ir::Value::CallDirect { args, .. } => args.clone(),
         ir::Value::Closure { free, .. } => free.clone(),
         ir::Value::Global(_) => Vec::new(),
         ir::Value::SetBox(a, b) => vec![*a, *b],
@@ -279,7 +283,31 @@ fn term_operands(term: &ir::Term) -> Vec<ir::Operand> {
         ir::Term::TailCall { callee, args, .. } => std::iter::once(*callee)
             .chain(args.iter().copied())
             .collect(),
+        ir::Term::TailCallDirect { args, .. } => args.clone(),
     }
+}
+
+/// A call's window from the callee's slot up: the callee, which a direct
+/// call leaves to the VM, then the arguments; and whether the call returns
+/// here, not being a tail call.
+fn window(term: &ir::Term) -> Option<(Vec<Option<ir::Operand>>, bool)> {
+    let (callee, args, returns) = match term {
+        ir::Term::Let {
+            value: ir::Value::Call { callee, args },
+            ..
+        } => (Some(*callee), args, true),
+        ir::Term::Let {
+            value: ir::Value::CallDirect { args, .. },
+            ..
+        } => (None, args, true),
+        ir::Term::TailCall { callee, args, .. } => (Some(*callee), args, false),
+        ir::Term::TailCallDirect { args, .. } => (None, args, false),
+        _ => return None,
+    };
+    let operands = std::iter::once(callee)
+        .chain(args.iter().copied().map(Some))
+        .collect();
+    Some((operands, returns))
 }
 
 /// What the allocator knows of one function.
@@ -428,17 +456,11 @@ fn analyse(f: &ir::Function) -> Result<Analysis> {
             continue;
         };
         let term = f.term(*id);
-        let operands = match term {
-            ir::Term::Let {
-                value: ir::Value::Call { callee, args },
-                ..
-            }
-            | ir::Term::TailCall { callee, args, .. } => std::iter::once(callee).chain(args),
-            _ => continue,
+        let Some((operands, returns)) = window(term) else {
+            continue;
         };
-        let returns = matches!(term, ir::Term::Let { .. });
         let mut start = p;
-        for x in operands {
+        for x in operands.into_iter().flatten() {
             if let ir::Operand::Var(v) = x {
                 let v = v.0 as usize;
                 if end[v] as usize == p && fixed[v].is_none() && needs_slot[v] {
@@ -617,29 +639,18 @@ fn call_hints(
         let Event::Term(id) = event else {
             continue;
         };
-        let (operands, base) = match f.term(*id) {
-            ir::Term::Let {
-                var,
-                value: ir::Value::Call { callee, args },
-                ..
-            } => {
-                let base = bases[&p] + 3;
-                let v = var.0 as usize;
-                if let Ok(result) = u16::try_from(base) {
-                    hints.insert(v, result);
-                }
-                (
-                    std::iter::once(callee).chain(args).collect::<Vec<_>>(),
-                    base,
-                )
-            }
-            ir::Term::TailCall { callee, args, .. } => {
-                (std::iter::once(callee).chain(args).collect(), bases[&p])
-            }
-            _ => continue,
+        let term = f.term(*id);
+        let Some((operands, returns)) = window(term) else {
+            continue;
         };
+        let base = if returns { bases[&p] + 3 } else { bases[&p] };
+        if let ir::Term::Let { var, .. } = term
+            && let Ok(result) = u16::try_from(base)
+        {
+            hints.insert(var.0 as usize, result);
+        }
         for (i, x) in operands.into_iter().enumerate() {
-            if let ir::Operand::Var(v) = x
+            if let Some(ir::Operand::Var(v)) = x
                 && a.call_operand[v.0 as usize]
                 && a.end[v.0 as usize] as usize == p
                 && let Ok(slot) = u16::try_from(base + i)
@@ -875,7 +886,10 @@ impl Emitter<'_> {
                     self.value(*var, value, p)?;
                 }
             }
-            ir::Term::Join { .. } | ir::Term::Return(_) | ir::Term::TailCall { .. } => {
+            ir::Term::Join { .. }
+            | ir::Term::Return(_)
+            | ir::Term::TailCall { .. }
+            | ir::Term::TailCallDirect { .. } => {
                 self.tail(id, p)?;
             }
             ir::Term::Jump { join, args } => {
@@ -919,6 +933,27 @@ impl Emitter<'_> {
                 self.scratch = self.scratch.max(usize::from(proc) + args.len());
                 self.place(&targets)?;
                 self.b.emit(I::TailCall { proc, argc });
+            }
+            ir::Term::TailCallDirect {
+                function,
+                args,
+                position,
+            } => {
+                self.position(*position);
+                let argc =
+                    u16::try_from(args.len()).map_err(|_| "too many arguments".to_owned())?;
+                let proc = self.touch(self.bases[&p])?;
+                let mut targets = Vec::new();
+                for (i, &x) in args.iter().enumerate() {
+                    targets.push((self.touch(usize::from(proc) + 1 + i)?, x));
+                }
+                self.scratch = self.scratch.max(usize::from(proc) + args.len());
+                self.place(&targets)?;
+                self.b.emit(I::TailCallDirect {
+                    proc,
+                    argc,
+                    function: function.0,
+                });
             }
             _ => {}
         }
@@ -1015,6 +1050,26 @@ impl Emitter<'_> {
                 self.scratch = self.scratch.max(usize::from(base) + 3 + args.len());
                 self.place(&targets)?;
                 self.b.emit(I::Call { base, argc });
+                if dst != base + 3 {
+                    self.b.emit(I::Mov { dst, src: base + 3 });
+                }
+            }
+            ir::Value::CallDirect { function, args } => {
+                let base = self.touch(self.bases[&p])?;
+                let argc =
+                    u16::try_from(args.len()).map_err(|_| "too many arguments".to_owned())?;
+                self.touch(usize::from(base) + 3)?;
+                let mut targets = Vec::new();
+                for (i, &x) in args.iter().enumerate() {
+                    targets.push((self.touch(usize::from(base) + 4 + i)?, x));
+                }
+                self.scratch = self.scratch.max(usize::from(base) + 3 + args.len());
+                self.place(&targets)?;
+                self.b.emit(I::CallDirect {
+                    base,
+                    argc,
+                    function: function.0,
+                });
                 if dst != base + 3 {
                     self.b.emit(I::Mov { dst, src: base + 3 });
                 }

@@ -311,6 +311,39 @@ impl<'a> Checker<'a> {
                 self.operands(args)?;
                 self.position(position)?;
             }
+            Term::TailCallDirect {
+                function,
+                args,
+                position,
+            } => {
+                self.direct(*function, args)?;
+                self.operands(args)?;
+                self.position(position)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that a direct call's `function` exists, has no free
+    /// variables, and takes as many arguments as `args`.
+    fn direct(&self, function: FunId, args: &[Operand]) -> Result<(), String> {
+        let target = self
+            .module
+            .functions
+            .get(function.0 as usize)
+            .ok_or_else(|| format!("direct call of f{}, which does not exist", function.0))?;
+        if !target.free.is_empty() {
+            return Err(format!(
+                "direct call of f{}, which has free variables",
+                function.0
+            ));
+        }
+        if !target.arity.accepts(args.len()) {
+            return Err(format!(
+                "direct call of f{} with {} arguments, which it does not take",
+                function.0,
+                args.len()
+            ));
         }
         Ok(())
     }
@@ -332,6 +365,10 @@ impl<'a> Checker<'a> {
             }
             Value::Call { callee, args } => {
                 self.operand(callee)?;
+                self.operands(args)
+            }
+            Value::CallDirect { function, args } => {
+                self.direct(*function, args)?;
                 self.operands(args)
             }
             Value::Closure { function, free } => {

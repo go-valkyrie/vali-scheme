@@ -5,8 +5,8 @@
 //! one of three layouts: three 8-bit fields `a b c`, an 8-bit field and a
 //! 16-bit field `a d`, or one 24-bit field `e`. Conditional branches add a
 //! word holding a signed 32-bit offset; `closure` adds the function index
-//! and the slots of its free variables. Offsets count words from the start
-//! of the next instruction.
+//! and the slots of its free variables, and the direct calls the function
+//! index. Offsets count words from the start of the next instruction.
 
 use std::fmt;
 
@@ -91,6 +91,8 @@ opcodes! {
     VectorLength = 43, "vector-length";
     SetFree = 44, "set-free";
     Wide = 45, "wide";
+    CallDirect = 46, "call-direct";
+    TailCallDirect = 47, "tail-call-direct";
 }
 
 /// A frame slot (a register). Slots up to 255 fit an instruction's 8-bit
@@ -152,6 +154,22 @@ pub enum Instruction {
     /// Tail call the procedure in `proc` with the `argc` arguments after it,
     /// reusing this frame.
     TailCall { proc: Slot, argc: u16 },
+    /// Call the module's function number `function`, which has no free
+    /// variables and takes `argc` arguments, as [`Instruction::Call`] does,
+    /// with that function's closure for the procedure: slot `base + 3` is
+    /// the VM's to fill.
+    CallDirect {
+        base: Slot,
+        argc: u16,
+        function: u32,
+    },
+    /// Tail call the module's function number `function` with the `argc`
+    /// arguments after `proc`, as [`Instruction::CallDirect`] calls it.
+    TailCallDirect {
+        proc: Slot,
+        argc: u16,
+        function: u32,
+    },
     /// Return `src`.
     Return { src: Slot },
     /// `dst ← a + b`.
@@ -323,6 +341,8 @@ impl Instruction {
             I::IfPair { .. } => Opcode::IfPair,
             I::Call { .. } => Opcode::Call,
             I::TailCall { .. } => Opcode::TailCall,
+            I::CallDirect { .. } => Opcode::CallDirect,
+            I::TailCallDirect { .. } => Opcode::TailCallDirect,
             I::Return { .. } => Opcode::Return,
             I::Add { .. } => Opcode::Add,
             I::Sub { .. } => Opcode::Sub,
@@ -370,7 +390,10 @@ impl Instruction {
     pub fn is_terminator(&self) -> bool {
         matches!(
             self,
-            Instruction::Jump { .. } | Instruction::TailCall { .. } | Instruction::Return { .. }
+            Instruction::Jump { .. }
+                | Instruction::TailCall { .. }
+                | Instruction::TailCallDirect { .. }
+                | Instruction::Return { .. }
         )
     }
 
@@ -449,6 +472,19 @@ impl Instruction {
             }
             I::Call { base, argc } => abc(code, op, base, argc, 0),
             I::TailCall { proc, argc } => abc(code, op, proc, argc, 0),
+            I::CallDirect {
+                base: a,
+                argc,
+                function,
+            }
+            | I::TailCallDirect {
+                proc: a,
+                argc,
+                function,
+            } => {
+                abc(code, op, a, argc, 0);
+                code.push(function);
+            }
             I::Return { src } => abc(code, op, src, 0, 0),
             I::Add { dst, a, b }
             | I::Sub { dst, a, b }
@@ -599,6 +635,28 @@ impl Instruction {
             },
             Opcode::Call => I::Call { base: a, argc: b },
             Opcode::TailCall => I::TailCall { proc: a, argc: b },
+            Opcode::CallDirect => {
+                let function = next(1)?;
+                return Ok((
+                    I::CallDirect {
+                        base: a,
+                        argc: b,
+                        function,
+                    },
+                    2,
+                ));
+            }
+            Opcode::TailCallDirect => {
+                let function = next(1)?;
+                return Ok((
+                    I::TailCallDirect {
+                        proc: a,
+                        argc: b,
+                        function,
+                    },
+                    2,
+                ));
+            }
             Opcode::Return => I::Return { src: a },
             Opcode::Add => I::Add { dst: a, a: b, b: c },
             Opcode::Sub => I::Sub { dst: a, a: b, b: c },
@@ -712,6 +770,16 @@ impl fmt::Display for Instruction {
             I::IfLtImm { a, imm, offset } => write!(f, "{m} r{a}, {imm}, {offset:+}"),
             I::Call { base, argc } => write!(f, "{m} r{base}, {argc}"),
             I::TailCall { proc, argc } => write!(f, "{m} r{proc}, {argc}"),
+            I::CallDirect {
+                base: a,
+                argc,
+                function,
+            }
+            | I::TailCallDirect {
+                proc: a,
+                argc,
+                function,
+            } => write!(f, "{m} r{a}, {argc}, f{function}"),
             I::Return { src } => write!(f, "{m} r{src}"),
             I::Add { dst, a, b }
             | I::Sub { dst, a, b }

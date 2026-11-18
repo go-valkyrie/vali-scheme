@@ -306,6 +306,35 @@ fn errors() {
 }
 
 #[test]
+fn direct_calls_run_as_calls_do() {
+    check(&[
+        // Rest and optional arguments, in and out of tail position.
+        (
+            "(define (f x . r) (cons x r)) (define (g) (list (f 1) (f 1 2 3))) (g)",
+            "((1) (1 2 3))",
+        ),
+        ("(define (f x . r) (cons x r)) (f 1 2)", "(1 2)"),
+        // Deep direct recursion chains stack segments.
+        (
+            "(define (count n) (if (= n 0) 0 (+ 1 (count (- n 1))))) (count 100000)",
+            "100000",
+        ),
+        // The procedure a direct call runs is the global's procedure.
+        ("(define (f) f) (eq? (f) f)", "#t"),
+    ]);
+    // A procedure called before it is defined is still unbound then.
+    let Err(Error::Scheme(e)) = run("(define (f) (g)) (define x (f)) (define (g) 1)") else {
+        panic!("expected an unbound variable");
+    };
+    assert_eq!(e.message, "unbound variable: g");
+    // And a direct call's errors name the procedure that raised them.
+    let Err(Error::Scheme(e)) = run("(define (f x) (car x)) (define (h) (+ 1 (f 5))) (h)") else {
+        panic!("expected a type error");
+    };
+    assert_eq!(e.backtrace.first().map(|f| f.name.as_str()), Some("f"));
+}
+
+#[test]
 fn fib_compiles_to_tight_bytecode() {
     let module = compile(
         "(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))",
@@ -316,18 +345,17 @@ fn fib_compiles_to_tight_bytecode() {
     // The comparison and both subtractions are single instructions, each
     // call's operands are computed in its window, each result stays in the
     // slot where the call put it, and the sum reuses the parameter's slot.
+    // `fib` is known, so the calls are direct: no global is read for them.
     assert_eq!(
         listing,
         "\
 fib: arity 1, 11 slots, 0 free
   0000  if-lt-imm r1, 2, +1  ; -> 0003
   0002  return r1
-  0003  get-variable r5, v0
-  0004  sub-imm r6, r1, 1
-  0005  call r2, 1
-  0006  get-variable r9, v0
-  0007  sub-imm r10, r1, 2
-  0008  call r6, 1
+  0003  sub-imm r6, r1, 1
+  0004  call-direct r2, 1, f1
+  0006  sub-imm r10, r1, 2
+  0007  call-direct r6, 1, f1
   0009  add r1, r5, r9
   0010  return r1
 "
@@ -2759,12 +2787,16 @@ fn frames_leave_nothing_counted() {
         });
     }
     // Raised to the host: the same program raising a number instead of
-    // allocating leaves the same behind.
+    // allocating leaves the same behind. Both call `ring`, so both make the
+    // closure its module keeps for direct calls to it.
     let raised = [
-        ("(let ((r (ring))) (raise r))", "(let ((r 5)) (raise r))"),
+        (
+            "(let ((r (ring))) (raise r))",
+            "(let ((r (begin (ring) 5))) (raise r))",
+        ),
         (
             "(define (fail n) (if (= n 0) (car (ring) 5) (list (ring) (fail (- n 1))))) (fail 100)",
-            "(define (fail n) (if (= n 0) (car 5 5) (list 5 (fail (- n 1))))) (fail 100)",
+            "(define (fail n) (if (= n 0) (car (begin (ring) 5) 5) (list 5 (fail (- n 1))))) (fail 100)",
         ),
     ];
     for (program, control) in raised {

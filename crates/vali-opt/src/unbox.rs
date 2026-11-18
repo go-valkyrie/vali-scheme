@@ -56,6 +56,7 @@ fn private(f: &Function) -> Vec<Var> {
                 count(&[*callee], &mut uses);
                 count(args, &mut uses);
             }
+            Term::TailCallDirect { args, .. } => count(args, &mut uses),
             Term::Join { .. } => {}
         }
     }
@@ -145,7 +146,10 @@ fn candidates(module: &Module, n: usize, known: &Known) -> Vec<Var> {
                 stack.push((*then, false));
                 stack.push((*otherwise, false));
             }
-            Term::Jump { .. } | Term::Return(_) | Term::TailCall { .. } => {}
+            Term::Jump { .. }
+            | Term::Return(_)
+            | Term::TailCall { .. }
+            | Term::TailCallDirect { .. } => {}
         }
     }
     let empty = Flow {
@@ -208,7 +212,7 @@ fn candidates(module: &Module, n: usize, known: &Known) -> Vec<Var> {
                     next.set.union(&flow[otherwise.0 as usize].set);
                     next
                 }
-                Term::Return(_) | Term::TailCall { .. } => continue,
+                Term::Return(_) | Term::TailCall { .. } | Term::TailCallDirect { .. } => continue,
             };
             flow[id.0 as usize] = next;
         }
@@ -220,13 +224,15 @@ fn candidates(module: &Module, n: usize, known: &Known) -> Vec<Var> {
     // be read before it is set, and may be set.
     let mut kept = Set::new(boxes.len());
     for &id in &order {
-        if let Term::Let {
-            value: Value::Call { callee, .. },
-            body,
-            ..
-        } = f.term(id)
-            && !known.is_quiet(&callees, *callee)
-        {
+        let Term::Let { value, body, .. } = f.term(id) else {
+            continue;
+        };
+        let quiet = match value {
+            Value::Call { callee, .. } => known.is_quiet(&callees, *callee),
+            Value::CallDirect { function, .. } => known.is_quiet_function(*function),
+            _ => true,
+        };
+        if !quiet {
             let after = &flow[body.0 as usize];
             kept.union_both(&after.live, &after.set);
         }
@@ -376,7 +382,7 @@ pub(crate) fn unbox(module: &mut Module, n: usize, known: &Known) -> bool {
                     hole = (at, Field::Then);
                     id = *then;
                 }
-                term @ (Term::Return(_) | Term::TailCall { .. }) => {
+                term @ (Term::Return(_) | Term::TailCall { .. } | Term::TailCallDirect { .. }) => {
                     b.place(hole, term.clone());
                     break;
                 }

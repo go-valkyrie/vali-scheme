@@ -7,15 +7,16 @@
 //! - a `let` whose value folds to a constant, or is just an operand, is
 //!   dropped, and its variable replaced by that operand where it is used;
 //! - a `let` whose variable is unused is dropped if its value may only
-//!   allocate or read (ADR 0017 #4): raising, writing and capturing stay;
+//!   allocate or read (ADR 0017 #4): raising, writing and capturing stay,
+//!   but reading a known procedure's global cannot raise;
 //! - an `if` on a constant keeps only the arm it takes;
 //! - a join point nothing jumps to keeps only its body.
 //!
 //! What a dropped term made unused is found by the next round.
 
 use vali_dist::{
-    Constant, ConstantId, Effects, Function, JoinId, Module, Operand, Primitive, Term, TermId,
-    Value,
+    Constant, ConstantId, Effects, FunId, Function, JoinId, Module, Operand, Primitive, Term,
+    TermId, Value,
 };
 
 use crate::build::{Builder, Field, HOLE, Hole};
@@ -108,8 +109,14 @@ fn fold(value: &Value, pool: &mut Pool<'_>) -> Option<Operand> {
     Some(Operand::Const(pool.add(folded)))
 }
 
-/// Whether a `let` of `value` can go when its variable is unused.
-fn removable(value: &Value) -> bool {
+/// Whether a `let` of `value` can go when its variable is unused. `known`
+/// says which globals hold known procedures, whose reads cannot raise.
+fn removable(value: &Value, known: &[Option<FunId>]) -> bool {
+    if let Value::Global(g) = value
+        && known[g.0 as usize].is_some()
+    {
+        return true;
+    }
     let effects = value.effects();
     !effects.contains(Effects::WRITE)
         && !effects.contains(Effects::RAISE)
@@ -159,6 +166,7 @@ fn count(f: &Function) -> (Vec<u32>, Vec<u32>) {
                 use_all(&[*callee], &mut uses);
                 use_all(args, &mut uses);
             }
+            Term::TailCallDirect { args, .. } => use_all(args, &mut uses),
         }
     }
     (uses, jumps)
@@ -175,6 +183,10 @@ fn substitute_value(value: &Value, sub: &dyn Fn(Operand) -> Operand) -> Value {
         },
         Value::Call { callee, args } => Value::Call {
             callee: sub(*callee),
+            args: all(args),
+        },
+        Value::CallDirect { function, args } => Value::CallDirect {
+            function: *function,
             args: all(args),
         },
         Value::Closure { function, free } => Value::Closure {
@@ -198,8 +210,9 @@ fn substitute_value(value: &Value, sub: &dyn Fn(Operand) -> Operand) -> Value {
     }
 }
 
-/// One round over function `n` of `module`. Returns whether it changed.
-pub(crate) fn simplify(module: &mut Module, n: usize) -> bool {
+/// One round over function `n` of `module`, whose known procedures'
+/// globals are `known`. Returns whether it changed.
+pub(crate) fn simplify(module: &mut Module, n: usize, known: &[Option<FunId>]) -> bool {
     let f = &module.functions[n];
     let (uses, jumps) = count(f);
     let mut subst: Vec<Option<Operand>> = vec![None; f.vars as usize];
@@ -231,7 +244,7 @@ pub(crate) fn simplify(module: &mut Module, n: usize) -> bool {
                     if let Some(x) = replaced {
                         subst[var.0 as usize] = Some(x);
                         changed = true;
-                    } else if uses[var.0 as usize] == 0 && removable(&value) {
+                    } else if uses[var.0 as usize] == 0 && removable(&value, known) {
                         changed = true;
                     } else {
                         let at = b.place(
@@ -327,6 +340,22 @@ pub(crate) fn simplify(module: &mut Module, n: usize) -> bool {
                         hole,
                         Term::TailCall {
                             callee: sub(*callee),
+                            args,
+                            position: *position,
+                        },
+                    );
+                    break;
+                }
+                Term::TailCallDirect {
+                    function,
+                    args,
+                    position,
+                } => {
+                    let args = args.iter().map(|&x| sub(x)).collect();
+                    b.place(
+                        hole,
+                        Term::TailCallDirect {
+                            function: *function,
                             args,
                             position: *position,
                         },

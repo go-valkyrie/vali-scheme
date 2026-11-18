@@ -14,6 +14,8 @@
 //!   values again, threaded through join points (ADR 0017 #5). Runs after
 //!   contification, using what the module's own code shows about which
 //!   calls cannot capture a continuation.
+//! - [`known`](optimise): calls to the module's own procedures, through
+//!   globals nothing assigns again, become direct calls (ADR 0017 #5).
 
 mod build;
 mod contify;
@@ -35,6 +37,7 @@ pub(crate) fn operands(value: &Value) -> Vec<Operand> {
         Value::Call { callee, args } => std::iter::once(*callee)
             .chain(args.iter().copied())
             .collect(),
+        Value::CallDirect { args, .. } => args.clone(),
         Value::Closure { free, .. } => free.clone(),
         Value::Global(_) => Vec::new(),
         Value::SetBox(a, b) => vec![*a, *b],
@@ -61,6 +64,7 @@ const ROUNDS: usize = 4;
 
 /// Optimises `module` in place. It stays valid.
 pub fn optimise(module: &mut Module) {
+    let procedures = known::find(module);
     // Every function is contified before any is analysed: a function whose
     // only calls were to its loops calls nothing once they are join points.
     for n in 0..module.functions.len() {
@@ -73,8 +77,9 @@ pub fn optimise(module: &mut Module) {
     let known = known::Known::new(module);
     for n in 0..module.functions.len() {
         unbox::unbox(module, n, &known);
+        known::direct(module, n, &procedures);
         for _ in 0..ROUNDS {
-            if !simplify::simplify(module, n) {
+            if !simplify::simplify(module, n, &procedures) {
                 break;
             }
         }
@@ -88,21 +93,18 @@ pub fn optimise(module: &mut Module) {
     );
 }
 
-/// Drops the functions no closure reaches from the body, which
-/// contification leaves behind, keeping the others in order.
+/// Drops the functions no closure or direct call reaches from the body,
+/// which contification leaves behind, keeping the others in order.
 fn compact_functions(module: &mut Module) {
     let mut reached = vec![false; module.functions.len()];
     reached[module.body.0 as usize] = true;
     let mut pending = vec![module.body];
     while let Some(id) = pending.pop() {
         for term in &module.functions[id.0 as usize].terms {
-            if let Term::Let {
-                value: Value::Closure { function, .. },
-                ..
-            } = term
+            if let Some(function) = function_of(term)
                 && !std::mem::replace(&mut reached[function.0 as usize], true)
             {
-                pending.push(*function);
+                pending.push(function);
             }
         }
     }
@@ -123,14 +125,29 @@ fn compact_functions(module: &mut Module) {
     module.body = FunId(renumber[module.body.0 as usize]);
     for f in &mut module.functions {
         for term in &mut f.terms {
-            if let Term::Let {
-                value: Value::Closure { function, .. },
-                ..
-            } = term
-            {
-                *function = FunId(renumber[function.0 as usize]);
+            match term {
+                Term::Let {
+                    value: Value::Closure { function, .. } | Value::CallDirect { function, .. },
+                    ..
+                }
+                | Term::TailCallDirect { function, .. } => {
+                    *function = FunId(renumber[function.0 as usize]);
+                }
+                _ => {}
             }
         }
+    }
+}
+
+/// The function `term` makes a closure of or calls directly, if any.
+fn function_of(term: &Term) -> Option<FunId> {
+    match term {
+        Term::Let {
+            value: Value::Closure { function, .. } | Value::CallDirect { function, .. },
+            ..
+        }
+        | Term::TailCallDirect { function, .. } => Some(*function),
+        _ => None,
     }
 }
 
@@ -179,6 +196,7 @@ fn for_each_operand(module: &mut Module, mut visit: impl FnMut(&mut Operand)) {
                         visit(callee);
                         args.iter_mut().for_each(&mut visit);
                     }
+                    Value::CallDirect { args, .. } => args.iter_mut().for_each(&mut visit),
                     Value::Closure { free, .. } => free.iter_mut().for_each(&mut visit),
                     Value::Global(_) => {}
                     Value::SetBox(a, b) => {
@@ -197,6 +215,7 @@ fn for_each_operand(module: &mut Module, mut visit: impl FnMut(&mut Operand)) {
                     visit(callee);
                     args.iter_mut().for_each(&mut visit);
                 }
+                Term::TailCallDirect { args, .. } => args.iter_mut().for_each(&mut visit),
             }
         }
     }

@@ -6,7 +6,7 @@ use crate::instruction::{DecodeError, Instruction};
 
 /// The run format's version. Any mismatch means rebuilding from source or
 /// from the distribution artifact (ADR 0005 #9).
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// How many arguments a function takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

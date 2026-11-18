@@ -34,6 +34,8 @@ Frames live on a task's stack segments, which grow downward like native stacks (
 
 **Tail calls** move the procedure and arguments to slots 0 and up, and reuse the frame.
 
+**Direct calls** call one of the module's own functions that has no free variables, known when the code was compiled. `call-direct base, argc, f` lays out the callee's frame as `call` does, but the VM puts the procedure in slot `base + 3` itself: a closure of `f` that the module's instance makes the first time a direct call needs it and keeps from then on. There is no procedure check and no arity check: the validator has checked that `f` has no free variables and takes `argc` arguments. `tail-call-direct proc, argc, f` takes the arguments from the slots after `proc`, and is to `tail-call` what `call-direct` is to `call`.
+
 **Function entry** is not an instruction. The VM checks the callee's arity, fills in omitted optional arguments, builds the rest list, decrements fuel and counts the call, as ADR 0005 #6 describes.
 
 ## Encoding
@@ -50,10 +52,11 @@ Instructions are little-endian 32-bit words. The first word holds the opcode in 
 - **`jump`** keeps a signed 24-bit offset in `e`.
 - **Offsets** count words from the start of the next instruction.
 - **`closure`** takes a second word, the function's index, then one word for every four free variables, each a slot number in one byte, low byte first.
+- **`call-direct`** and **`tail-call-direct`** take a second word, the function's index.
 
 - **`wide`** (opcode 45) is a prefix, not an instruction: its `a`, `b` and `c` fields are the high bytes of the next instruction's, which make slots, argument counts and free-variable indices 16 bits. A wide `closure` lists each slot in two bytes, two to a word. The prefix appears only when a field needs it, and never on an immediate, a `d` field or another prefix: every instruction has one encoding, and the decoder refuses any other. A branch's offset counts from the end of the instruction, prefix included; branches target the prefix.
 
-Slots up to 255 fit an instruction's fields; with `wide`, frames have up to 65,535 slots and calls up to 65,535 arguments. Format version 3 added `wide`.
+Slots up to 255 fit an instruction's fields; with `wide`, frames have up to 65,535 slots and calls up to 65,535 arguments. Format version 3 added `wide`, and version 4 the direct calls.
 
 ## Instructions
 
@@ -99,6 +102,8 @@ Conditional branches continue to the next instruction when their condition holds
 | 20 | `call base, argc` | `a b` | Call, as described under Frames |
 | 21 | `tail-call proc, argc` | `a b` | Tail call the procedure in `proc` with the `argc` arguments after it |
 | 22 | `return r` | `a` | Return `r` |
+| 46 | `call-direct base, argc, f` | `a b`, then the function | Call function `f` directly, as described under Frames |
+| 47 | `tail-call-direct proc, argc, f` | `a b`, then the function | Tail call function `f` directly with the `argc` arguments after `proc` |
 
 ### Arithmetic and comparison
 
@@ -145,9 +150,10 @@ The loader rejects a module unless:
 
 - its body exists, and takes no arguments and no free variables;
 - every function has at most 256 slots, and enough for slot 0 and its parameters;
-- every function's code decodes, and its last instruction is `jump`, `tail-call` or `return`, so execution cannot run off the end;
-- every slot operand lies inside the frame, including the header, procedure and arguments of every `call`;
+- every function's code decodes, and its last instruction is `jump`, `tail-call`, `tail-call-direct` or `return`, so execution cannot run off the end;
+- every slot operand lies inside the frame, including the header, procedure and arguments of every `call` and `call-direct`;
 - every constant, variable, function and free-variable index exists, and every `closure` captures as many slots as its function has free variables;
+- every direct call's function has no free variables and takes the call's argument count;
 - no `set-variable` assigns an imported variable, and no name is exported twice;
 - every branch lands on the start of an instruction.
 

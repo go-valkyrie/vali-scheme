@@ -72,6 +72,7 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
                         }
                         mark(args, &mut other);
                     }
+                    Value::CallDirect { args, .. } => mark(args, &mut other),
                     Value::SetFree {
                         closure: Operand::Var(c),
                         index,
@@ -112,6 +113,7 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
                 }
                 mark(args, &mut other);
             }
+            Term::TailCallDirect { args, .. } => mark(args, &mut other),
         }
     }
     (0..vars).find_map(|v| {
@@ -190,6 +192,7 @@ fn self_calls_only(g: &Function, selves: &[u32]) -> bool {
                 }
                 (args.clone(), true)
             }
+            Term::TailCallDirect { args, .. } => (args.clone(), true),
         };
         if operands.iter().any(is_self) {
             return false;
@@ -434,7 +437,36 @@ pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
                         Into::Value(join) => {
                             let t = Var(vars);
                             vars += 1;
-                            call_then_jump(&mut b, hole, t, callee, args, *position, join);
+                            let call = Value::Call { callee, args };
+                            call_then_jump(&mut b, hole, t, call, *position, join);
+                        }
+                    }
+                }
+                Term::TailCallDirect {
+                    function,
+                    args,
+                    position,
+                } => {
+                    let args: Vec<Operand> = args.iter().map(|&x| map(x)).collect();
+                    match into {
+                        Into::Tail => {
+                            b.place(
+                                hole,
+                                Term::TailCallDirect {
+                                    function: *function,
+                                    args,
+                                    position: *position,
+                                },
+                            );
+                        }
+                        Into::Value(join) => {
+                            let t = Var(vars);
+                            vars += 1;
+                            let call = Value::CallDirect {
+                                function: *function,
+                                args,
+                            };
+                            call_then_jump(&mut b, hole, t, call, *position, join);
                         }
                     }
                 }
@@ -465,8 +497,7 @@ fn call_then_jump(
     b: &mut Builder,
     hole: Hole,
     t: Var,
-    callee: Operand,
-    args: Vec<Operand>,
+    call: Value,
     position: Option<Position>,
     join: JoinId,
 ) {
@@ -474,7 +505,7 @@ fn call_then_jump(
         hole,
         Term::Let {
             var: t,
-            value: Value::Call { callee, args },
+            value: call,
             body: HOLE,
             position,
         },
@@ -548,6 +579,10 @@ fn map_value(value: &Value, map: &dyn Fn(Operand) -> Operand) -> Value {
         },
         Value::Call { callee, args } => Value::Call {
             callee: map(*callee),
+            args: all(args),
+        },
+        Value::CallDirect { function, args } => Value::CallDirect {
+            function: *function,
             args: all(args),
         },
         Value::Closure { function, free } => Value::Closure {

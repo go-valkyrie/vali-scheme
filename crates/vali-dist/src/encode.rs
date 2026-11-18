@@ -441,6 +441,16 @@ fn encode_function(w: &mut Writer, f: &Function) {
                 n.operands(w, args);
                 encode_position(w, *position);
             }
+            Term::TailCallDirect {
+                function,
+                args,
+                position,
+            } => {
+                w.byte(6);
+                w.u32(function.0);
+                n.operands(w, args);
+                encode_position(w, *position);
+            }
         }
     }
 }
@@ -499,6 +509,11 @@ fn encode_value(w: &mut Writer, n: &Numbering, value: &Value) {
             n.operand(w, *closure);
             w.u32(*index);
             n.operand(w, *value);
+        }
+        Value::CallDirect { function, args } => {
+            w.byte(10);
+            w.u32(function.0);
+            n.operands(w, args);
         }
     }
 }
@@ -592,6 +607,13 @@ impl Decoder {
                     closure,
                     index,
                     value: self.operand(r)?,
+                }
+            }
+            10 => {
+                let function = FunId(r.u32()?);
+                Value::CallDirect {
+                    function,
+                    args: self.operands(r)?,
                 }
             }
             b => return Err(r.error(format!("unknown value tag {b}"))),
@@ -710,6 +732,19 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, DecodeError> {
                     r,
                     Term::TailCall {
                         callee,
+                        args,
+                        position,
+                    },
+                )?;
+            }
+            6 => {
+                let function = FunId(r.u32()?);
+                let args = d.operands(r)?;
+                let position = Decoder::position(r)?;
+                d.place(
+                    r,
+                    Term::TailCallDirect {
+                        function,
                         args,
                         position,
                     },

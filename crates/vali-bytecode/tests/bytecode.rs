@@ -84,6 +84,16 @@ fn examples() -> Vec<I> {
         I::IfPair { a: 3, offset: -8 },
         I::Call { base: 2, argc: 253 },
         I::TailCall { proc: 0, argc: 255 },
+        I::CallDirect {
+            base: 2,
+            argc: 3,
+            function: 7,
+        },
+        I::TailCallDirect {
+            proc: 0,
+            argc: 2,
+            function: 70_000,
+        },
         I::Return { src: 200 },
         I::Add { dst: 1, a: 2, b: 3 },
         I::Sub { dst: 1, a: 2, b: 3 },
@@ -154,6 +164,11 @@ fn examples() -> Vec<I> {
             dst: 1,
             function: 4,
             free: vec![1, 400, 3],
+        },
+        I::CallDirect {
+            base: 300,
+            argc: 2,
+            function: 1,
         },
         I::AddImm {
             dst: 1000,

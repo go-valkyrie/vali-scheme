@@ -274,9 +274,14 @@ enum Next {
         base: usize,
         argc: usize,
         resume: u64,
+        /// Whether the procedure is known to be a closure of a bytecode
+        /// function that takes `argc` arguments: a direct call's.
+        direct: bool,
     },
     TailCall {
         argc: usize,
+        /// As for [`Next::Call`].
+        direct: bool,
     },
     Return(Value),
     /// A frame whose position word is `position` returned `value` to
@@ -363,9 +368,11 @@ impl<S: Strategy> Cx<S> {
         }
         let id = self.instances.len();
         self.instance_of.insert(Arc::as_ptr(&loaded) as usize, id);
+        let statics = vec![Value::FALSE; loaded.functions.len()].into();
         self.instances.push(Instance {
             loaded,
             constants,
+            statics,
             cells,
             variables: variables.into(),
         });
@@ -1398,11 +1405,28 @@ impl<S: Strategy> Cx<S> {
         Ok(self.closure_raw(pointer, &[])?)
     }
 
-    /// The constants and variables of the loaded module at `module`.
-    fn instance_registers(&mut self, module: usize) -> (*const Value, *const Cell) {
+    /// The constants, variables and direct-call closures of the loaded
+    /// module at `module`.
+    fn instance_registers(&mut self, module: usize) -> (*const Value, *const Cell, *mut Value) {
         let index = self.instance_of[&module];
-        let instance = &self.instances[index];
-        (instance.constants.as_ptr(), instance.variables.as_ptr())
+        let instance = &mut self.instances[index];
+        (
+            instance.constants.as_ptr(),
+            instance.variables.as_ptr(),
+            instance.statics.as_mut_ptr(),
+        )
+    }
+
+    /// Makes the closure direct calls give function `function` of the
+    /// loaded module at `module`, which has no free variables, and keeps it
+    /// with the module's instance.
+    fn make_static(&mut self, module: usize, function: usize) -> Result<Value, Error> {
+        let index = self.instance_of[&module];
+        let target = &self.instances[index].loaded.functions[function] as *const Code<S>;
+        let closure = self.closure_raw(target, &[])?;
+        self.hold(closure);
+        self.instances[index].statics[function] = closure;
+        Ok(closure)
     }
 
     /// Runs until the entry frame at `top` receives its result, keeping the
@@ -1429,8 +1453,10 @@ impl<S: Strategy> Cx<S> {
         let mut code: *const u32 = std::ptr::null();
         let mut constants: *const Value = std::ptr::null();
         let mut variables: *const Cell = std::ptr::null();
+        let mut statics: *mut Value = std::ptr::null_mut();
         let mut current_module = 0usize;
         let mut next = Next::Call {
+            direct: false,
             base: 0,
             argc,
             resume: ENTRY,
@@ -1468,7 +1494,7 @@ impl<S: Strategy> Cx<S> {
                     code = words;
                     if module as usize != current_module {
                         current_module = module as usize;
-                        (constants, variables) = self.instance_registers(current_module);
+                        (constants, variables, statics) = self.instance_registers(current_module);
                     }
                 }};
             }
@@ -1646,21 +1672,33 @@ impl<S: Strategy> Cx<S> {
                         link_to!(fp, stub_of!(*fp.add(2), caller));
                         switch_to!(caller);
                         next = Next::Call {
+                            direct: false,
                             base: catch.base,
                             argc: 1,
                             resume: catch.resume,
                         };
                         continue;
                     }
-                    Next::Call { base, argc, resume } => {
+                    Next::Call {
+                        base,
+                        argc,
+                        resume,
+                        direct,
+                    } => {
                         // A call is a safepoint.
                         if S::COUNTS && fp != top && S::epoch_due(self.heap()) {
                             let roots = self.stack_roots(fp);
                             self.epoch(&roots);
                         }
                         let procedure = slot(fp, base + 3);
-                        let callee = attempt!(self.procedure_code(procedure));
-                        attempt!(control_arity(callee, argc));
+                        let callee = if direct {
+                            // The validator checked the function's arity.
+                            &*(get(procedure, Self::LAYOUT.closure_code()) as *const Code<S>)
+                        } else {
+                            let callee = attempt!(self.procedure_code(procedure));
+                            attempt!(control_arity(callee, argc));
+                            callee
+                        };
                         match callee.kind {
                             Kind::Catch => {
                                 // `(%catch thunk handler)`: note where to
@@ -1680,6 +1718,7 @@ impl<S: Strategy> Cx<S> {
                                 });
                                 self.store(fp, base + 3, slot(fp, base + 4));
                                 next = Next::Call {
+                                    direct: false,
                                     base,
                                     argc: 0,
                                     resume: resume | CATCH,
@@ -1702,6 +1741,7 @@ impl<S: Strategy> Cx<S> {
                                 self.store(fp, base + 3, receiver);
                                 self.store(fp, base + 4, Value::FALSE);
                                 next = Next::Call {
+                                    direct: false,
                                     base,
                                     argc: 1,
                                     resume: resume | CAPTURE,
@@ -1750,6 +1790,7 @@ impl<S: Strategy> Cx<S> {
                                         frame_slots = frame_slots.max(args.len() + 1);
                                     }
                                     next = Next::Call {
+                                        direct: false,
                                         base,
                                         argc: args.len(),
                                         resume,
@@ -1849,9 +1890,14 @@ impl<S: Strategy> Cx<S> {
                             }
                         }
                     }
-                    Next::TailCall { argc } => {
-                        let callee = attempt!(self.procedure_code(slot(fp, 0)));
-                        attempt!(control_arity(callee, argc));
+                    Next::TailCall { argc, direct } => {
+                        let callee = if direct {
+                            &*(get(slot(fp, 0), Self::LAYOUT.closure_code()) as *const Code<S>)
+                        } else {
+                            let callee = attempt!(self.procedure_code(slot(fp, 0)));
+                            attempt!(control_arity(callee, argc));
+                            callee
+                        };
                         match callee.kind {
                             Kind::Catch => {
                                 // As a tail call, the handler takes this
@@ -1883,7 +1929,10 @@ impl<S: Strategy> Cx<S> {
                                 });
                                 self.store(fp, 0, slot(fp, 1));
                                 *fp.add(2) = position | CATCH;
-                                next = Next::TailCall { argc: 0 };
+                                next = Next::TailCall {
+                                    argc: 0,
+                                    direct: false,
+                                };
                                 continue;
                             }
                             Kind::Capture => {
@@ -1911,7 +1960,10 @@ impl<S: Strategy> Cx<S> {
                                 };
                                 self.store(fp, 0, receiver);
                                 self.store(fp, 1, k);
-                                next = Next::TailCall { argc: 1 };
+                                next = Next::TailCall {
+                                    argc: 1,
+                                    direct: false,
+                                };
                                 continue;
                             }
                             Kind::Resume => {
@@ -1945,7 +1997,10 @@ impl<S: Strategy> Cx<S> {
                                     if S::PRECISE {
                                         frame_slots = frame_slots.max(args.len() + 1);
                                     }
-                                    next = Next::TailCall { argc: args.len() };
+                                    next = Next::TailCall {
+                                        argc: args.len(),
+                                        direct: false,
+                                    };
                                     continue;
                                 }
                                 next = Next::Return(result);
@@ -2255,6 +2310,7 @@ impl<S: Strategy> Cx<S> {
                         Opcode::IfPair => branch!(slot(fp, a).is_pair()),
                         Opcode::Call => {
                             break Next::Call {
+                                direct: false,
                                 base: a,
                                 argc: b,
                                 resume: (pc + 1) as u64,
@@ -2264,7 +2320,33 @@ impl<S: Strategy> Cx<S> {
                             for i in 0..=b {
                                 self.store(fp, i, slot(fp, a + i));
                             }
-                            break Next::TailCall { argc: b };
+                            break Next::TailCall { argc: b, direct: false };
+                        }
+                        Opcode::CallDirect => {
+                            let function = *code.add(pc + 1) as usize;
+                            let mut closure = *statics.add(function);
+                            if closure == Value::FALSE {
+                                closure = attempt!(self.make_static(current_module, function));
+                            }
+                            self.store(fp, a + 3, closure);
+                            break Next::Call {
+                                base: a,
+                                argc: b,
+                                resume: (pc + 2) as u64,
+                                direct: true,
+                            };
+                        }
+                        Opcode::TailCallDirect => {
+                            let function = *code.add(pc + 1) as usize;
+                            let mut closure = *statics.add(function);
+                            if closure == Value::FALSE {
+                                closure = attempt!(self.make_static(current_module, function));
+                            }
+                            for i in 1..=b {
+                                self.store(fp, i, slot(fp, a + i));
+                            }
+                            self.store(fp, 0, closure);
+                            break Next::TailCall { argc: b, direct: true };
                         }
                         Opcode::Return => break Next::Return(slot(fp, a)),
                         Opcode::Add => {

@@ -13,7 +13,17 @@
 //! raises never returns to the frame that raised it, so a handler that
 //! captures there cannot re-enter the function's caller after the call.
 //! Recursion keeps a function quiet; any call to an unknown procedure,
-//! including the ones Rust implements, does not.
+//! including the ones Rust implements, does not. A direct call is quiet
+//! when the function it calls is.
+//!
+//! Known procedures ([`find`]) are narrower: globals that hold a closure of
+//! one of the module's own functions, with no free variables, from before
+//! any of the module's code can run, and that nothing assigns again.
+//! Reading one cannot fail, and a call through one becomes a direct call
+//! ([`direct`], ADR 0017 #5). Only the module's own definitions count, so
+//! nothing here can go stale when another library changes (ADR 0012 #7):
+//! an importer cannot assign them (R7RS 5.6.1), and only this module's
+//! code sees them as known.
 
 use vali_dist::{FunId, GlobalId, GlobalLink, Module, Operand, Term, Value};
 
@@ -74,6 +84,11 @@ impl Known {
                         ..
                     }
                     | Term::TailCall { callee, .. } => !known.is_quiet(&callees, *callee),
+                    Term::Let {
+                        value: Value::CallDirect { function, .. },
+                        ..
+                    }
+                    | Term::TailCallDirect { function, .. } => !known.is_quiet_function(*function),
                     _ => false,
                 });
                 if loud {
@@ -116,6 +131,11 @@ impl Known {
             Operand::Const(_) => false,
         }
     }
+
+    /// Whether calling function `f` directly cannot capture a continuation.
+    pub(crate) fn is_quiet_function(&self, f: FunId) -> bool {
+        self.quiet[f.0 as usize]
+    }
 }
 
 /// The function each variable of `f` is bound to a new closure of.
@@ -132,4 +152,118 @@ fn closures(f: &vali_dist::Function) -> Vec<Option<FunId>> {
         }
     }
     closures
+}
+
+/// For each global of `module`, the function it is known to hold a closure
+/// of, if it is.
+///
+/// The module's body is followed from its start while what it does cannot
+/// run code or raise: making closures and assigning globals. A global
+/// assigned a closure there, of a function with no free variables, and
+/// assigned nowhere else, holds that closure from then on, and no code
+/// that could read it runs before then.
+pub(crate) fn find(module: &Module) -> Vec<Option<FunId>> {
+    let mut sets = vec![0u32; module.globals.len()];
+    for f in &module.functions {
+        for term in &f.terms {
+            if let Term::Let {
+                value: Value::SetGlobal(g, _),
+                ..
+            } = term
+            {
+                sets[g.0 as usize] += 1;
+            }
+        }
+    }
+    let body = &module.functions[module.body.0 as usize];
+    let mut closures: Vec<Option<FunId>> = vec![None; body.vars as usize];
+    let mut known = vec![None; module.globals.len()];
+    let mut id = body.body;
+    while let Term::Let {
+        var,
+        value,
+        body: next,
+        ..
+    } = body.term(id)
+    {
+        match value {
+            Value::Closure { function, free } if free.is_empty() => {
+                closures[var.0 as usize] = Some(*function);
+            }
+            Value::SetGlobal(g, Operand::Var(v)) => {
+                let g = g.0 as usize;
+                if sets[g] == 1 && module.globals[g].link == GlobalLink::Defined {
+                    known[g] = closures[v.0 as usize];
+                }
+            }
+            value if !quiet(value) => break,
+            _ => {}
+        }
+        id = *next;
+    }
+    known
+}
+
+/// Whether `value` may appear in the module body's prefix: it neither runs
+/// code nor raises.
+fn quiet(value: &Value) -> bool {
+    use vali_dist::Effects;
+    let effects = value.effects();
+    !effects.contains(Effects::RAISE) && !effects.contains(Effects::CAPTURE)
+}
+
+/// Turns the calls in function `n` whose callee is a known global, read
+/// there, into direct calls, when the callee takes that many arguments.
+/// What read the global is left for simplification to remove. Returns
+/// whether anything changed.
+pub(crate) fn direct(module: &mut Module, n: usize, known: &[Option<FunId>]) -> bool {
+    let arities: Vec<_> = module.functions.iter().map(|f| f.arity).collect();
+    let f = &mut module.functions[n];
+    let mut of: Vec<Option<FunId>> = vec![None; f.vars as usize];
+    for term in &f.terms {
+        if let Term::Let {
+            var,
+            value: Value::Global(g),
+            ..
+        } = term
+        {
+            of[var.0 as usize] = known[g.0 as usize];
+        }
+    }
+    let target = |callee: &Operand, argc: usize| match callee {
+        Operand::Var(v) => of[v.0 as usize].filter(|t| arities[t.0 as usize].accepts(argc)),
+        Operand::Const(_) => None,
+    };
+    let mut changed = false;
+    for term in &mut f.terms {
+        match term {
+            Term::Let { value, .. } => {
+                if let Value::Call { callee, args } = value
+                    && let Some(function) = target(callee, args.len())
+                {
+                    *value = Value::CallDirect {
+                        function,
+                        args: std::mem::take(args),
+                    };
+                    changed = true;
+                }
+            }
+            Term::TailCall {
+                callee,
+                args,
+                position,
+            } => {
+                if let Some(function) = target(callee, args.len()) {
+                    *term = Term::TailCallDirect {
+                        function,
+                        args: std::mem::take(args),
+                        position: *position,
+                    };
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
 }

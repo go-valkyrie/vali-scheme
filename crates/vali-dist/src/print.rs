@@ -145,6 +145,9 @@ impl fmt::Display for Value {
             Value::Operand(operand) => write!(f, "{operand}"),
             Value::Primitive { op, args } => write!(f, "{op} {}", list(args)),
             Value::Call { callee, args } => write!(f, "call {callee}({})", list(args)),
+            Value::CallDirect { function, args } => {
+                write!(f, "call direct f{}({})", function.0, list(args))
+            }
             Value::Closure { function, free } => {
                 write!(f, "closure f{} [{}]", function.0, list(free))
             }
@@ -250,6 +253,17 @@ impl Function {
                     args,
                     position,
                 } => writeln!(f, "tail {callee}({}){}", list(args), located(position))?,
+                Term::TailCallDirect {
+                    function,
+                    args,
+                    position,
+                } => writeln!(
+                    f,
+                    "tail direct f{}({}){}",
+                    function.0,
+                    list(args),
+                    located(position)
+                )?,
             }
         }
         Ok(())
