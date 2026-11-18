@@ -72,3 +72,46 @@ fn inlined_procedures_may_call_others() {
         "{nested}"
     );
 }
+
+/// How many contification attempts `source` takes.
+fn contify_attempts(source: &str) -> usize {
+    let mut ir =
+        vali_compiler::compile_internal_program(source, &Identity::new("test"), &NoLibraries)
+            .unwrap_or_else(|e| panic!("{source}\n{e}"))
+            .ir
+            .expect("every module is lowered");
+    vali_opt::contify_attempts(&mut ir)
+}
+
+#[test]
+fn nested_loops_contify_once_each() {
+    // Contifying a loop leaves its inner loops' functions unreachable;
+    // contifying those too made this cubic in the nesting depth.
+    let n = 200;
+    let mut source = String::from("(define (f)\n");
+    for i in 0..n {
+        source.push_str(&format!("(let l{i} ((i{i} 0)) (if (< i{i} 1) (begin\n"));
+    }
+    source.push_str("i0");
+    for i in (0..n).rev() {
+        source.push_str(&format!(") (l{i} (+ i{i} 1))))"));
+    }
+    source.push_str(")\n");
+    let attempts = contify_attempts(&source);
+    assert!(attempts <= 3 * n, "{attempts} attempts for {n} loops");
+}
+
+#[test]
+fn procedures_with_loops_contify_in_linear_time() {
+    // Finding what a contification made unreachable must not walk the
+    // whole module each time.
+    let n = 200;
+    let mut source = String::new();
+    for i in 0..n {
+        source.push_str(&format!(
+            "(define (p{i} x) (let loop ((i 0) (a x)) (if (< i 3) (loop (+ i 1) (+ a {i})) a)))\n"
+        ));
+    }
+    let attempts = contify_attempts(&source);
+    assert!(attempts <= 3 * n, "{attempts} attempts for {n} procedures");
+}

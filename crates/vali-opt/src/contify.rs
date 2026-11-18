@@ -225,17 +225,16 @@ enum Task {
     Copied(TermId, Hole),
 }
 
-/// Contifies one closure of function `n`, if one can be. Returns whether
-/// one was.
-pub(crate) fn contify(module: &mut Module, n: usize) -> bool {
-    let Some(c) = find(module, &module.functions[n]) else {
-        return false;
-    };
+/// Contifies one closure of function `n`, if one can be. Returns the
+/// function it absorbed, which nothing reaches any more: its inner
+/// closures went into `n` with its body.
+pub(crate) fn contify(module: &mut Module, n: usize) -> Option<FunId> {
+    let c = find(module, &module.functions[n])?;
     if c.function.0 as usize == n {
-        return false;
+        return None;
     }
     splice(module, n, &c);
-    true
+    Some(c.function)
 }
 
 /// Copies `c`'s function's body into function `n` in place of its call,

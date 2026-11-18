@@ -52,14 +52,39 @@ pub(crate) fn operands(value: &Value) -> Vec<Operand> {
 /// The cheap set of passes, for evaluated code and REPL inputs (ADR 0013
 /// #13): contification alone, so their loops are loops.
 pub fn contify(module: &mut Module) {
+    contify_attempts(module);
+}
+
+/// Like [`contify`], returning how many contification attempts it made,
+/// for tests of its cost.
+#[doc(hidden)]
+pub fn contify_attempts(module: &mut Module) -> usize {
+    let attempts = contify_all(module);
+    compact_functions(module);
+    attempts
+}
+
+/// Contifies every function the body reaches, and returns how many
+/// contification attempts it made. Contifying a function absorbs another
+/// into it and leaves that one unreachable (its inner closures moved with
+/// its body), so it is marked dead and skipped: contifying dead functions
+/// made nested loops cubic.
+fn contify_all(module: &mut Module) -> usize {
+    let mut dead = vec![false; module.functions.len()];
+    let mut attempts = 0;
     for n in 0..module.functions.len() {
+        if dead[n] {
+            continue;
+        }
         for _ in 0..CONTIFICATIONS {
-            if !contify::contify(module, n) {
-                break;
+            attempts += 1;
+            match contify::contify(module, n) {
+                Some(absorbed) => dead[absorbed.0 as usize] = true,
+                None => break,
             }
         }
     }
-    compact_functions(module);
+    attempts
 }
 
 /// How many rounds of simplification a function gets at most: each round
@@ -71,13 +96,7 @@ pub fn optimise(module: &mut Module) {
     let procedures = known::find(module);
     // Every function is contified before any is analysed: a function whose
     // only calls were to its loops calls nothing once they are join points.
-    for n in 0..module.functions.len() {
-        for _ in 0..CONTIFICATIONS {
-            if !contify::contify(module, n) {
-                break;
-            }
-        }
-    }
+    contify_all(module);
     let known = known::Known::new(module);
     for n in 0..module.functions.len() {
         unbox::unbox(module, n, &known);
@@ -106,9 +125,8 @@ pub fn optimise(module: &mut Module) {
     );
 }
 
-/// Drops the functions no closure or direct call reaches from the body,
-/// which contification leaves behind, keeping the others in order.
-fn compact_functions(module: &mut Module) {
+/// Which functions the body reaches through closures and direct calls.
+fn reachable(module: &Module) -> Vec<bool> {
     let mut reached = vec![false; module.functions.len()];
     reached[module.body.0 as usize] = true;
     let mut pending = vec![module.body];
@@ -121,6 +139,13 @@ fn compact_functions(module: &mut Module) {
             }
         }
     }
+    reached
+}
+
+/// Drops the functions no closure or direct call reaches from the body,
+/// which contification leaves behind, keeping the others in order.
+fn compact_functions(module: &mut Module) {
+    let reached = reachable(module);
     if reached.iter().all(|&r| r) {
         return;
     }
