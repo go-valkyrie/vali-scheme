@@ -76,6 +76,7 @@ impl FB {
             joins: self.joins,
             terms: self.terms,
             body,
+            inlined: Vec::new(),
         }
     }
 }
@@ -1115,6 +1116,13 @@ impl<'m> Interp<'m> {
                         args = na;
                         continue 'call;
                     }
+                    Term::TailCallDirect {
+                        function, args: a, ..
+                    } => {
+                        args = a.iter().map(|x| self.get(&env, x)).collect();
+                        callee = direct(*function);
+                        continue 'call;
+                    }
                 }
             }
         }
@@ -1202,6 +1210,10 @@ impl<'m> Interp<'m> {
                 let c = g(callee);
                 let a = args.iter().map(&g).collect();
                 self.apply(c, a)?
+            }
+            Value::CallDirect { function, args } => {
+                let a = args.iter().map(&g).collect();
+                self.apply(direct(*function), a)?
             }
             Value::Closure { function, free } => V::Clo(Rc::new(Clo {
                 fun: function.0,
@@ -2120,4 +2132,13 @@ fn one_seed() {
         Ok(x) => eprintln!("ok {x}"),
         Err(e) => panic!("{e}"),
     }
+}
+
+/// What a direct call to `function` calls: a closure of it with no free
+/// variables.
+fn direct(function: FunId) -> V {
+    V::Clo(Rc::new(Clo {
+        fun: function.0,
+        free: RefCell::new(Vec::new()),
+    }))
 }
