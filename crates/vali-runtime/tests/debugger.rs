@@ -7,8 +7,6 @@
 //! through the interpreter and the trampoline, through every interpreted
 //! frame, named after its Scheme function, and back into the host.
 
-use std::process::Command;
-
 use vali_bytecode::{Arity, Constant, FunctionBuilder, Instruction as I, ModuleBuilder};
 use vali_runtime::{Cx, Error, Handle, HeapConfig, NoCollection, Value};
 
@@ -106,14 +104,18 @@ fn debugger_child() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[cfg(all(feature = "native-frames", target_arch = "x86_64", target_os = "linux"))]
 fn gdb_backtrace() {
-    if Command::new("gdb").arg("--version").output().is_err() {
+    if std::process::Command::new("gdb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("gdb is not installed; skipping");
         return;
     }
     let exe = std::env::current_exe().unwrap();
-    let output = Command::new("gdb")
+    let output = std::process::Command::new("gdb")
         .args([
             "-batch",
             "-nx",
@@ -156,14 +158,18 @@ fn gdb_backtrace() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[cfg(all(feature = "native-frames", target_arch = "x86_64", target_os = "linux"))]
 fn lldb_backtrace() {
-    if Command::new("lldb").arg("--version").output().is_err() {
+    if std::process::Command::new("lldb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("lldb is not installed; skipping");
         return;
     }
     let exe = std::env::current_exe().unwrap();
-    let output = Command::new("lldb")
+    let output = std::process::Command::new("lldb")
         .args([
             "--batch",
             "-o",

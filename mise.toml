@@ -15,8 +15,11 @@ description = "Build every crate"
 run = "cargo build --workspace --all-targets"
 
 [tasks.test]
-description = "Run every crate's tests"
-run = "cargo test --workspace"
+description = "Run every crate's tests, and the native debugger tests with native frames on"
+run = [
+    "cargo test --workspace",
+    "cargo test -p vali-runtime --features native-frames --test debugger",
+]
 
 [tasks.lint]
 description = "Check formatting and run Clippy with warnings as errors"

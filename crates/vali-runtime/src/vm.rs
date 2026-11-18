@@ -1455,8 +1455,10 @@ impl<S: Strategy> Cx<S> {
             macro_rules! link_to {
                 ($fp:expr, $stub:expr) => {{
                     current_stub = $stub;
-                    *link.record = $fp as u64;
-                    *link.record.add(1) = current_stub;
+                    if cfg!(feature = "native-frames") {
+                        *link.record = $fp as u64;
+                        *link.record.add(1) = current_stub;
+                    }
                 }};
             }
             'run: loop {
@@ -1955,7 +1957,9 @@ impl<S: Strategy> Cx<S> {
                                     for (i, &v) in moved.iter().enumerate() {
                                         set(fp, i, v);
                                     }
-                                    *link.record = fp as u64;
+                                    if cfg!(feature = "native-frames") {
+                                        *link.record = fp as u64;
+                                    }
                                 }
                                 attempt!(self.enter(callee, fp, argc));
                                 if S::PRECISE {

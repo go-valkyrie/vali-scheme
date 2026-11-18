@@ -14,6 +14,15 @@ vali-macros.workspace = true
 vali-num.workspace = true
 vali-syntax.workspace = true
 
+[features]
+# Native debuggers and profilers walk interpreted frames (ADR 0004 #6): the
+# interpreter keeps the entry trampoline's frame record pointing at the
+# current Scheme frame, and each bytecode function gets a named marker stub.
+# Off by default: keeping the link current costs up to about 10% on
+# call-heavy code. Vali's GDB and LLDB extensions show Scheme frames without
+# it.
+native-frames = []
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

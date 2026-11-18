@@ -150,7 +150,14 @@ impl<S: Strategy> Loaded<S> {
                     .unwrap_or_else(|| format!("{}#{i}", module.name).into())
             })
             .collect();
-        let stubs = crate::stubs::Stubs::new(&names.iter().map(|n| &**n).collect::<Vec<_>>());
+        // Named marker stubs only with native frames: without them, every
+        // frame returns to the shared stub, and nothing is registered with
+        // debuggers (ADR 0004 #6).
+        let stubs = if cfg!(feature = "native-frames") {
+            crate::stubs::Stubs::new(&names.iter().map(|n| &**n).collect::<Vec<_>>())
+        } else {
+            None
+        };
         Arc::new_cyclic(|this| {
             let this = this.as_ptr();
             let functions = module
