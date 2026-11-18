@@ -18,6 +18,7 @@ fn error(message: impl Into<String>, span: Span) -> CompileError {
     CompileError {
         message: message.into(),
         span: Some(span),
+        location: None,
     }
 }
 

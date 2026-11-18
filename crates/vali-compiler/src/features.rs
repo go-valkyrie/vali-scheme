@@ -13,6 +13,7 @@ fn error(d: &Datum) -> CompileError {
     CompileError {
         message: "cond-expand: expected a feature requirement".to_owned(),
         span: Some(d.span),
+        location: None,
     }
 }
 

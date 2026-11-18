@@ -154,6 +154,7 @@ fn error(message: impl Into<String>, span: Span) -> CompileError {
     CompileError {
         message: message.into(),
         span: Some(span),
+        location: None,
     }
 }
 
@@ -169,6 +170,7 @@ fn too_many(e: TooManyScopes) -> CompileError {
     CompileError {
         message: e.to_string(),
         span: None,
+        location: None,
     }
 }
 
@@ -239,6 +241,8 @@ pub(crate) struct Expander {
     repl: Option<(ScopeSetId, ScopeSetId)>,
     /// The files bodies include, fetched with the import graph.
     includes: crate::loader::Includes,
+    /// The sources read, which spans' source ids index.
+    pub(crate) sources: vali_syntax::Sources,
 }
 
 impl Expander {
@@ -259,6 +263,7 @@ impl Expander {
                 .map_err(|_| CompileError {
                     message: format!("{name} is bound twice"),
                     span: None,
+                    location: None,
                 })?;
         }
         let expander = Expander {
@@ -284,6 +289,7 @@ impl Expander {
             floors: Vec::new(),
             natives: Vec::new(),
             includes: crate::loader::Includes::new(),
+            sources: vali_syntax::Sources::new(),
             repl: None,
         };
         Ok(expander)
@@ -300,9 +306,14 @@ impl Expander {
     /// The forms `(include path ...)`, or `include-ci`, stands for: each
     /// file's data, in the lexical context of the `include` keyword
     /// (R7RS 4.1.7).
-    fn included(&self, items: &[Syntax], ci: bool, span: Span) -> Result<Vec<Syntax>> {
+    fn included(&mut self, items: &[Syntax], ci: bool, span: Span) -> Result<Vec<Syntax>> {
         let keyword = if ci { "include-ci" } else { "include" };
-        let identity = &self.units.last().expect("a unit being expanded").identity;
+        let identity = self
+            .units
+            .last()
+            .expect("a unit being expanded")
+            .identity
+            .clone();
         let scopes = items[0].scopes();
         let mut forms = Vec::new();
         for item in &items[1..] {
@@ -313,7 +324,7 @@ impl Expander {
                 ));
             };
             let text = match self.includes.get(&(identity.clone(), path.clone())) {
-                Some(Ok(text)) => text,
+                Some(Ok(text)) => text.clone(),
                 Some(Err(why)) => return Err(error(format!("{keyword}: {why}"), span)),
                 None => {
                     return Err(error(
@@ -324,7 +335,7 @@ impl Expander {
                     ));
                 }
             };
-            for datum in crate::loader::read_included(text, ci, &path)? {
+            for datum in crate::loader::read_included(&text, ci, &path, &mut self.sources)? {
                 forms.push(Syntax::from_datum(&datum, scopes));
             }
         }
@@ -586,6 +597,7 @@ impl Expander {
         validate(&module).map_err(|e| CompileError {
             message: format!("{name}: the compiler produced invalid bytecode: {e}"),
             span: None,
+            location: None,
         })?;
         Ok(module)
     }
@@ -920,6 +932,7 @@ impl Expander {
             let mut cx = phase::instance().map_err(|e| CompileError {
                 message: format!("the expander's isolate: {e}"),
                 span: None,
+                location: None,
             })?;
             for (identity, library) in &self.natives {
                 cx.register_native_library(identity, std::sync::Arc::clone(library));
@@ -946,6 +959,7 @@ impl Expander {
             table: std::mem::take(&mut self.table),
             compiled: std::mem::take(&mut self.compiled),
             origin: Some(origin),
+            sources: self.sources.clone(),
         };
         let cx = self
             .phase1
@@ -1700,6 +1714,7 @@ impl Expander {
             table: self.table.clone(),
             compiled: self.compiled.clone(),
             origin: None,
+            sources: self.sources.clone(),
         }
     }
 

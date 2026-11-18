@@ -19,6 +19,7 @@ fn error(message: impl Into<String>, span: Span) -> CompileError {
     CompileError {
         message: message.into(),
         span: Some(span),
+        location: None,
     }
 }
 
@@ -26,6 +27,7 @@ fn too_many(e: vali_syntax::TooManyScopes) -> CompileError {
     CompileError {
         message: e.to_string(),
         span: None,
+        location: None,
     }
 }
 

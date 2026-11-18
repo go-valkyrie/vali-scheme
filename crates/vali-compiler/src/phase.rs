@@ -46,6 +46,8 @@ pub(crate) struct Shared {
     pub(crate) compiled: Compiled,
     /// The macro use being expanded, which built syntax gets as its origin.
     pub(crate) origin: Option<Arc<Origin>>,
+    /// The sources read, which locate syntax objects' spans.
+    pub(crate) sources: vali_syntax::Sources,
 }
 
 /// The syntax procedures transformers call, which only the phase-1
@@ -58,6 +60,11 @@ pub(crate) const SYNTAX_PROCEDURES: &[&str] = &[
     "free-identifier=?",
     "generate-temporaries",
     "syntax-violation",
+    "syntax-source",
+    "syntax-line",
+    "syntax-column",
+    "syntax-position",
+    "syntax-span",
 ];
 
 /// The procedures phase-1 code compiles calls to.
@@ -85,7 +92,12 @@ pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
         optional: 0,
         rest: true,
     };
-    let natives: [(&str, Arity, vali_runtime::NativeFn<S>); 10] = [
+    let natives: [(&str, Arity, vali_runtime::NativeFn<S>); 15] = [
+        ("syntax-source", exactly(1), syntax_source),
+        ("syntax-line", exactly(1), syntax_line),
+        ("syntax-column", exactly(1), syntax_column),
+        ("syntax-position", exactly(1), syntax_position),
+        ("syntax-span", exactly(1), syntax_span),
         ("syntax->datum", exactly(1), syntax_to_datum),
         ("datum->syntax", exactly(2), datum_to_syntax),
         ("identifier?", exactly(1), is_identifier),
@@ -150,6 +162,64 @@ fn identifier<S: Strategy>(cx: &Cx<S>, v: Value, name: &str) -> Result<Syntax, E
         Some(s) if s.as_identifier().is_some() => Ok(s.clone()),
         _ => Err(Error::scheme(format!("{name}: expected an identifier"))),
     }
+}
+
+/// Where the syntax object `v` is, if its source is known, for the
+/// procedure `name`, which needs syntax (ADR 0014 #6).
+fn location<S: Strategy>(
+    cx: &mut Cx<S>,
+    v: Value,
+    name: &str,
+) -> Result<Option<vali_syntax::Location>, Error> {
+    // SAFETY: arguments are valid values.
+    let Some(span) = unsafe { cx.syntax_value(v) }.map(Syntax::span) else {
+        return Err(Error::scheme(format!("{name}: expected syntax")));
+    };
+    with_shared(cx, name, |_, shared| Ok(shared.sources.locate(span)))
+}
+
+/// One of a location's numbers, or `#f` with no location.
+fn location_number<S: Strategy>(
+    cx: &mut Cx<S>,
+    v: Value,
+    name: &str,
+    field: fn(&vali_syntax::Location) -> u32,
+) -> Result<Value, Error> {
+    Ok(location(cx, v, name)?.map_or(Value::FALSE, |l| {
+        Value::fixnum(i64::from(field(&l))).expect("fits")
+    }))
+}
+
+/// `(syntax-source stx)`: the identity of the source `stx` was read from,
+/// as a string, or `#f`.
+fn syntax_source<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    match location(cx, args[0], "syntax-source")? {
+        Some(l) => {
+            let source = cx.string(&l.source)?;
+            cx.get(&source)
+        }
+        None => Ok(Value::FALSE),
+    }
+}
+
+/// `(syntax-line stx)`: its line, from 1, or `#f`.
+fn syntax_line<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    location_number(cx, args[0], "syntax-line", |l| l.line)
+}
+
+/// `(syntax-column stx)`: its column, from 0, or `#f`.
+fn syntax_column<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    location_number(cx, args[0], "syntax-column", |l| l.column)
+}
+
+/// `(syntax-position stx)`: its position in its source, from 1, or `#f`.
+fn syntax_position<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    location_number(cx, args[0], "syntax-position", |l| l.position)
+}
+
+/// `(syntax-span stx)`: how many characters it covers, or `#f`.
+fn syntax_span<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    location_number(cx, args[0], "syntax-span", |l| l.span)
 }
 
 fn syntax_to_datum<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {

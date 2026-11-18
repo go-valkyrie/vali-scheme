@@ -210,7 +210,13 @@ fn prepare<S: Strategy>(
         body: body.clone(),
     };
     let fetcher = Fetcher(evaluator.loader.as_deref());
-    let graph = loader::fetch(&program, &identity, &fetcher).map_err(compile_error)?;
+    let graph = loader::fetch(
+        &program,
+        &identity,
+        &fetcher,
+        &mut evaluator.expander.sources,
+    )
+    .map_err(compile_error)?;
     let expander = &mut evaluator.expander;
     expander.add_includes(graph.includes);
     let mut names = vec![Vec::new(); graph.libraries.len()];

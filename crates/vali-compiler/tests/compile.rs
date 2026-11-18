@@ -2678,3 +2678,41 @@ fn frames_leave_nothing_counted() {
         });
     }
 }
+
+/// Compile errors say where, and Scheme reads where syntax came from (ADR
+/// 0014 #6), with Racket's counts: lines from 1, columns from 0, positions
+/// from 1, spans in characters.
+#[test]
+fn source_locations() {
+    let error = vali_compiler::compile_program(
+        "(define x 1)\n  (if)",
+        &Identity::new("located"),
+        &NoLibraries,
+    )
+    .unwrap_err();
+    assert!(error.to_string().starts_with("located:2:3: "), "{error}");
+    let read_error =
+        vali_compiler::compile_program("(a\n (b", &Identity::new("unclosed"), &NoLibraries)
+            .unwrap_err();
+    assert!(
+        read_error
+            .to_string()
+            .starts_with("unclosed:1:1: read: bracket is never closed"),
+        "{read_error}"
+    );
+    assert_eq!(
+        run("(import (scheme base) (vali syntax))
+(define s #'abc)
+(define t
+  #'(é x))
+(list (syntax-source s) (syntax-line s) (syntax-column s) (syntax-position s) (syntax-span s)
+      (syntax-line t) (syntax-column t) (syntax-span t))")
+        .unwrap(),
+        "(\"test\" 2 12 50 3 4 4 5)"
+    );
+    let error = run("(import (scheme base) (vali syntax)) (syntax-line 'abc)").unwrap_err();
+    assert!(
+        error.to_string().contains("syntax-line: expected syntax"),
+        "{error}"
+    );
+}

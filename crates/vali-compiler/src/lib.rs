@@ -31,7 +31,7 @@ pub use repl::Repl;
 use std::fmt;
 
 use vali_bytecode::Module;
-use vali_syntax::{Datum, SourceId, Span};
+use vali_syntax::{Datum, Span};
 
 /// Why a program does not compile.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,10 +40,27 @@ pub struct CompileError {
     pub message: String,
     /// Where, if known.
     pub span: Option<Span>,
+    /// Where, in lines and columns, if the source is known: what
+    /// `Display` shows.
+    pub location: Option<vali_syntax::Location>,
 }
 
+impl CompileError {
+    /// This error, located in `sources` if its span is in one.
+    pub(crate) fn located(mut self, sources: &vali_syntax::Sources) -> CompileError {
+        if self.location.is_none() {
+            self.location = self.span.and_then(|span| sources.locate(span));
+        }
+        self
+    }
+}
+
+/// `source:line:column: message` where the source is known.
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(location) = &self.location {
+            return write!(f, "{location}: {}", self.message);
+        }
         match self.span {
             Some(span) => write!(
                 f,
@@ -128,16 +145,24 @@ impl Loader for NoLibraries {
     }
 }
 
-fn read(source: &str) -> Result<Vec<Datum>, CompileError> {
-    let read = vali_syntax::read(source, SourceId(0));
+/// Reads `source`, registered in `sources` as `identity`.
+fn read(
+    source: &str,
+    identity: &str,
+    sources: &mut vali_syntax::Sources,
+) -> Result<Vec<Datum>, CompileError> {
+    let id = sources.add(identity, source);
+    let read = vali_syntax::read(source, id);
     if let Some(e) = read.errors.first() {
-        return Err(CompileError {
+        let error = CompileError {
             message: format!("read: {}", e.kind),
             span: Some(Span {
-                source: SourceId(0),
+                source: id,
                 range: e.range,
             }),
-        });
+            location: None,
+        };
+        return Err(error.located(sources));
     }
     Ok(read.datums)
 }
@@ -158,6 +183,7 @@ pub fn compile(source: &str, name: &str) -> Result<Module, CompileError> {
             message: "the program uses syntax objects at run time: use compile_program and load"
                 .to_owned(),
             span: None,
+            location: None,
         });
     }
     if let Some(library) = linked {
@@ -166,6 +192,7 @@ pub fn compile(source: &str, name: &str) -> Result<Module, CompileError> {
                 "the program uses the library {library} at run time: use compile_program and load"
             ),
             span: None,
+            location: None,
         });
     }
     Ok(program.body)
@@ -178,9 +205,12 @@ pub fn compile_program(
     identity: &Identity,
     loader: &impl Loader,
 ) -> Result<Program, CompileError> {
-    let program = loader::program(&read(source)?)?;
-    let graph = loader::fetch(&program, identity, loader)?;
-    build(&program, graph, identity)
+    let mut sources = vali_syntax::Sources::new();
+    let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+        .map_err(|e| e.located(&sources))?;
+    let graph =
+        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
+    build(&program, graph, identity, sources)
 }
 
 /// As [`compile_program`], with an asynchronous loader: the import graph
@@ -190,9 +220,13 @@ pub async fn compile_program_async(
     identity: &Identity,
     loader: &impl AsyncLoader,
 ) -> Result<Program, CompileError> {
-    let program = loader::program(&read(source)?)?;
-    let graph = loader::fetch_async(&program, identity, loader).await?;
-    build(&program, graph, identity)
+    let mut sources = vali_syntax::Sources::new();
+    let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+        .map_err(|e| e.located(&sources))?;
+    let graph = loader::fetch_async(&program, identity, loader, &mut sources)
+        .await
+        .map_err(|e| e.located(&sources))?;
+    build(&program, graph, identity, sources)
 }
 
 /// Expands and compiles each library of the graph, then the program.
@@ -200,8 +234,43 @@ fn build(
     program: &loader::Program,
     graph: loader::Graph,
     identity: &Identity,
+    sources: vali_syntax::Sources,
 ) -> Result<Program, CompileError> {
     let mut expander = expand::Expander::new()?;
+    expander.sources = sources;
+    match expand_all(&mut expander, program, graph, identity) {
+        Ok((libraries, body, natives, names_eval)) => {
+            let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
+                .then(|| SyntaxData(expander.syntax_data()));
+            let evaluator = names_eval.then(|| Evaluator(Box::new(eval::Evaluator::new(expander))));
+            Ok(Program {
+                libraries,
+                body,
+                syntax,
+                natives,
+                evaluator,
+            })
+        }
+        Err(e) => Err(e.located(&expander.sources)),
+    }
+}
+
+/// What expanding a program and its libraries gives: the libraries'
+/// modules, the program's, its native libraries, and whether it imports
+/// `(scheme eval)`.
+type Expanded = (
+    Vec<(Identity, Module)>,
+    Module,
+    Vec<(Identity, std::sync::Arc<vali_runtime::NativeLibrary>)>,
+    bool,
+);
+
+fn expand_all(
+    expander: &mut expand::Expander,
+    program: &loader::Program,
+    graph: loader::Graph,
+    identity: &Identity,
+) -> Result<Expanded, CompileError> {
     expander.set_includes(graph.includes);
     let names_eval = graph
         .by_name
@@ -232,16 +301,7 @@ fn build(
         program.implicit,
         &program.body,
     )?;
-    let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
-        .then(|| SyntaxData(expander.syntax_data()));
-    let evaluator = names_eval.then(|| Evaluator(Box::new(eval::Evaluator::new(expander))));
-    Ok(Program {
-        libraries,
-        body,
-        syntax,
-        natives,
-        evaluator,
-    })
+    Ok((libraries, body, natives, names_eval))
 }
 
 /// Loads a compiled program into `cx`: each library not there already is

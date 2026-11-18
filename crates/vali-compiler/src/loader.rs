@@ -13,7 +13,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use vali_syntax::{Datum, DatumKind, SourceId, Span};
+use vali_syntax::{Datum, DatumKind, Span};
 
 use crate::CompileError;
 use crate::library::{self, ImportSet, LibraryForm, LibraryName};
@@ -275,6 +275,7 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["scheme", "repl"], include_str!("../lib/scheme/repl.sld")),
     (&["scheme", "time"], include_str!("../lib/scheme/time.sld")),
     (&["vali", "exit"], include_str!("../lib/vali/exit.sld")),
+    (&["vali", "syntax"], include_str!("../lib/vali/syntax.sld")),
     (
         &["scheme", "write"],
         include_str!("../lib/scheme/write.sld"),
@@ -396,13 +397,19 @@ fn error(message: impl Into<String>, span: Option<Span>) -> CompileError {
     CompileError {
         message: message.into(),
         span,
+        location: None,
     }
 }
 
 /// Fetches the import graph of `program` with a synchronous loader.
-pub(crate) fn fetch(program: &Program, identity: &Identity, loader: &impl Loader) -> Result<Graph> {
+pub(crate) fn fetch(
+    program: &Program,
+    identity: &Identity,
+    loader: &impl Loader,
+    sources: &mut vali_syntax::Sources,
+) -> Result<Graph> {
     let loader = Sync_(loader);
-    let future = pin!(walk(program, identity, &loader));
+    let future = pin!(walk(program, identity, &loader, sources));
     // A synchronous loader's futures are ready at once, so the walk never
     // waits.
     match future.poll(&mut Context::from_waker(Waker::noop())) {
@@ -416,9 +423,10 @@ pub(crate) async fn fetch_async(
     program: &Program,
     identity: &Identity,
     loader: &impl AsyncLoader,
+    sources: &mut vali_syntax::Sources,
 ) -> Result<Graph> {
     let loader = Async(loader);
-    walk(program, identity, &loader).await
+    walk(program, identity, &loader, sources).await
 }
 
 fn list(items: Vec<Datum>, span: Span) -> Datum {
@@ -446,16 +454,27 @@ fn head(d: &Datum) -> Option<(&str, &[Datum])> {
 }
 
 /// Reads the text of an included file as data, case-folded for
-/// `include-ci`.
-pub(crate) fn read_included(text: &str, ci: bool, path: &str) -> Result<Vec<Datum>> {
+/// `include-ci`, registering it in `sources` under its path. The directive
+/// `include-ci` adds goes on the first line, so lines keep their numbers.
+pub(crate) fn read_included(
+    text: &str,
+    ci: bool,
+    path: &str,
+    sources: &mut vali_syntax::Sources,
+) -> Result<Vec<Datum>> {
     let text = if ci {
-        format!("#!fold-case\n{text}")
+        format!("#!fold-case {text}")
     } else {
         text.to_owned()
     };
-    let read = vali_syntax::read(&text, SourceId(0));
+    let id = sources.add(path, &text);
+    let read = vali_syntax::read(&text, id);
     if let Some(e) = read.errors.first() {
-        return Err(error(format!("include: {path}: read: {}", e.kind), None));
+        let span = Span {
+            source: id,
+            range: e.range,
+        };
+        return Err(error(format!("read: {}", e.kind), Some(span)).located(sources));
     }
     Ok(read.datums)
 }
@@ -480,6 +499,7 @@ async fn read_includes(
     span: Span,
     from: &Identity,
     loader: &impl Fetch,
+    sources: &mut vali_syntax::Sources,
 ) -> Result<Vec<Datum>> {
     let mut forms = Vec::new();
     for path in include_paths(keyword, args, span)? {
@@ -488,7 +508,12 @@ async fn read_includes(
             .await
             .map_err(|e| error(format!("{keyword}: {path}: {e}"), Some(span)))?
             .ok_or_else(|| error(format!("{keyword}: {from} may not read {path}"), Some(span)))?;
-        forms.extend(read_included(&text, keyword == "include-ci", path)?);
+        forms.extend(read_included(
+            &text,
+            keyword == "include-ci",
+            path,
+            sources,
+        )?);
     }
     Ok(forms)
 }
@@ -501,6 +526,7 @@ async fn resolve_library(
     identity: &Identity,
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
+    sources: &mut vali_syntax::Sources,
 ) -> Result<Datum> {
     let Some(("define-library", [name, declarations @ ..])) = head(datum) else {
         return Ok(datum.clone());
@@ -520,7 +546,8 @@ async fn resolve_library(
                     kind: DatumKind::Symbol("begin".to_owned()),
                     span: d.span,
                 }];
-                forms.extend(read_includes(keyword, args, d.span, identity, loader).await?);
+                forms
+                    .extend(read_includes(keyword, args, d.span, identity, loader, sources).await?);
                 resolved.push(list(forms, d.span));
             }
             Some(("include-library-declarations", args)) => {
@@ -530,6 +557,7 @@ async fn resolve_library(
                     d.span,
                     identity,
                     loader,
+                    sources,
                 )
                 .await?;
                 for form in forms.into_iter().rev() {
@@ -623,9 +651,15 @@ async fn fetch_includes(
                                 Ok(None) => Err(format!("{from} may not read {path}")),
                                 Err(e) => Err(format!("{path}: {e}")),
                             };
+                            // Read only to find what it includes: the
+                            // expander registers it when it reads it.
                             if let Ok(text) = &text
-                                && let Ok(datums) =
-                                    read_included(text, keyword == "include-ci", path)
+                                && let Ok(datums) = read_included(
+                                    text,
+                                    keyword == "include-ci",
+                                    path,
+                                    &mut vali_syntax::Sources::new(),
+                                )
                             {
                                 work.extend(datums);
                             }
@@ -650,17 +684,20 @@ async fn read_library(
     source: &Source,
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
+    sources: &mut vali_syntax::Sources,
 ) -> Result<LibraryForm> {
     let text = match &source.native {
         Some(library) => native_form(&source.identity, library),
         None => source.text.clone(),
     };
-    let read = vali_syntax::read(&text, SourceId(0));
+    let id = sources.add(source.identity.as_str(), &text);
+    let read = vali_syntax::read(&text, id);
     if let Some(e) = read.errors.first() {
-        return Err(error(
-            format!("{}: read: {}", source.identity, e.kind),
-            None,
-        ));
+        let span = Span {
+            source: id,
+            range: e.range,
+        };
+        return Err(error(format!("read: {}", e.kind), Some(span)));
     }
     let [datum] = &read.datums[..] else {
         return Err(error(
@@ -668,7 +705,7 @@ async fn read_library(
             None,
         ));
     };
-    let datum = &resolve_library(datum, &source.identity, loader, local).await?;
+    let datum = &resolve_library(datum, &source.identity, loader, local, sources).await?;
     let form = library::library_form(datum)?.ok_or_else(|| {
         error(
             format!("{}: expected a library form", source.identity),
@@ -687,7 +724,12 @@ async fn read_library(
     Ok(form)
 }
 
-async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Result<Graph> {
+async fn walk(
+    program: &Program,
+    identity: &Identity,
+    loader: &impl Fetch,
+    sources: &mut vali_syntax::Sources,
+) -> Result<Graph> {
     // Libraries the program defines itself need no loader, beyond what
     // they include.
     let mut names = HashSet::new();
@@ -698,7 +740,7 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
     for d in &program.libraries {
         let name = library::form_name(d)?;
         let local_identity = Identity::new(&format!("{identity}#{name}"));
-        let resolved = resolve_library(d, &local_identity, loader, &names).await?;
+        let resolved = resolve_library(d, &local_identity, loader, &names, sources).await?;
         forms.push(library::library_form(&resolved)?.expect("a library form"));
     }
     let local: HashMap<&LibraryName, &LibraryForm> = forms.iter().map(|l| (&l.name, l)).collect();
@@ -746,7 +788,7 @@ async fn walk(program: &Program, identity: &Identity, loader: &impl Fetch) -> Re
                     by_name.insert(name, index);
                     continue;
                 }
-                let form = read_library(&name, &source, loader, &names).await?;
+                let form = read_library(&name, &source, loader, &names, sources).await?;
                 (source.identity, form, source.native)
             }
         };
@@ -870,7 +912,7 @@ mod tests {
     }
 
     fn read(text: &str) -> Program {
-        program(&vali_syntax::read(text, SourceId(0)).datums).unwrap()
+        program(&vali_syntax::read(text, vali_syntax::SourceId(0)).datums).unwrap()
     }
 
     fn names(graph: &Graph) -> Vec<String> {
@@ -910,7 +952,13 @@ mod tests {
     #[test]
     fn libraries_come_after_their_imports() {
         let program = read("(import (only (a) x) (prefix (b) b:)) x");
-        let graph = fetch(&program, &Identity::new("main"), &libraries()).unwrap();
+        let graph = fetch(
+            &program,
+            &Identity::new("main"),
+            &libraries(),
+            &mut vali_syntax::Sources::new(),
+        )
+        .unwrap();
         assert_eq!(names(&graph), ["(c)", "(b)", "(a)"]);
         assert_eq!(program.body.len(), 1);
     }
@@ -922,7 +970,13 @@ mod tests {
              (import (mine))
              w",
         );
-        let graph = fetch(&program, &Identity::new("main"), &libraries()).unwrap();
+        let graph = fetch(
+            &program,
+            &Identity::new("main"),
+            &libraries(),
+            &mut vali_syntax::Sources::new(),
+        )
+        .unwrap();
         assert_eq!(names(&graph), ["(c)", "(mine)"]);
         assert_eq!(graph.libraries[1].identity.as_str(), "main#(mine)");
     }
@@ -930,9 +984,14 @@ mod tests {
     #[test]
     fn fetching_reports_what_is_wrong() {
         let message = |text: &str| {
-            fetch(&read(text), &Identity::new("main"), &libraries())
-                .unwrap_err()
-                .message
+            fetch(
+                &read(text),
+                &Identity::new("main"),
+                &libraries(),
+                &mut vali_syntax::Sources::new(),
+            )
+            .unwrap_err()
+            .message
         };
         assert_eq!(
             message("(import (nowhere))"),
@@ -991,7 +1050,12 @@ mod tests {
     fn an_async_loader_is_awaited() {
         let program = read("(import (a))");
         let loader = Slow(libraries());
-        let (graph, polls) = block_on(fetch_async(&program, &Identity::new("main"), &loader));
+        let (graph, polls) = block_on(fetch_async(
+            &program,
+            &Identity::new("main"),
+            &loader,
+            &mut vali_syntax::Sources::new(),
+        ));
         assert_eq!(names(&graph.unwrap()), ["(c)", "(b)", "(a)"]);
         // One wait per library fetched.
         assert_eq!(polls, 4);
@@ -1000,7 +1064,12 @@ mod tests {
     #[test]
     fn a_sync_loader_also_works_asynchronously() {
         let program = read("(import (a))");
-        let (graph, polls) = block_on(fetch_async(&program, &Identity::new("main"), &libraries()));
+        let (graph, polls) = block_on(fetch_async(
+            &program,
+            &Identity::new("main"),
+            &libraries(),
+            &mut vali_syntax::Sources::new(),
+        ));
         assert_eq!(names(&graph.unwrap()), ["(c)", "(b)", "(a)"]);
         assert_eq!(polls, 1);
     }

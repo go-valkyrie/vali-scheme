@@ -73,6 +73,7 @@ fn error(message: impl Into<String>, span: Option<Span>) -> CompileError {
     CompileError {
         message: message.into(),
         span,
+        location: None,
     }
 }
 

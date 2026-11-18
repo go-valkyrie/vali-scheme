@@ -1,7 +1,6 @@
 ;;; requirement: Syntax objects expose source locations
 ;;; found-in: scheme-rs
 ;;; kind: scheme
-;;; expect: fail, needs (vali syntax), with source identities and line tables (M1)
 
 ;; scheme-rs kept source locations on syntax objects, but Scheme code could
 ;; not read them. The names below are provisional until (vali syntax) is
@@ -15,6 +14,6 @@
       ((_ form) (datum->syntax stx (syntax-line #'form))))))
 
 (test-begin "syntax-source-locations")
-(test-equal 18 (line-of here))
+(test-equal 17 (line-of here))
 (test-assert (string? (syntax-source #'here)))
 (test-end)
