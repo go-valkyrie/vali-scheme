@@ -1,7 +1,11 @@
-# Runs `mise run check` (formatting, Clippy, every test, documentation and
-# dependency licences) on every pull request and every push to main. Other
-# branches are checked through their pull requests, so a branch with one
-# is not checked twice.
+# Runs what `mise run check` runs (formatting, Clippy, every test,
+# documentation and dependency licences) on every pull request and every
+# push to main, plus the benchmarks. Other branches are checked through
+# their pull requests, so a branch with one is not checked twice.
+#
+# Each part is its own job so they run side by side: in one job Clippy and
+# the test build fight over the runner's cores, and the benchmarks wait for
+# both. Each job keeps its own Rust cache, since rust-cache keys on the job.
 #
 # A change only to files the check never reads skips it: prose, agent
 # settings, and the fuzz targets, which fuzz.yml builds. Anything else,
@@ -38,21 +42,56 @@ concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # jouet is a development aid, not needed to check the code.
+  MISE_DISABLE_TOOLS: jouet
+  CARGO_TERM_COLOR: always
+
 jobs:
-  check:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned toolchain
+        run: bin/mise install
+      - name: Lint
+        run: bin/mise run lint
+
+  test:
     runs-on: ubuntu-latest
     env:
-      # jouet is a development aid, not needed to check the code.
-      MISE_DISABLE_TOOLS: jouet
-      CARGO_TERM_COLOR: always
+      # Function names and line numbers are enough for test failures, and
+      # full debug info makes every test binary slower to build and link.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned toolchain
+        run: bin/mise install
+      - name: Test
+        run: bin/mise run test
+
+  docs:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Install the pinned toolchain and cargo-deny
         run: bin/mise install
-      - name: Check
-        run: bin/mise run check
-      # Recorded, not gated: compare runs with `bin/mise run bench-compare`.
+      - name: Docs
+        run: bin/mise run docs
+      - name: Dependencies
+        run: bin/mise run deny
+
+  # Recorded, not gated: compare runs with `bin/mise run bench-compare`.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned toolchain
+        run: bin/mise install
       - name: Benchmarks
         run: bin/mise run bench
       - uses: actions/upload-artifact@v4

@@ -49,4 +49,4 @@ The standard libraries' Scheme sources are in `crates/vali-compiler/lib/` (`sche
 
 ## CI
 
-`.github/workflows/check.yml` runs `bin/mise run check` and then the benchmarks on PRs and pushes to `main`. It skips changes that only touch `docs/`, `*.md`, `.claude/`, `.jouet/` or `fuzz/`. `fuzz/` is a workspace of its own that needs nightly, and `fuzz.yml` runs it on a schedule.
+`.github/workflows/check.yml` runs the parts of `bin/mise run check` (lint, test, docs and deny) and the benchmarks as parallel jobs on PRs and pushes to `main`. It skips changes that only touch `docs/`, `*.md`, `.claude/`, `.jouet/` or `fuzz/`. `fuzz/` is a workspace of its own that needs nightly, and `fuzz.yml` runs it on a schedule.
