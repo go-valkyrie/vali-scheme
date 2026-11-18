@@ -1357,6 +1357,9 @@ struct Gen<'r, R: Random> {
     pressure: bool,
     /// Variables every leaf uses, so they are live throughout.
     prelude: Vec<Var>,
+    /// Variables a `let` of this function binds to a closure, the only
+    /// ones `set-free` may name.
+    made: Vec<Var>,
 }
 
 const G_DEFINED: u32 = 0;
@@ -1690,7 +1693,9 @@ impl<R: Random> Gen<'_, R> {
                     return (Value::SetGlobal(GlobalId(G_DEFINED), x), K::Any);
                 }
                 22 => {
-                    if let Some((f, K::Clo(j))) = self.var_of(ctx, |k| matches!(k, K::Clo(_))) {
+                    if let Some((f, K::Clo(j))) = self.var_of(ctx, |k| matches!(k, K::Clo(_)))
+                        && self.made.contains(&f)
+                    {
                         let n = self.sigs[j as usize].free;
                         if n > 0 {
                             let index = self.below(n as u64) as u32;
@@ -1724,6 +1729,9 @@ impl<R: Random> Gen<'_, R> {
         if choice < 45 {
             let (value, k) = self.value(ctx);
             let x = self.fb.var();
+            if matches!(value, Value::Closure { .. }) {
+                self.made.push(x);
+            }
             ctx.vars.push((x, k));
             let body = self.term(ctx, depth + 1);
             ctx.vars.pop();
@@ -1994,9 +2002,11 @@ fn random_module(r: &mut impl Random) -> Module {
         budget,
         pressure,
         prelude: Vec::new(),
+        made: Vec::new(),
     };
     for (i, sig) in sigs.iter().enumerate() {
         g.fun = i as u32;
+        g.made.clear();
         g.fb = FB::default();
         g.budget = budget;
         let mut ctx = Ctx::default();
@@ -2029,6 +2039,7 @@ fn random_module(r: &mut impl Random) -> Module {
                     },
                 ));
                 ctx.vars.push((k, K::Clo(j as u32)));
+                g.made.push(k);
             }
         }
         g.prelude.clear();
@@ -2329,10 +2340,21 @@ fn contified(m: &Module) -> Module {
     out
 }
 
-/// A letrec-style closure whose self-tie comes after its call: the call
-/// reaches the placeholder and fails, and must still fail once optimised.
+/// What the validator says about `m`, which it must refuse.
+fn refused(m: &Module) -> String {
+    let why = ir::validate(m).unwrap_err().to_string();
+    assert!(why.contains("function f0"), "{why}");
+    assert!(why.contains("v0"), "{why}");
+    // Conversion validates first, so such IR never runs or optimises.
+    let converted = convert_checked(m).unwrap_err();
+    assert!(converted.contains("tied to itself"), "{converted}");
+    why
+}
+
+/// A letrec-style closure whose self-tie comes after its call would reach
+/// the placeholder: the validator refuses it (ADR 0017 #13).
 #[test]
-fn contify_tie_after_call() {
+fn validator_refuses_tie_after_call() {
     let m = tie_module(|fb| {
         let (k, r, u) = (fb.var(), fb.var(), fb.var());
         let ret = fb.push(Term::Return(v(r)));
@@ -2340,20 +2362,13 @@ fn contify_tie_after_call() {
         let t = call_k(fb, r, k, t);
         make_closure(fb, k, t)
     });
-    let before = answer_of(&m).unwrap_err();
-    assert!(before.contains("not a procedure"), "{before}");
-    let after = contified(&m);
-    assert_eq!(closures_in_f0(&after), 1, "contified");
-    assert_eq!(answer_of(&after).unwrap_err(), before);
-    let mut optimised = m.clone();
-    vali_opt::optimise(&mut optimised);
-    ir::validate(&optimised).unwrap();
-    assert_eq!(answer_of(&optimised).unwrap_err(), before);
+    let why = refused(&m);
+    assert!(why.contains("not yet tied to itself"), "{why}");
 }
 
 /// The tie is in the branch of an `if` the call is not in.
 #[test]
-fn contify_tie_in_other_branch() {
+fn validator_refuses_tie_in_other_branch() {
     let m = tie_module(|fb| {
         let (k, r, u, t) = (fb.var(), fb.var(), fb.var(), fb.var());
         let ret = fb.push(Term::Return(c(0)));
@@ -2376,19 +2391,14 @@ fn contify_tie_in_other_branch() {
         );
         make_closure(fb, k, test)
     });
-    let before = answer_of(&m).unwrap_err();
-    assert!(before.contains("not a procedure"), "{before}");
-    let after = contified(&m);
-    assert_eq!(closures_in_f0(&after), 1, "contified");
-    assert_eq!(answer_of(&after).unwrap_err(), before);
+    refused(&m);
 }
 
 /// The tie is in a join's body and the call in its handler. The tie runs
-/// first, but contification does not follow the jump: it declines. A later
-/// `find` that follows jumps may legitimately accept it, and this test then
-/// changes.
+/// first, but ancestry is conservative across a join: the validator
+/// refuses it.
 #[test]
-fn contify_tie_in_join_body_call_in_handler_is_declined() {
+fn validator_refuses_tie_in_join_body_call_in_handler() {
     let m = tie_module(|fb| {
         let (k, r, u) = (fb.var(), fb.var(), fb.var());
         let j = fb.join();
@@ -2408,11 +2418,7 @@ fn contify_tie_in_join_body_call_in_handler_is_declined() {
         });
         make_closure(fb, k, join)
     });
-    let before = answer_of(&m);
-    assert_eq!(before, Ok("3".into()));
-    let after = contified(&m);
-    assert_eq!(closures_in_f0(&after), 1, "contified");
-    assert_eq!(answer_of(&after), before);
+    refused(&m);
 }
 
 /// A closure tied, then called, which is what a named `let` lowers to,

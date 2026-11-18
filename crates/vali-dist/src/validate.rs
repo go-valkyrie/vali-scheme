@@ -8,8 +8,15 @@
 //! such as whether a callee is a procedure or a `set-free` index is within
 //! its closure, conversion checks at run time.
 //!
+//! It also enforces the closure self-tie rules (ADR 0017 #13): for a
+//! variable `c` bound by `let c = closure g(..)`, every `set-free c i c` is an ancestor in the term tree of
+//! every other use of `c`, `set-free` names only closures made in its own
+//! function, and no other `set-free` writes a self-tied index. Later tiers
+//! may rely on these to treat a self-tied slot as the closure itself.
+//!
 //! The walk is iterative: no input can make it recurse.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
@@ -165,6 +172,8 @@ enum Task<'a> {
     Unbind(&'a [Var]),
     BindJoin(JoinId, usize),
     UnbindJoin(JoinId),
+    /// The walk has left a term's subtree.
+    Leave(TermId),
 }
 
 /// The state of the walk over one function.
@@ -180,6 +189,20 @@ struct Checker<'a> {
     joins_visible: Vec<Option<usize>>,
     /// Whether each term has been reached.
     seen: Vec<bool>,
+    /// Each term's place in the walk's preorder, and the place after its
+    /// subtree: `a` is an ancestor of `b` when `pre[a] < pre[b] < end[a]`.
+    pre: Vec<u32>,
+    end: Vec<u32>,
+    clock: u32,
+    /// Whether a `let` in this function binds each variable to a closure.
+    made: Vec<bool>,
+    /// The uses of closure variables other than their self-ties, as the
+    /// variable and the term using it.
+    uses: Vec<(Var, TermId)>,
+    /// The self-ties `set-free c i c`, by closure: index and term.
+    ties: BTreeMap<Var, Vec<(u32, TermId)>>,
+    /// How many `set-free`s write each closure slot.
+    writes: BTreeMap<(Var, u32), u32>,
 }
 
 impl<'a> Checker<'a> {
@@ -192,6 +215,13 @@ impl<'a> Checker<'a> {
             joins_defined: vec![false; function.joins as usize],
             joins_visible: vec![None; function.joins as usize],
             seen: vec![false; function.terms.len()],
+            pre: vec![0; function.terms.len()],
+            end: vec![0; function.terms.len()],
+            clock: 0,
+            made: vec![false; function.vars as usize],
+            uses: Vec::new(),
+            ties: BTreeMap::new(),
+            writes: BTreeMap::new(),
         }
     }
 
@@ -224,12 +254,120 @@ impl<'a> Checker<'a> {
                 Task::Unbind(vars) => self.set_visible(vars, false),
                 Task::BindJoin(join, arity) => self.joins_visible[join.0 as usize] = Some(arity),
                 Task::UnbindJoin(join) => self.joins_visible[join.0 as usize] = None,
+                Task::Leave(id) => self.end[id.0 as usize] = self.clock,
             }
         }
         if let Some(n) = self.seen.iter().position(|seen| !seen) {
             return Err(format!("term t{n} is not part of the body"));
         }
+        self.check_ties()
+    }
+
+    /// The self-tie rules, once the whole tree has been walked.
+    fn check_ties(&self) -> Result<(), String> {
+        for (var, ties) in &self.ties {
+            for &(index, _) in ties {
+                if self.writes[&(*var, index)] != 1 {
+                    return Err(format!(
+                        "free variable {index} of v{}, which is tied to itself, is written again",
+                        var.0
+                    ));
+                }
+            }
+        }
+        let ancestor = |a: TermId, b: TermId| {
+            let (a, b) = (a.0 as usize, b.0 as usize);
+            self.pre[a] < self.pre[b] && self.pre[b] < self.end[a]
+        };
+        // Ancestors of a term form a chain, so every tie is an ancestor of
+        // a use when the last tie in preorder is, and the others are its
+        // ancestors, which is worked out once per closure.
+        let mut last: BTreeMap<Var, (TermId, bool)> = BTreeMap::new();
+        for (&var, ties) in &self.ties {
+            let &(_, latest) = ties
+                .iter()
+                .max_by_key(|&&(_, t)| self.pre[t.0 as usize])
+                .expect("a tie list is never empty");
+            let chain = ties
+                .iter()
+                .all(|&(_, t)| t == latest || ancestor(t, latest));
+            last.insert(var, (latest, chain));
+        }
+        for &(var, user) in &self.uses {
+            let Some(&(latest, chain)) = last.get(&var) else {
+                continue;
+            };
+            if !chain || !ancestor(latest, user) {
+                return Err(format!(
+                    "v{} is used at t{} where it is not yet tied to itself by every \
+                     set-free at t{}; a closure's ties must come before its uses",
+                    var.0, user.0, latest.0
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Records what `value`, bound at term `id`, does with closures.
+    fn closures(&mut self, id: TermId, var: Var, value: &Value) -> Result<(), String> {
+        let mut operands: Vec<&Operand> = Vec::new();
+        match value {
+            Value::Closure { free, .. } => {
+                operands.extend(free);
+                self.made[var.0 as usize] = true;
+            }
+            Value::SetFree {
+                closure,
+                index,
+                value,
+            } => {
+                let c = match closure {
+                    Operand::Var(c) if self.made[c.0 as usize] => *c,
+                    Operand::Var(c) => {
+                        return Err(format!(
+                            "set-free of v{}, which is not a closure made in this function",
+                            c.0
+                        ));
+                    }
+                    Operand::Const(_) => {
+                        return Err(
+                            "set-free of a constant, not a closure made in this function".into(),
+                        );
+                    }
+                };
+                *self.writes.entry((c, *index)).or_insert(0) += 1;
+                if *value == Operand::Var(c) {
+                    self.ties.entry(c).or_default().push((*index, id));
+                } else {
+                    operands.extend([closure, value]);
+                }
+            }
+            Value::Operand(x) | Value::Box(x) | Value::Unbox(x) | Value::SetGlobal(_, x) => {
+                operands.push(x);
+            }
+            Value::Primitive { args, .. } | Value::CallDirect { args, .. } => {
+                operands.extend(args);
+            }
+            Value::Call { callee, args } => {
+                operands.push(callee);
+                operands.extend(args);
+            }
+            Value::SetBox(a, b) => operands.extend([a, b]),
+            Value::Global(_) => {}
+        }
+        self.record(id, operands);
+        Ok(())
+    }
+
+    /// Notes each of `operands` that is a closure variable as used by `id`.
+    fn record<'b>(&mut self, id: TermId, operands: impl IntoIterator<Item = &'b Operand>) {
+        for operand in operands {
+            if let Operand::Var(v) = operand
+                && self.made[v.0 as usize]
+            {
+                self.uses.push((*v, id));
+            }
+        }
     }
 
     fn enter(&mut self, id: TermId, tasks: &mut Vec<Task<'a>>) -> Result<(), String> {
@@ -239,6 +377,9 @@ impl<'a> Checker<'a> {
             Some(true) => return Err(format!("term t{n} is part of the body twice")),
             Some(false) => self.seen[n] = true,
         }
+        self.pre[n] = self.clock;
+        self.clock += 1;
+        tasks.push(Task::Leave(id));
         let function = self.function;
         match function.term(id) {
             Term::Let {
@@ -249,8 +390,10 @@ impl<'a> Checker<'a> {
             } => {
                 self.value(value)?;
                 self.position(position)?;
+                let bound = *var;
                 let var = std::slice::from_ref(var);
                 self.define(var)?;
+                self.closures(id, bound, value)?;
                 tasks.push(Task::Unbind(var));
                 tasks.push(Task::Enter(*body));
                 tasks.push(Task::Bind(var));
@@ -299,6 +442,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.operands(args)?;
+                self.record(id, args);
             }
             Term::If {
                 test,
@@ -306,10 +450,14 @@ impl<'a> Checker<'a> {
                 otherwise,
             } => {
                 self.operand(test)?;
+                self.record(id, [test]);
                 tasks.push(Task::Enter(*otherwise));
                 tasks.push(Task::Enter(*then));
             }
-            Term::Return(value) => self.operand(value)?,
+            Term::Return(value) => {
+                self.operand(value)?;
+                self.record(id, [value]);
+            }
             Term::TailCall {
                 callee,
                 args,
@@ -318,6 +466,8 @@ impl<'a> Checker<'a> {
                 self.operand(callee)?;
                 self.operands(args)?;
                 self.position(position)?;
+                self.record(id, [callee]);
+                self.record(id, args);
             }
             Term::TailCallDirect {
                 function,
@@ -327,6 +477,7 @@ impl<'a> Checker<'a> {
                 self.direct(*function, args)?;
                 self.operands(args)?;
                 self.position(position)?;
+                self.record(id, args);
             }
         }
         Ok(())

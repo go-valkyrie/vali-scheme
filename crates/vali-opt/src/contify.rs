@@ -7,9 +7,9 @@
 //! that free variable only as the callee of tail calls to itself, with the
 //! arguments its arity fixes. Every tie must also run before the call: each
 //! is an ancestor of the call in `f`'s term tree, so the call is inside the
-//! `let` that makes the tie. A tie in another branch, after the call, or in
-//! a join's body when the call is in its handler is not, and the closure is
-//! left alone. Then `g`'s body is copied into `f` as a
+//! `let` that makes the tie. The validator guarantees it (ADR 0017 #13); a
+//! debug build asserts it, and a build without assertions declines the
+//! closure if it does not hold. Then `g`'s body is copied into `f` as a
 //! `rec join`, its own tail calls becoming jumps:
 //!
 //! - at a tail call, `tail c(a)` becomes `rec join j(p) = body in jump
@@ -171,10 +171,18 @@ fn find(module: &Module, f: &Function) -> Option<Candidate> {
         if argc != usize::from(g.arity.required) {
             return None;
         }
-        // A closure is tied before it is called: lowering ensures it, but
-        // IR from elsewhere may tie it in another branch, or after the
-        // call, and contifying would then change what the call does.
-        if ties[v].iter().any(|&(tie, _)| !before(tie, call)) {
+        // A closure is tied before it is called, which the validator
+        // guarantees of every module (ADR 0017 #13). A tie in another
+        // branch or after the call would make contifying change what the
+        // call does, so should a pass ever break the rule this declines,
+        // which costs a missed optimisation and not a miscompile; debug
+        // builds assert, to find the pass.
+        let ordered = ties[v].iter().all(|&(tie, _)| before(tie, call));
+        debug_assert!(
+            ordered,
+            "a self-tie of v{v} does not come before its call: the module is not valid"
+        );
+        if !ordered {
             return None;
         }
         let selves: Vec<u32> = ties[v].iter().map(|&(_, i)| i).collect();

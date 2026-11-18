@@ -682,7 +682,10 @@ impl Lowerer<'_> {
                 Expr::Lambda(l) => Some((x, *l)),
                 _ => None,
             });
-            for &(closure, l) in closures.iter().flatten() {
+            // The new closure is last, and ties to itself before it
+            // patches the earlier ones: the IR validator requires a
+            // closure's self-tie to come before any other use of it.
+            for &(closure, l) in closures.iter().rev().flatten() {
                 if let Some(index) = self.lambdas[l].free.iter().position(|w| w == v) {
                     self.bind(
                         f,
