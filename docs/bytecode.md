@@ -159,7 +159,7 @@ The rewritten code keeps a contract the VM relies on, so that a returning frame 
 - at `tail-call` and `tail-call-direct`, no slot holds a reference but the procedure and arguments, and slots 1 to `argc`, which they move into, counting out what those held;
 - at `return r`, no slot holds a reference but `r`, whose value moves out.
 
-So the pass drops each slot that may still hold a reference right before an instruction that needs it clear, and turns a `mov` whose source dies into a `move`.
+So the pass drops each slot that may still hold a reference right before an instruction that needs it clear, and turns a `mov` whose source dies into a `move`. The runtime then validates the rewritten code as it validated the module, accepting `move` and `drop` as long as neither names slot 0 (`validate_rewritten`), so the code that runs is checked too, not only the code given.
 
 Everything else is a call to a procedure: primitives are procedures implemented in Rust, bound to variables like any other.
 

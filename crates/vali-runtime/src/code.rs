@@ -167,11 +167,12 @@ impl<S: Strategy> Loaded<S> {
     /// ownership operations in its code under precise counting.
     pub(crate) fn new(module: Module) -> Result<Arc<Loaded<S>>, String> {
         let owned: Option<Box<[Function]>> = if S::PRECISE {
-            Some(
-                vali_bytecode::ownership::insert(&module)
-                    .map_err(|e| format!("placing ownership operations: {e}"))?
-                    .into(),
-            )
+            let functions = vali_bytecode::ownership::insert(&module)
+                .map_err(|e| format!("placing ownership operations: {e}"))?;
+            // The code that runs is validated too, not only the code given.
+            vali_bytecode::validate_rewritten(&module, &functions)
+                .map_err(|e| format!("after placing ownership operations: {e}"))?;
+            Some(functions.into())
         } else {
             None
         };

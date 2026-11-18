@@ -468,15 +468,46 @@ fn hold(held: &mut Slots, instruction: &Instruction) {
 /// The slots that may hold a reference as each block starts, if the block
 /// is reached: at entry, the parameters.
 fn holding(flow: &Flow, code: &[Instruction], arity: Arity, slots: usize) -> Vec<Option<Slots>> {
-    let mut at_start = vec![None::<Slots>; flow.blocks.len()];
     let mut entry = Slots::new(slots);
     entry.extend(1, 1 + arity.parameter_slots());
+    forward(flow, code, entry, hold)
+}
+
+/// Follows `instruction` forward over `cleared`, the slots that `move` or
+/// `drop` may have cleared, which nothing may read until something writes
+/// them again. A call ends what the slots from its base up held, as it
+/// does in the code the pass was given.
+fn clear(cleared: &mut Slots, instruction: &Instruction) {
+    let e = effect(instruction);
+    if let Some(from) = e.kill {
+        cleared.truncate(from);
+    }
+    if let Some(def) = e.def {
+        cleared.remove(def);
+    }
+    match *instruction {
+        Instruction::Move { src, .. } => cleared.insert(src),
+        Instruction::Drop { slot } => cleared.insert(slot),
+        _ => {}
+    }
+}
+
+/// A set of slots as each reached block starts, followed forward from
+/// `entry` by `step` and joined by union where paths meet; `None` for a
+/// block nothing reaches.
+fn forward(
+    flow: &Flow,
+    code: &[Instruction],
+    entry: Slots,
+    step: fn(&mut Slots, &Instruction),
+) -> Vec<Option<Slots>> {
+    let mut at_start = vec![None::<Slots>; flow.blocks.len()];
     at_start[0] = Some(entry);
     let mut work = vec![0];
     while let Some(b) = work.pop() {
         let mut held = at_start[b].clone().expect("reached");
         for i in flow.blocks[b].clone() {
-            hold(&mut held, &code[i]);
+            step(&mut held, &code[i]);
         }
         for s in flow.successors(b) {
             let changed = match &mut at_start[s] {
@@ -616,28 +647,41 @@ impl fmt::Display for ContractError {
 impl std::error::Error for ContractError {}
 
 /// Checks that `function`, as [`insert`] rewrote it, keeps the contract the
-/// VM relies on (see the module documentation), on every path: which slots
-/// may hold a reference is followed forward from the parameters.
+/// VM relies on (see the module documentation), and reads no slot that a
+/// `move` or `drop` may have cleared, on every path: which slots may hold a
+/// reference is followed forward from the parameters, and which may be
+/// cleared from none.
 pub fn check(function: &Function) -> Result<(), ContractError> {
     let flow = Flow::new(function).map_err(|message| ContractError { pc: 0, message })?;
     let slots = usize::from(function.slots);
     let code: Vec<Instruction> = flow.code.iter().map(|(_, _, i)| i.clone()).collect();
     let held_in = holding(&flow, &code, function.arity, slots);
+    let cleared_in = forward(&flow, &code, Slots::new(slots), clear);
     for (b, block) in flow.blocks.iter().enumerate() {
-        let Some(mut held) = held_in[b].clone() else {
+        let (Some(mut held), Some(mut cleared)) = (held_in[b].clone(), cleared_in[b].clone())
+        else {
             continue;
         };
         for i in block.clone() {
-            if let Some(s) = held.within(&barrier(&code[i], slots)).first() {
-                return Err(ContractError {
+            let fail = |message: String| {
+                Err(ContractError {
                     pc: flow.code[i].0,
-                    message: format!(
-                        "r{s} may hold a reference at {}",
-                        code[i].opcode().mnemonic()
-                    ),
-                });
+                    message,
+                })
+            };
+            let mnemonic = code[i].opcode().mnemonic();
+            // Leaving a reference where it must not be leaks it.
+            if let Some(s) = held.within(&barrier(&code[i], slots)).first() {
+                return fail(format!("r{s} may hold a reference at {mnemonic}"));
+            }
+            // Reading a slot the pass cleared would read the wrong value.
+            if let Some(s) = effect(&code[i]).uses.iter().find(|&&s| cleared.contains(s)) {
+                return fail(format!(
+                    "{mnemonic} reads r{s}, which may have been cleared"
+                ));
             }
             hold(&mut held, &code[i]);
+            clear(&mut cleared, &code[i]);
         }
     }
     Ok(())
