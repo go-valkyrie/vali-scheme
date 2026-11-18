@@ -8,9 +8,9 @@ fn cx() -> Cx<NoCollection> {
     cx
 }
 
-/// Calls the global `name` with the datums in `args`, and writes the result.
+/// Calls the primitive `name` with the datums in `args`, and writes the result.
 fn call(cx: &mut Cx<NoCollection>, name: &str, args: &str) -> Result<String, Error> {
-    let procedure = cx.global(name).unwrap_or_else(|| panic!("no {name}"));
+    let procedure = cx.primitive(name).unwrap_or_else(|| panic!("no {name}"));
     let args = cx.read(args).unwrap();
     let result = cx.call(&procedure, &args)?;
     cx.write_string(&result)
@@ -151,7 +151,7 @@ fn strings_symbols_and_characters() {
     }
     // string->symbol interns: the same symbol as one read.
     let from_string = {
-        let f = cx.global("string->symbol").unwrap();
+        let f = cx.primitive("string->symbol").unwrap();
         let arg = cx.read("\"abc\"").unwrap();
         cx.call(&f, &arg).unwrap()
     };
@@ -183,9 +183,9 @@ fn searching_lists() {
 #[test]
 fn apply_tail_calls_any_procedure() {
     let mut cx = cx();
-    let apply = cx.global("apply").unwrap();
-    let plus = cx.global("+").unwrap();
-    let list = cx.global("list").unwrap();
+    let apply = cx.primitive("apply").unwrap();
+    let plus = cx.primitive("+").unwrap();
+    let list = cx.primitive("list").unwrap();
     let args = cx.read("1 2 (3 4)").unwrap();
     let all: Vec<_> = std::iter::once(plus).chain(args).collect();
     let sum = cx.call(&apply, &all).unwrap();
@@ -196,7 +196,7 @@ fn apply_tail_calls_any_procedure() {
     let result = cx.call(&apply, &nested).unwrap();
     assert_eq!(cx.write_string(&result).unwrap(), "(1 2 3)");
     // Errors from the applied procedure come back as usual.
-    let car = cx.global("car").unwrap();
+    let car = cx.primitive("car").unwrap();
     let args = cx.read("(5)").unwrap();
     let Err(Error::Scheme(e)) = cx.call(&apply, &[car, args[0].clone()]) else {
         panic!("expected an error");
@@ -211,8 +211,8 @@ fn apply_from_bytecode() {
     use vali_bytecode::{Arity, Constant, FunctionBuilder, Instruction as I, ModuleBuilder};
     let mut cx = cx();
     let mut m = ModuleBuilder::new("apply");
-    let apply = m.variable("apply");
-    let plus = m.variable("+");
+    let apply = m.primitive("apply");
+    let plus = m.primitive("+");
     let g_var = m.variable("g");
     let h_var = m.variable("h");
     let tail = m.constant(Constant::Pair(
@@ -310,8 +310,8 @@ fn number_and_type_predicates() {
     for (name, args, expected) in cases {
         assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
     }
-    let car = cx.global("car").unwrap();
-    let procedure = cx.global("procedure?").unwrap();
+    let car = cx.primitive("car").unwrap();
+    let procedure = cx.primitive("procedure?").unwrap();
     let yes = cx.call(&procedure, &[car]).unwrap();
     assert_eq!(yes.as_boolean(), Some(true));
 }
@@ -390,7 +390,7 @@ fn conversions_and_case() {
         assert_eq!(ok(&mut cx, name, args), expected, "({name} {args})");
     }
     let v = cx.read("#(1 2 3)").unwrap().remove(0);
-    let fill = cx.global("vector-fill!").unwrap();
+    let fill = cx.primitive("vector-fill!").unwrap();
     cx.call(
         &fill,
         &[v.clone(), vali_runtime::Handle::fixnum(0).unwrap()],

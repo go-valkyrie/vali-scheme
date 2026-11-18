@@ -159,9 +159,16 @@ pub enum Link {
     /// The library with this identity exports it: the cell is that
     /// library's instance's.
     Imported(Box<str>),
-    /// The isolate's global of that name, which a host defines. Until the
-    /// standard libraries are libraries, free names link this way.
+    /// The isolate's global of that name: a REPL's variable, or one a host
+    /// defines for bytecode it builds itself.
     Global,
+    /// Vali's procedure implemented in Rust of that name, which `(vali
+    /// primitive)` exports. Every isolate has one table of them.
+    Primitive,
+    /// The function of that name in the native library with this identity
+    /// (ADR 0016), as a procedure, from when the module loads. Only the
+    /// module Vali generates for a native library links this way.
+    Native(Box<str>),
 }
 
 /// A variable a module exports.

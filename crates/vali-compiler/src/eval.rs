@@ -73,7 +73,7 @@ pub(crate) const EVAL_PROCEDURES: &[&str] =
 /// Binds the procedures `(scheme eval)` is written over in `cx`. They work
 /// once a program that imports `(scheme eval)` is loaded.
 pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
-    cx.define_native(
+    cx.define_primitive(
         "%environment",
         Arity {
             required: 0,
@@ -82,8 +82,8 @@ pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
         },
         environment,
     )?;
-    cx.define_native("%eval-prepare", Arity::exactly(2), eval_prepare)?;
-    cx.define_native(
+    cx.define_primitive("%eval-prepare", Arity::exactly(2), eval_prepare)?;
+    cx.define_primitive(
         "%interaction-environment",
         Arity::exactly(0),
         interaction_environment,

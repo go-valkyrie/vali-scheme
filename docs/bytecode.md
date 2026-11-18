@@ -12,7 +12,9 @@ A **module** is what one library's body compiles to:
 - a **variable table**: the module's variables. Code refers to them by index. Each entry has a name and a link, which says where its cell is once the module loads (ADR 0005 #4):
   - **defined**: the module defines it, and its instance has the cell;
   - **imported** from a library, by the library's identity and the name it exports: the cell is that library's instance's. An importer cannot assign it;
-  - **global**: the isolate's global of that name, which a host defines, before or after the module loads;
+  - **global**: the isolate's global of that name, before or after the module loads: a REPL's variable, or one a host defines for bytecode it builds itself;
+  - **primitive**: Vali's procedure implemented in Rust of that name, which `(vali primitive)` exports. An importer cannot assign it;
+  - **native**, by a native library's identity: that library's function of the variable's name, as a procedure, linked as the module loads (ADR 0016 #8). An importer cannot assign it;
 - an **export table**: the names other modules import variables by, each naming an entry of the variable table;
 - a **function table**;
 - a **source table**: the identities of the sources its functions' positions are in;

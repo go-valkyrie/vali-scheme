@@ -57,7 +57,7 @@ fn datums_convert_both_ways() {
     }
     // Procedures and cycles are not datums.
     cx.install_primitives().unwrap();
-    let car = cx.global("car").unwrap();
+    let car = cx.primitive("car").unwrap();
     // SAFETY: the handle keeps it valid.
     assert!(unsafe { cx.value_datum(cx.get(&car).unwrap(), span()) }.is_none());
     let cycle = cx.read("#0=(1 . #0#)").unwrap().remove(0);

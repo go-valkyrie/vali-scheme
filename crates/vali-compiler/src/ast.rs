@@ -42,10 +42,12 @@ pub(crate) enum Expr {
     Local(VarId),
     /// A module variable the program defines.
     Global(String),
-    /// A free identifier: the global of that name, which the standard
-    /// procedures are until they live in libraries. Only these are
-    /// inlined, so a program's own definitions never are.
+    /// A procedure implemented in Rust that `(vali primitive)` exports, by
+    /// name. Only these are inlined, so a program's own definitions never
+    /// are.
     Free(String),
+    /// An isolate global: a REPL's variable, bound late and never inlined.
+    ReplGlobal(String),
     /// A variable a library defines: the library's identity, and the
     /// variable's name there.
     Imported(String, String),

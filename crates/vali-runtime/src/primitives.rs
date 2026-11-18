@@ -560,11 +560,6 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("%record?", Arity::exactly(2), records::is_record),
         ("%record-ref", Arity::exactly(3), records::record_ref),
         ("%record-set!", Arity::exactly(4), records::record_set),
-        (
-            "%native-procedure",
-            Arity::exactly(2),
-            crate::bridge::native_procedure,
-        ),
     ];
     table.extend(crate::numbers::table());
     table.extend(crate::strings::table());
@@ -607,12 +602,13 @@ pub fn primitive_names() -> Vec<&'static str> {
 }
 
 impl<S: Strategy> Cx<S> {
-    /// Binds the standard procedures implemented so far as globals, and
+    /// Binds the standard procedures implemented so far as primitives,
+    /// which `(vali primitive)` exports, and
     /// registers Vali's own native libraries, which are deterministic, so
     /// they work at expansion time too.
     pub fn install_primitives(&mut self) -> Result<(), Error> {
         for (name, arity, f) in table::<S>() {
-            self.define_native(name, arity, f)?;
+            self.define_primitive(name, arity, f)?;
         }
         self.define_control()?;
         self.register_native_library(crate::ports::PORTS_IDENTITY, crate::ports::library());

@@ -1046,21 +1046,16 @@ unsafe fn receiver(
     })
 }
 
-/// `(%native-procedure identity name)`: the function `name` of the native
-/// library registered under `identity`, as a procedure. Where no such
-/// library is registered, as in the expander's isolate, a stub that raises
-/// when called: native functions cannot run at expansion time (ADR 0009
-/// #17).
-pub(crate) fn native_procedure<S: Strategy>(
-    cx: &mut Cx<S>,
-    args: &[Value],
-) -> Result<Value, Error> {
-    // SAFETY: the arguments are valid values.
-    let (identity, name) = unsafe { (Isolate::string(cx, args[0]), Isolate::string(cx, args[1])) };
-    let (Some(identity), Some(name)) = (identity, name) else {
-        return Err(Error::scheme("%native-procedure: expected two strings"));
-    };
-    let found = match cx.native_libraries.get(&*identity) {
+/// The function `name` of the native library registered under `identity`,
+/// which a module links to as it loads. Where no such library is
+/// registered, or in the expander's isolate for a function not marked
+/// expansion-safe, a stub that raises when called (ADR 0009 #17).
+pub(crate) fn native_function<S: Strategy>(
+    cx: &Cx<S>,
+    identity: &str,
+    name: &str,
+) -> Result<Arc<NativeFunction>, Error> {
+    let found = match cx.native_libraries.get(identity) {
         Some(library) => Some(
             library
                 .functions()
@@ -1071,7 +1066,7 @@ pub(crate) fn native_procedure<S: Strategy>(
         ),
         None => None,
     };
-    let function = match found {
+    Ok(match found {
         Some(f) if !cx.expanding || f.expansion_safe.is_some() => f,
         _ => {
             let message = if cx.expanding {
@@ -1090,8 +1085,7 @@ pub(crate) fn native_procedure<S: Strategy>(
                 expansion_safe: None,
             })
         }
-    };
-    cx.bridge_procedure(function)
+    })
 }
 
 /// A library of Rust functions and methods, built once and bound into any

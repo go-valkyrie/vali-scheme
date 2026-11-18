@@ -77,11 +77,11 @@ impl Source {
     }
 }
 
-/// A native library's form: a library whose variables are its functions,
-/// as `%native-procedure` finds them in the isolate (ADR 0016 #8).
-fn native_form(identity: &Identity, library: &vali_runtime::NativeLibrary) -> String {
+/// A native library's form: its name and what it exports, its functions.
+/// It has no body: the expander makes a module whose variables link to the
+/// functions as it loads (ADR 0016 #8).
+fn native_form(library: &vali_runtime::NativeLibrary) -> String {
     let symbol = |s: &str| format!("|{}|", s.replace('\\', "\\\\").replace('|', "\\|"));
-    let string = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
     let name: Vec<String> = library
         .name()
         .iter()
@@ -90,24 +90,15 @@ fn native_form(identity: &Identity, library: &vali_runtime::NativeLibrary) -> St
             Err(_) => symbol(part),
         })
         .collect();
-    let functions = library.functions();
-    let exports: Vec<String> = functions.iter().map(|f| symbol(f.name())).collect();
-    let definitions: Vec<String> = functions
+    let exports: Vec<String> = library
+        .functions()
         .iter()
-        .map(|f| {
-            format!(
-                "(define {} (%native-procedure {} {}))",
-                symbol(f.name()),
-                string(identity.as_str()),
-                string(f.name())
-            )
-        })
+        .map(|f| symbol(f.name()))
         .collect();
     format!(
-        "(define-library ({}) (import (vali core) (vali primitive)) (export {}) (begin {}))",
+        "(define-library ({}) (export {}))",
         name.join(" "),
-        exports.join(" "),
-        definitions.join(" ")
+        exports.join(" ")
     )
 }
 
@@ -687,7 +678,7 @@ async fn read_library(
     sources: &mut vali_syntax::Sources,
 ) -> Result<LibraryForm> {
     let text = match &source.native {
-        Some(library) => native_form(&source.identity, library),
+        Some(library) => native_form(library),
         None => source.text.clone(),
     };
     let id = sources.add(source.identity.as_str(), &text);

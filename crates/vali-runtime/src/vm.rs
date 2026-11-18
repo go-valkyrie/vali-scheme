@@ -322,6 +322,8 @@ impl<S: Strategy> Cx<S> {
                     Cell(cells[next - 1].get())
                 }
                 VariableLink::Global => Cell(self.global_cell(&variable.name)),
+                VariableLink::Primitive => Cell(self.primitive_cell(&variable.name)),
+                VariableLink::Native(library) => Cell(self.native_cell(library, &variable.name)?),
                 VariableLink::Imported(library) => self.exported(library, &variable.name)?,
             });
         }
@@ -369,6 +371,32 @@ impl<S: Strategy> Cx<S> {
             .entry(name.into())
             .or_insert_with(|| Box::new(UnsafeCell::new(Value::UNBOUND)))
             .get()
+    }
+
+    /// The cell of the primitive `name`, made unbound if there is none
+    /// yet, as for the syntax procedures outside an expander's isolate.
+    fn primitive_cell(&mut self, name: &str) -> *mut Value {
+        self.primitives
+            .entry(name.into())
+            .or_insert_with(|| Box::new(UnsafeCell::new(Value::UNBOUND)))
+            .get()
+    }
+
+    /// The cell holding the function `name` of the native library
+    /// `library`, as a procedure, made the first time a module links to it.
+    fn native_cell(&mut self, library: &str, name: &str) -> Result<*mut Value, Error> {
+        let key = (Box::from(library), Box::from(name));
+        if let Some(cell) = self.native_cells.get(&key) {
+            return Ok(cell.get());
+        }
+        let function = crate::bridge::native_function(self, library, name)?;
+        let procedure = self.bridge_procedure(function)?;
+        let cell = Box::new(UnsafeCell::new(Value::UNBOUND));
+        let pointer = cell.get();
+        self.native_cells.insert(key, cell);
+        // SAFETY: the cell belongs to this isolate.
+        unsafe { self.write_cell(pointer, procedure) };
+        Ok(pointer)
     }
 
     /// A loaded module's body, as a procedure of no arguments, to call
@@ -460,8 +488,20 @@ impl<S: Strategy> Cx<S> {
         Some(unsafe { self.root(value) })
     }
 
-    /// `%catch`, `%call/cc` and `%continue`, bound to the globals of those
-    /// names.
+    /// The value of the primitive `name`, if there is one: a procedure
+    /// implemented in Rust that `(vali primitive)` exports.
+    pub fn primitive(&mut self, name: &str) -> Option<Handle> {
+        // SAFETY: primitive cells hold valid values.
+        let value = unsafe { *self.primitives.get(name)?.get() };
+        if value == Value::UNBOUND {
+            return None;
+        }
+        // SAFETY: as above.
+        Some(unsafe { self.root(value) })
+    }
+
+    /// `%catch`, `%call/cc` and `%continue`, bound as the primitives of
+    /// those names.
     pub(crate) fn define_control(&mut self) -> Result<(), Error> {
         for code in Code::control() {
             let code = Box::new(code);
@@ -471,9 +511,32 @@ impl<S: Strategy> Cx<S> {
             let closure = self.closure_raw(pointer, &[])?;
             // SAFETY: the cell belongs to this isolate.
             unsafe {
-                let cell = self.global_cell(&name);
+                let cell = self.primitive_cell(&name);
                 self.write_cell(cell, closure);
             }
+        }
+        Ok(())
+    }
+
+    /// A procedure implemented in Rust, bound as the primitive `name`,
+    /// which `(vali primitive)` exports. For Vali's own crates, which
+    /// define the syntax and `eval` procedures this way; a host defines
+    /// its procedures in a native library (ADR 0016).
+    #[doc(hidden)]
+    pub fn define_primitive(
+        &mut self,
+        name: &str,
+        arity: Arity,
+        f: NativeFn<S>,
+    ) -> Result<(), Error> {
+        let code = Box::new(Code::native(name, arity, f));
+        let pointer = &*code as *const Code<S>;
+        self.natives.push(code);
+        let closure = self.closure_raw(pointer, &[])?;
+        // SAFETY: the cell belongs to this isolate.
+        unsafe {
+            let cell = self.primitive_cell(name);
+            self.write_cell(cell, closure);
         }
         Ok(())
     }

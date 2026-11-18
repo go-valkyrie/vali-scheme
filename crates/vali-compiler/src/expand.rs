@@ -404,6 +404,9 @@ impl Expander {
 
     /// Expands and compiles a library, which becomes the next unit.
     pub(crate) fn library(&mut self, identity: &str, form: &LibraryForm) -> Result<Module> {
+        if self.natives.iter().any(|(i, _)| i == identity) {
+            return self.native_library(identity, form);
+        }
         let scope = self.scope(ScopeKind::Library)?;
         let top = self.context.intern(&[scope]).map_err(too_many)?;
         self.unit(
@@ -416,6 +419,50 @@ impl Expander {
             form.span,
             false,
         )
+    }
+
+    /// The unit for a native library (ADR 0016 #8): a module whose
+    /// variables link straight to the library's functions as it loads, and
+    /// export them. `form` names the functions; it has no body.
+    fn native_library(&mut self, identity: &str, form: &LibraryForm) -> Result<Module> {
+        let index = self.units.len();
+        let mut builder = ModuleBuilder::new(identity);
+        let mut interface = HashMap::new();
+        for spec in &form.exports {
+            let variable = builder.native(identity, &spec.internal);
+            builder.export(&spec.external, variable);
+            interface.insert(
+                spec.external.clone(),
+                Binding::Variable(index, spec.external.clone()),
+            );
+        }
+        let unspecified = builder.constant(vali_bytecode::Constant::Unspecified);
+        let mut body = vali_bytecode::FunctionBuilder::new(
+            Some(identity),
+            vali_bytecode::Arity::exactly(0),
+            2,
+            0,
+        );
+        body.emit(vali_bytecode::Instruction::LoadConstant {
+            dst: 1,
+            constant: unspecified,
+        })
+        .emit(vali_bytecode::Instruction::Return { src: 1 });
+        let body = body
+            .finish()
+            .map_err(|e| error(format!("{identity}: {e}"), form.span))?;
+        let body = builder.function(body);
+        let module = builder.finish(body);
+        validate(&module).map_err(|e| error(format!("{identity}: {e}"), form.span))?;
+        self.units.push(Unit {
+            identity: identity.to_owned(),
+            interface,
+            imports: Vec::new(),
+            module: Some(module.clone()),
+            strict: true,
+            repl: false,
+        });
+        Ok(module)
     }
 
     /// Expands and compiles a program. With imports, it sees only what it
@@ -1518,13 +1565,19 @@ impl Expander {
                     self.global_in_context(owner, &global, stx)?;
                     Ok(self.variable(owner, global))
                 }
-                Some(Binding::Primitive(name) | Binding::Global(name)) => Ok(Expr::Free(name)),
-                None if self.in_repl() => Ok(Expr::Free(repl_global(name))),
+                Some(Binding::Primitive(name)) => Ok(Expr::Free(name)),
+                Some(Binding::Global(name)) => Ok(Expr::ReplGlobal(name)),
+                None if self.in_repl() => Ok(Expr::ReplGlobal(repl_global(name))),
                 None if self.units.last().is_some_and(|u| u.strict) => Err(error(
                     format!("{name} is not bound: is it imported?"),
                     stx.span(),
                 )),
-                None => Ok(Expr::Free(name.to_owned())),
+                // A program with no imports still reaches every primitive
+                // by name, until programs are strict too.
+                None if vali_runtime::primitive_names().contains(&name) => {
+                    Ok(Expr::Free(name.to_owned()))
+                }
+                None => Ok(Expr::ReplGlobal(name.to_owned())),
                 Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
                     stx.span(),

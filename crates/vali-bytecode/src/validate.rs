@@ -166,8 +166,14 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
                     match module.variables.get(usize::from(*variable)) {
                         None => return fail(format!("variable {variable} does not exist")),
                         // An importer cannot assign another library's
-                        // variable (R7RS 5.6.1).
-                        Some(v) if matches!(v.link, Link::Imported(_)) => {
+                        // variable (R7RS 5.6.1), a primitive or a native
+                        // function.
+                        Some(v)
+                            if matches!(
+                                v.link,
+                                Link::Imported(_) | Link::Primitive | Link::Native(_)
+                            ) =>
+                        {
                             return fail(format!("variable {variable} is imported"));
                         }
                         Some(_) => {}

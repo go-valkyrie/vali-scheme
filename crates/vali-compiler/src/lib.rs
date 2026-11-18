@@ -122,7 +122,7 @@ impl std::fmt::Debug for SyntaxData {
 /// Whether `module` calls the procedures syntax objects at run time use.
 pub(crate) fn uses_syntax(module: &Module) -> bool {
     module.variables.iter().any(|v| {
-        v.link == vali_bytecode::Link::Global
+        v.link == vali_bytecode::Link::Primitive
             && [
                 phase::QUOTE_SYNTAX,
                 phase::SYNTAX_MATCH,

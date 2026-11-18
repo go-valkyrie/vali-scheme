@@ -21,6 +21,9 @@ use crate::stack::{Segment, View};
 use crate::strategy::{Space, Strategy};
 use crate::value::Value;
 
+/// A variable's cell that the isolate owns, boxed so it stays put.
+pub(crate) type OwnCell = Box<std::cell::UnsafeCell<Value>>;
+
 /// An isolate's context: its heap and its root table. Holding `&mut Cx`
 /// proves the isolate is not running Scheme code anywhere else, which is
 /// what using a handle requires (ADR 0003).
@@ -33,7 +36,14 @@ pub struct Cx<S: Strategy> {
     pub(crate) instance_of: HashMap<usize, usize>,
     /// The cells of the host's globals, by name, which variables linked
     /// as globals share. Boxed so the cells stay put.
-    pub(crate) globals: HashMap<Box<str>, Box<std::cell::UnsafeCell<Value>>>,
+    pub(crate) globals: HashMap<Box<str>, OwnCell>,
+    /// The cells of the procedures implemented in Rust that `(vali
+    /// primitive)` exports, by name, apart from the globals, so only code
+    /// that imports that library reaches them.
+    pub(crate) primitives: HashMap<Box<str>, OwnCell>,
+    /// The cells of native functions modules link to, by library identity
+    /// and name, each holding its procedure.
+    pub(crate) native_cells: HashMap<(Box<str>, Box<str>), OwnCell>,
     /// Loaded libraries, by identity, which imports link to.
     pub(crate) libraries: HashMap<Box<str>, crate::code::ModuleId>,
     /// Interned symbols.
@@ -95,7 +105,7 @@ pub struct Cx<S: Strategy> {
     /// The Rust objects Scheme holds (ADR 0016).
     pub(crate) objects: crate::rust_objects::Objects,
     /// The native libraries loaded programs brought, by identity, which
-    /// `%native-procedure` finds functions in.
+    /// modules linking to native functions find them in.
     pub(crate) native_libraries: HashMap<Box<str>, Arc<crate::bridge::NativeLibrary>>,
     /// Whether this is an expander's isolate, where only expansion-safe
     /// native functions run (ADR 0009 #17).
@@ -149,6 +159,8 @@ impl<S: Strategy> Cx<S> {
             instances: Vec::new(),
             instance_of: HashMap::new(),
             globals: HashMap::new(),
+            primitives: HashMap::new(),
+            native_cells: HashMap::new(),
             libraries: HashMap::new(),
             symbols: HashMap::new(),
             keywords: HashMap::new(),

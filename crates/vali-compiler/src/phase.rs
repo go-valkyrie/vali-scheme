@@ -110,7 +110,7 @@ pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
         (SYNTAX_BUILD, at_least(1), syntax_build),
     ];
     for (name, arity, f) in natives {
-        cx.define_native(name, arity, f)?;
+        cx.define_primitive(name, arity, f)?;
     }
     crate::eval::install(cx)
 }

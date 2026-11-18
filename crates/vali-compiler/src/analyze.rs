@@ -38,6 +38,7 @@ impl Walker<'_> {
             | Expr::Const(_)
             | Expr::Global(_)
             | Expr::Free(_)
+            | Expr::ReplGlobal(_)
             | Expr::Imported(..) => {}
             Expr::Local(v) => self.reference(*v, None, lambda, tail),
             Expr::SetLocal(_, value) | Expr::SetGlobal(_, value) | Expr::SetFree(_, value) => {

@@ -228,6 +228,26 @@ impl ModuleBuilder {
         self.linked(name, Link::Imported(library.into()))
     }
 
+    /// The index of the variable holding Vali's primitive `name`, adding
+    /// it if it is new.
+    ///
+    /// # Panics
+    ///
+    /// Panics past 65,536 variables.
+    pub fn primitive(&mut self, name: &str) -> u16 {
+        self.linked(name, Link::Primitive)
+    }
+
+    /// The index of the variable holding the function `name` of the native
+    /// library `library`, adding it if it is new.
+    ///
+    /// # Panics
+    ///
+    /// Panics past 65,536 variables.
+    pub fn native(&mut self, library: &str, name: &str) -> u16 {
+        self.linked(name, Link::Native(library.into()))
+    }
+
     fn linked(&mut self, name: &str, link: Link) -> u16 {
         let variable = Variable {
             name: name.into(),
