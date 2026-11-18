@@ -1,0 +1,28 @@
+# The fuzz targets, for cargo-fuzz, which needs a nightly toolchain:
+#
+#     cargo +nightly fuzz run bytecode
+#
+# A workspace of its own, so building Vali never needs nightly. CI runs it
+# on a schedule (.github/workflows/fuzz.yml).
+[package]
+name = "vali-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vali-test = { path = "../crates/vali-test" }
+
+[[bin]]
+name = "bytecode"
+path = "fuzz_targets/bytecode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

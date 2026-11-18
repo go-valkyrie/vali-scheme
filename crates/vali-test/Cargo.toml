@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 libtest-mimic = "0.8.2"
+vali-bytecode.workspace = true
 vali-compiler.workspace = true
 vali-runtime.workspace = true
 vali-syntax.workspace = true

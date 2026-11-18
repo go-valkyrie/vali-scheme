@@ -78,6 +78,8 @@ pub struct Cx<S: Strategy> {
     pub(crate) running: bool,
     /// Calls made, the fuel used so far (ADR 0009).
     pub(crate) fuel_used: u64,
+    /// The most fuel the isolate may use, if limited.
+    pub(crate) fuel_limit: Option<u64>,
     /// A tail call a Rust procedure asked for, made when it returns.
     pub(crate) tail_call: Option<(Value, Vec<Value>)>,
     /// The syntax objects that heap objects of type `Syntax` index.
@@ -179,6 +181,7 @@ impl<S: Strategy> Cx<S> {
             max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
             fuel_used: 0,
+            fuel_limit: None,
             tail_call: None,
             syntaxes: Vec::new(),
             host_data: None,

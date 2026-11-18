@@ -569,6 +569,7 @@ name = "vali-test"
 version = "0.0.0"
 dependencies = [
  "libtest-mimic",
+ "vali-bytecode",
  "vali-compiler",
  "vali-runtime",
  "vali-syntax",

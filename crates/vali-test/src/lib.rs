@@ -27,6 +27,7 @@
 //!   marked `expect: fail` benchmarks something not built yet, and is not
 //!   run.
 
+pub mod fuzz;
 mod header;
 
 use std::path::{Path, PathBuf};

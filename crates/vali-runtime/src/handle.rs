@@ -40,6 +40,9 @@ pub enum Error {
     /// this exit code, which the host may pass on or not. Scheme code
     /// cannot catch it.
     Exit(i32),
+    /// The run entered more procedures than the fuel limit the host set
+    /// (`Cx::set_fuel_limit`, ADR 0009 #21). Scheme code cannot catch it.
+    OutOfFuel,
     /// Scheme code raised an error. Until Scheme has conditions, errors
     /// unwind to the host with a backtrace.
     Scheme(Box<SchemeError>),
@@ -152,7 +155,7 @@ impl Error {
     pub(crate) fn reaches_handlers(&self) -> bool {
         match self {
             Error::Scheme(e) => !e.escaping,
-            Error::OutOfMemory | Error::Exit(_) => false,
+            Error::OutOfMemory | Error::Exit(_) | Error::OutOfFuel => false,
             _ => true,
         }
     }
@@ -168,6 +171,7 @@ impl fmt::Display for Error {
             Error::WrongType { expected } => write!(f, "expected {expected}"),
             Error::OutOfRange => f.write_str("index out of range"),
             Error::Exit(code) => write!(f, "the program exited with code {code}"),
+            Error::OutOfFuel => f.write_str("out of fuel: the run entered more procedures than its limit"),
             Error::Scheme(e) => {
                 f.write_str(&e.message)?;
                 for frame in &e.backtrace {

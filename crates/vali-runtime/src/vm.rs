@@ -1207,6 +1207,13 @@ impl<S: Strategy> Cx<S> {
         self.fuel_used
     }
 
+    /// Sets how many procedures the isolate may enter, counting from when
+    /// it was made, or no limit. Past it, a run ends with
+    /// [`Error::OutOfFuel`], which Scheme code cannot catch (ADR 0009 #21).
+    pub fn set_fuel_limit(&mut self, limit: Option<u64>) {
+        self.fuel_limit = limit;
+    }
+
     /// Sets the most memory the stack may take, in bytes. Deep recursion
     /// beyond it is an error.
     pub fn set_max_stack_bytes(&mut self, bytes: usize) {
@@ -1264,6 +1271,9 @@ impl<S: Strategy> Cx<S> {
         }
         self.fuel_used += 1;
         code.calls.fetch_add(1, Ordering::Relaxed);
+        if self.fuel_limit.is_some_and(|limit| self.fuel_used > limit) {
+            return Err(Error::OutOfFuel);
+        }
         Ok(())
     }
 
@@ -1539,7 +1549,7 @@ impl<S: Strategy> Cx<S> {
                         // call; with none, or for an exit, return the error
                         // to the host.
                         let catch = match error {
-                            Error::Exit(_) => None,
+                            Error::Exit(_) | Error::OutOfFuel => None,
                             _ => self.catches.pop(),
                         };
                         let Some(catch) = catch else {
