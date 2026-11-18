@@ -1769,9 +1769,12 @@ impl<S: Strategy> Cx<S> {
                                     *callee_fp.add(1) = link.host_return;
                                     *callee_fp.add(3) = link.host_cfa;
                                 } else {
-                                    if S::PRECISE && callee_fp == fp.sub(base + 3) {
+                                    if S::PRECISE {
                                         // The header goes in the caller's
-                                        // slots, which may hold values.
+                                        // slots, which may hold values; or,
+                                        // in a chained segment, those slots
+                                        // are cleared without releasing when
+                                        // the callee returns.
                                         self.release_slots(fp, base, base + 3);
                                     }
                                     *callee_fp = fp as u64;
