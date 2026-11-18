@@ -43,7 +43,8 @@ pub(crate) struct Compiled {
 pub(crate) struct Shared {
     pub(crate) context: ScopeContext,
     pub(crate) table: BindingTable<String, Binding>,
-    pub(crate) compiled: Compiled,
+    /// Each unit's compiled syntax, by the unit's identity.
+    pub(crate) compiled: CompiledByUnit,
     /// The macro use being expanded, which built syntax gets as its origin.
     pub(crate) origin: Option<Arc<Origin>>,
     /// The sources read, which locate syntax objects' spans.
@@ -107,9 +108,9 @@ pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
         ("free-identifier=?", exactly(2), free_identifier),
         ("generate-temporaries", exactly(1), generate_temporaries),
         ("syntax-violation", at_least(3), syntax_violation),
-        (QUOTE_SYNTAX, exactly(1), quote_syntax),
-        (SYNTAX_MATCH, exactly(2), syntax_match),
-        (SYNTAX_BUILD, at_least(1), syntax_build),
+        (QUOTE_SYNTAX, exactly(2), quote_syntax),
+        (SYNTAX_MATCH, exactly(3), syntax_match),
+        (SYNTAX_BUILD, at_least(2), syntax_build),
     ];
     for (name, arity, f) in natives {
         cx.define_primitive(name, arity, f)?;
@@ -279,20 +280,41 @@ fn free_identifier<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value,
     })
 }
 
+/// `(%quote-syntax unit k)`: the syntax object the unit named `unit`
+/// quotes as its `k`th.
 fn quote_syntax<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let index = args[0]
-        .as_fixnum()
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| Error::scheme("quote-syntax: expected a number"))?;
-    let quoted = with_shared(cx, "quote-syntax", |_, shared| {
-        shared
-            .compiled
+    let name = "quote-syntax";
+    let unit = unit_name(cx, args[0], name)?;
+    let index = number(args[1], name)?;
+    let quoted = with_shared(cx, name, |_, shared| {
+        unit_table(shared, &unit, name)?
             .quoted
             .get(index)
             .cloned()
             .ok_or_else(|| Error::scheme("quote-syntax: no such syntax"))
     })?;
     Ok(cx.syntax_raw(quoted)?)
+}
+
+/// Each unit's compiled syntax, by the unit's identity. Code names its own
+/// unit with each number, so numbers start from zero in every unit.
+pub(crate) type CompiledByUnit = std::collections::HashMap<String, Compiled>;
+
+/// The name of the unit whose compiled syntax a call refers to.
+fn unit_name<S: Strategy>(cx: &Cx<S>, v: Value, name: &str) -> Result<String, Error> {
+    if v.tag() != vali_abi::Tag::String {
+        return Err(Error::scheme(format!("{name}: expected a unit's name")));
+    }
+    // SAFETY: a live string.
+    Ok(unsafe { cx.string_str(v) }.to_owned())
+}
+
+/// The compiled syntax of the unit named `unit`.
+fn unit_table<'a>(shared: &'a Shared, unit: &str, name: &str) -> Result<&'a Compiled, Error> {
+    shared
+        .compiled
+        .get(unit)
+        .ok_or_else(|| Error::scheme(format!("{name}: {unit} compiled no syntax")))
 }
 
 /// A pattern's or template's number.
@@ -338,14 +360,20 @@ fn value_match<S: Strategy>(cx: &Cx<S>, v: Value, depth: usize) -> Option<Match>
     (rest == Value::EMPTY_LIST).then_some(Match::Many(matches))
 }
 
-/// `(%syntax-match input k)`: what pattern `k`'s variables matched, as a
-/// vector, or `#f` if `input` doesn't match.
+/// `(%syntax-match input unit k)`: what the `k`th pattern of the unit
+/// named `unit` matched, as a vector, or `#f` if `input` doesn't match.
 fn syntax_match<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "syntax-case";
     let input = syntax(cx, args[0], name)?;
-    let k = number(args[1], name)?;
+    let unit = unit_name(cx, args[1], name)?;
+    let k = number(args[2], name)?;
     let binds = with_shared(cx, name, |_, shared| {
-        let Some((pattern, vars)) = shared.compiled.patterns.get(k) else {
+        // The table and the scope context are borrowed apart.
+        let compiled = shared
+            .compiled
+            .get(&unit)
+            .ok_or_else(|| Error::scheme(format!("{name}: {unit} compiled no syntax")))?;
+        let Some((pattern, vars)) = compiled.patterns.get(k) else {
             return Err(Error::scheme(format!("{name}: no such pattern")));
         };
         let mut binds = vec![None; *vars];
@@ -372,16 +400,17 @@ fn syntax_match<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Er
     Ok(vector)
 }
 
-/// `(%syntax-build k v ...)`: template `k`, with the matches of the
-/// variables it uses.
+/// `(%syntax-build unit k v ...)`: the `k`th template of the unit named
+/// `unit`, with the matches of the variables it uses.
 fn syntax_build<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = "syntax";
-    let k = number(args[0], name)?;
+    let unit = unit_name(cx, args[0], name)?;
+    let k = number(args[1], name)?;
     let built = with_shared(cx, name, |cx, shared| {
-        let Some((template, depths)) = shared.compiled.templates.get(k) else {
+        let Some((template, depths)) = unit_table(shared, &unit, name)?.templates.get(k) else {
             return Err(Error::scheme(format!("{name}: no such template")));
         };
-        let mut binds = args[1..]
+        let mut binds = args[2..]
             .iter()
             .zip(depths)
             .map(|(&v, &depth)| {

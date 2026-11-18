@@ -186,6 +186,13 @@ fn number(n: usize, span: Span) -> Expr {
     })
 }
 
+fn string(s: &str, span: Span) -> Expr {
+    Expr::Const(Datum {
+        kind: DatumKind::String(s.to_owned()),
+        span,
+    })
+}
+
 fn too_many(e: TooManyScopes) -> CompileError {
     CompileError {
         message: e.to_string(),
@@ -238,6 +245,9 @@ pub(crate) struct Expander {
     stack: Vec<LambdaId>,
     /// Suffixes for module variables that macros introduce.
     fresh: usize,
+    /// Suffixes for REPL globals that macros introduce, which, unlike a
+    /// unit's own variables, every REPL input shares.
+    repl_fresh: usize,
     macros: Vec<Macro>,
     /// Macro uses in expressions being expanded, one inside another.
     depth: usize,
@@ -249,7 +259,7 @@ pub(crate) struct Expander {
     /// unit's isolate is made again in the current one's.
     generation: u64,
     /// What phase-1 code's syntax procedures look up by number.
-    compiled: Compiled,
+    compiled: phase::CompiledByUnit,
     /// For each transformer being expanded, one inside another, where its
     /// `lambda` sits in `stack`. Code above the innermost runs at phase 1.
     floors: Vec<usize>,
@@ -265,6 +275,8 @@ pub(crate) struct Expander {
     repl: Option<(ScopeSetId, ScopeSetId)>,
     /// The files bodies include, fetched with the import graph.
     includes: crate::loader::Includes,
+    /// Which libraries bodies' `cond-expand`s may find (`add_available`).
+    available: crate::loader::Available,
     /// The sources read, which spans' source ids index.
     pub(crate) sources: vali_syntax::Sources,
 }
@@ -305,15 +317,17 @@ impl Expander {
                 .collect(),
             stack: Vec::new(),
             fresh: 0,
+            repl_fresh: 0,
             macros: Vec::new(),
             depth: 0,
             phases: Vec::new(),
             generation: 0,
-            compiled: Compiled::default(),
+            compiled: Default::default(),
             floors: Vec::new(),
             natives: Vec::new(),
             next_own: false,
             includes: crate::loader::Includes::new(),
+            available: crate::loader::Available::new(),
             sources: vali_syntax::Sources::new(),
             repl: None,
         };
@@ -326,6 +340,11 @@ impl Expander {
     /// import graph.
     pub(crate) fn set_includes(&mut self, includes: crate::loader::Includes) {
         self.includes = includes;
+    }
+
+    /// Notes which libraries bodies' `cond-expand`s may find.
+    pub(crate) fn add_available(&mut self, available: crate::loader::Available) {
+        self.available.extend(available);
     }
 
     /// The forms `(include path ...)`, or `include-ci`, stands for: each
@@ -369,7 +388,8 @@ impl Expander {
 
     /// The forms of the first `cond-expand` clause whose requirement holds
     /// (R7RS 4.2.1), or none. A `(library name)` requirement holds for
-    /// Vali's libraries and those compiled so far.
+    /// Vali's libraries and those the loader said it has, asked before
+    /// expansion.
     fn cond_expand(&mut self, items: &[Syntax], span: Span) -> Result<Vec<Syntax>> {
         for clause in &items[1..] {
             let Exposed::List {
@@ -383,10 +403,10 @@ impl Expander {
                 return Err(error("cond-expand: expected a clause", clause.span()));
             };
             let requirement = requirement.to_datum();
-            let by_name = &self.by_name;
+            let available = &self.available;
             if crate::features::is_else(&requirement)
                 || crate::features::satisfied(&requirement, &mut |n| {
-                    crate::loader::is_standard(n) || by_name.contains_key(n)
+                    crate::loader::is_standard(n) || available.get(n) == Some(&true)
                 })?
             {
                 return Ok(body.to_vec());
@@ -577,8 +597,8 @@ impl Expander {
         let global = if id.scopes() == self.top {
             repl_global(name)
         } else {
-            self.fresh += 1;
-            repl_global(&format!("{name}~{}", self.fresh))
+            self.repl_fresh += 1;
+            repl_global(&format!("{name}~{}", self.repl_fresh))
         };
         self.table.rebind(
             &self.context,
@@ -609,9 +629,12 @@ impl Expander {
         repl: bool,
     ) -> Result<Module> {
         let index = self.units.len();
-        // A new unit expands with fresh expansion-time instances.
+        // A new unit expands with fresh expansion-time instances, and
+        // numbers what it makes from zero, so its output depends only on
+        // itself (ADR 0001 #4).
         self.phases.clear();
         self.generation += 1;
+        self.fresh = 0;
         let imported_at = imported;
         let mut imported = Vec::new();
         for set in imports {
@@ -1828,11 +1851,12 @@ impl Expander {
                 let [form] = args else {
                     return Err(error(format!("{keyword}: expected one form"), span));
                 };
-                self.compiled.quoted.push(form.clone());
-                let index = number(self.compiled.quoted.len() - 1, span);
+                let (unit, table) = self.unit_table(span);
+                table.quoted.push(form.clone());
+                let index = number(table.quoted.len() - 1, span);
                 Ok(Expr::Call(
                     Box::new(Expr::Free(QUOTE_SYNTAX.to_owned())),
-                    vec![index],
+                    vec![unit, index],
                     span,
                 ))
             }
@@ -1842,6 +1866,20 @@ impl Expander {
     }
 
     // syntax-case.
+
+    /// The current unit's table of compiled syntax, numbered from zero,
+    /// and its name, which code passes with each number, as a constant.
+    fn unit_table(&mut self, span: Span) -> (Expr, &mut Compiled) {
+        let identity = &self
+            .units
+            .last()
+            .expect("a unit is being expanded")
+            .identity;
+        (
+            string(identity, span),
+            self.compiled.entry(identity.clone()).or_default(),
+        )
+    }
 
     /// The scopes, bindings and compiled syntax so far, for syntax objects
     /// at run time (ADR 0015 #10).
@@ -1937,8 +1975,9 @@ impl Expander {
         };
         let mut vars = Vars::new();
         let compiled = pattern::pattern(&mut self.context, &spelling, &mut vars, pattern, 0)?;
-        self.compiled.patterns.push((compiled, vars.len()));
-        let k = self.compiled.patterns.len() - 1;
+        let (unit, table) = self.unit_table(span);
+        table.patterns.push((compiled, vars.len()));
+        let k = table.patterns.len() - 1;
 
         // What follows if this clause fails: the rest, inline, or with a
         // fender, a procedure that runs it.
@@ -1994,7 +2033,7 @@ impl Expander {
         let input = self.local(tmp);
         let matched = Expr::Call(
             Box::new(Expr::Free(SYNTAX_MATCH.to_owned())),
-            vec![input, number(k, span)],
+            vec![input, unit, number(k, span)],
             span,
         );
         let unmatched = match rest {
@@ -2047,8 +2086,9 @@ impl Expander {
             ));
         }
         let depths = used.iter().map(|&(_, d)| d).collect();
-        self.compiled.templates.push((template, depths));
-        let mut args = vec![number(self.compiled.templates.len() - 1, span)];
+        let (unit, table) = self.unit_table(span);
+        table.templates.push((template, depths));
+        let mut args = vec![unit, number(table.templates.len() - 1, span)];
         for (v, _) in used {
             self.in_context(v, form)?;
             args.push(self.local(v));

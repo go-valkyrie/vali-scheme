@@ -385,12 +385,21 @@ pub(crate) struct Graph {
     /// The files bodies include, by the identity including them and the
     /// path: their text, or why it could not be read.
     pub(crate) includes: Includes,
+    /// The libraries bodies' `cond-expand`s test, and whether each is
+    /// available.
+    pub(crate) available: Available,
 }
 
 /// Included files' texts, by including identity and path, fetched before
 /// expansion so the expander never awaits, and each read once (ADR 0009
 /// #13).
 pub(crate) type Includes = HashMap<(String, String), std::result::Result<String, String>>;
+
+/// Whether each library a `cond-expand` in a body tests with `(library
+/// name)` is available, asked of the loader before expansion as the
+/// declaration-level `cond-expand` asks, so the answer never depends on
+/// what was compiled first.
+pub(crate) type Available = HashMap<LibraryName, bool>;
 
 fn error(message: impl Into<String>, span: Option<Span>) -> CompileError {
     CompileError {
@@ -628,7 +637,9 @@ async fn fetch_includes(
     forms: &[Datum],
     from: &Identity,
     loader: &impl Fetch,
+    local: &HashSet<LibraryName>,
     includes: &mut Includes,
+    available: &mut Available,
 ) {
     let mut work: Vec<Datum> = forms.to_vec();
     while let Some(d) = work.pop() {
@@ -636,6 +647,26 @@ async fn fetch_includes(
             DatumKind::List { items, tail } => {
                 match head(&d) {
                     Some(("quote" | "quasiquote" | "quote-syntax", _)) => continue,
+                    // Its clauses' forms are scanned below, as any list's.
+                    Some(("cond-expand", clauses)) => {
+                        let mut asked = Vec::new();
+                        for clause in clauses {
+                            if let DatumKind::List { items, .. } = &clause.kind
+                                && let Some(requirement) = items.first()
+                            {
+                                let _ = crate::features::libraries(requirement, &mut asked);
+                            }
+                        }
+                        for name in asked {
+                            if available.contains_key(&name) {
+                                continue;
+                            }
+                            let found = is_standard(&name)
+                                || local.contains(&name)
+                                || matches!(loader.fetch(&name, Some(from)).await, Ok(Some(_)));
+                            available.insert(name, found);
+                        }
+                    }
                     Some((keyword @ ("include" | "include-ci"), args)) => {
                         let Ok(paths) = include_paths(keyword, args, d.span) else {
                             continue;
@@ -744,7 +775,16 @@ async fn walk(
     }
     let local: HashMap<&LibraryName, &LibraryForm> = forms.iter().map(|l| (&l.name, l)).collect();
     let mut includes = Includes::new();
-    fetch_includes(&program.body, identity, loader, &mut includes).await;
+    let mut available = Available::new();
+    fetch_includes(
+        &program.body,
+        identity,
+        loader,
+        &names,
+        &mut includes,
+        &mut available,
+    )
+    .await;
     // Found libraries, unordered, and each name's place among them.
     let mut found: Vec<Library> = Vec::new();
     let mut by_name: HashMap<LibraryName, usize> = HashMap::new();
@@ -796,7 +836,15 @@ async fn walk(
         for set in form.imports.iter().rev() {
             work.push((set.library().clone(), Some(library_identity.clone())));
         }
-        fetch_includes(&form.body, &library_identity, loader, &mut includes).await;
+        fetch_includes(
+            &form.body,
+            &library_identity,
+            loader,
+            &names,
+            &mut includes,
+            &mut available,
+        )
+        .await;
         let index = found.len();
         by_identity.insert(library_identity.clone(), index);
         by_name.insert(name, index);
@@ -809,6 +857,7 @@ async fn walk(
     }
     let mut graph = order(found, by_name)?;
     graph.includes = includes;
+    graph.available = available;
     Ok(graph)
 }
 
@@ -886,6 +935,7 @@ fn order(found: Vec<Library>, by_name: HashMap<LibraryName, usize>) -> Result<Gr
         libraries,
         by_name,
         includes: Includes::new(),
+        available: Available::new(),
     })
 }
 

@@ -7,7 +7,7 @@
 - **Amended:** 2026-11-16, the runtime's own sources of non-determinism, and how each is closed
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
 - **Amended:** 2026-11-18, the interface section records the library's ABI version, and offers no bodies for inlining: inlining across libraries happens at link time (item 5, ADRs 0017 and 0018)
-- **Amended:** 2026-11-18, as-built notes: expansion is not yet separate per library (items 2 and 4)
+- **Amended:** 2026-11-18, as-built notes: fresh expansion-time instances per unit and phase, and numbering per unit; scopes still shared (items 2 and 4)
 - **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces), 0017 (link-time optimisation), 0018 (library ABI versions)
 
 ## Context
@@ -28,11 +28,11 @@ R6RS lets an import say at which phase it is needed (`(import (for (lib) expand)
 1. **Phasing is implicit by default.** An import makes a library available at every phase where its bindings are referenced. The expander instantiates the library at a phase the first time it needs it there. R6RS `for` import levels are accepted as an explicit override: such an import is available only at the levels it lists.
 2. **Each phase gets its own instance of a library.** Run-time state and expansion-time state are never shared. Expanding a library starts from fresh expansion-time instances of its dependencies, so it cannot observe effects left behind by expanding another library. This is Racket's separate compilation guarantee.
 
-   **As built, until fixed:** one expander and one phase-1 isolate serve every library in a build, so expanding a library can see state left by expanding another, and phase-1 and phase-2 uses share instances. Per-library expansion fixes this before the IR is built (ADR 0017 #9).
+   **As built:** each unit (library, program, REPL input or `eval`) expands with its own isolate for each phase, made on first use, with fresh instances of what it needs, and dropped when the next unit starts. A transformer written in Scheme is kept as compiled code, which each unit's isolate runs afresh. Expansion-time isolates count references, deferred, so they free as they go.
 3. **Static information on bindings** (Chez's `define-property`, Racket's `syntax-local-value`) is serialisable data: syntax objects, symbols, numbers, strings, and lists, vectors and records of those. It cannot hold procedures or other run-time values.
 4. **Expansion is deterministic.** Fresh names, scope identities and any iteration order that reaches the output come from the library being expanded, never from global counters, addresses or the time.
 
-   **As built, until fixed:** fresh names, the indices of compiled patterns and templates, and scopes are numbered across the whole build, so a library's output depends on what was compiled before it.
+   **As built:** fresh names and the indices of compiled patterns, templates and quoted syntax are numbered within each unit, and code names its unit beside each index; a `cond-expand` in a body asks the loader, before expansion, whether a library exists. **Until fixed:** scopes are still numbered across the whole build, in one scope context (ADR 0015 #5).
 
    Expansion-time code can only reach the outside world through capabilities and bridges (ADR 0009), and its own state starts fresh for each library (item 2). What remains is non-determinism inside the language runtime itself, which ordinary Scheme code can observe with no I/O at all. The runtime closes each such leak:
    - **Hash tables iterate in insertion order.** Neither a per-process hash seed nor an `eq?` table's address-based hashing can change the order. Seeds may still be randomised against hash flooding, since the order no longer depends on them.

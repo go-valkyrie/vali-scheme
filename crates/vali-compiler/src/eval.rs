@@ -220,6 +220,7 @@ fn prepare<S: Strategy>(
     .map_err(compile_error)?;
     let expander = &mut evaluator.expander;
     expander.add_includes(graph.includes);
+    expander.add_available(graph.available);
     let mut names = vec![Vec::new(); graph.libraries.len()];
     for (name, i) in graph.by_name {
         names[i].push(name);

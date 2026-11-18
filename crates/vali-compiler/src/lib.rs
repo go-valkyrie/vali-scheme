@@ -306,6 +306,7 @@ fn expand_all(
     identity: &Identity,
 ) -> Result<Expanded, CompileError> {
     expander.set_includes(graph.includes);
+    expander.add_available(graph.available);
     let names_eval = graph
         .by_name
         .contains_key(&LibraryName::new(["scheme", "eval"]));

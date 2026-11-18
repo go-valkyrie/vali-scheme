@@ -425,3 +425,63 @@ fn standard_libraries() {
     let error = run("(error \"bad thing:\" 'x 42)").unwrap_err();
     assert!(error.contains("bad thing: x 42"), "{error}");
 }
+
+/// A library compiles to the same module whatever was compiled before it:
+/// what it numbers (names macros introduce, compiled patterns and
+/// templates) is numbered within it (ADR 0001 #4).
+#[test]
+fn a_library_compiles_the_same_whatever_came_first() {
+    let library = |name: &str| {
+        format!(
+            "(define-library ({name})
+               (import {BASE})
+               (export get)
+               (begin
+                 (define-syntax def-hidden
+                   (syntax-rules () ((_ g v) (begin (define hidden v) (define (g) hidden)))))
+                 (define-syntax swap
+                   (lambda (stx)
+                     (syntax-case stx () ((_ a b) (syntax (list b a))))))
+                 (def-hidden get (swap 1 2))))"
+        )
+    };
+    let (x, y) = (library("x"), library("y"));
+    let loader = Map(vec![
+        ("(x)", Box::leak(x.into_boxed_str())),
+        ("(y)", Box::leak(y.into_boxed_str())),
+    ]);
+    let module_of_y = |program: &str| {
+        compile_program(program, &Identity::new("main"), &loader)
+            .unwrap()
+            .libraries
+            .into_iter()
+            .find(|(identity, _)| identity.as_str() == "lib:(y)")
+            .expect("(y) is compiled")
+            .1
+    };
+    let alone = module_of_y(&format!("(import {BASE} (prefix (y) y:)) (y:get)"));
+    let after = module_of_y(&format!(
+        "(import {BASE} (prefix (x) x:) (prefix (y) y:)) (list (x:get) (y:get))"
+    ));
+    assert_eq!(alone, after);
+}
+
+/// A `cond-expand` in a body asks the loader whether a library exists,
+/// as one among a library's declarations does, so the answer is the same
+/// whatever was compiled first.
+#[test]
+fn cond_expand_in_a_body_asks_the_loader() {
+    let loader = Map(vec![(
+        "(present)",
+        "(define-library (present) (import (scheme base)) (export) (begin))",
+    )]);
+    let result = run_with(
+        &format!(
+            "(import {BASE})
+             (list (cond-expand ((library (present)) 'present) (else 'absent))
+                   (cond-expand ((library (missing)) 'present) (else 'absent)))"
+        ),
+        &loader,
+    );
+    assert_eq!(result.unwrap(), "(present absent)");
+}
