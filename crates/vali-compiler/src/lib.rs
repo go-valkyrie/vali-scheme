@@ -20,6 +20,7 @@ mod expand;
 mod features;
 mod library;
 mod loader;
+mod lower;
 mod pattern;
 mod phase;
 mod repl;
@@ -93,6 +94,9 @@ pub struct Program {
     /// What `eval` needs, if the program imports `(scheme eval)`: the
     /// expander that compiled it, which [`load`] keeps in the isolate.
     pub evaluator: Option<Evaluator>,
+    /// The body's IR, in debug builds, for Vali's own tests.
+    #[doc(hidden)]
+    pub ir: Option<vali_dist::Module>,
 }
 
 /// The expander that compiled a program that imports `(scheme eval)`,
@@ -274,6 +278,7 @@ fn build(
     expander.sources = sources;
     match expand_all(&mut expander, program, graph, identity) {
         Ok((libraries, body, natives, names_eval)) => {
+            let ir = expander.last_ir.take();
             let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
                 .then(|| SyntaxData(expander.syntax_data()));
             let evaluator = names_eval.then(|| Evaluator(Box::new(eval::Evaluator::new(expander))));
@@ -283,6 +288,7 @@ fn build(
                 syntax,
                 natives,
                 evaluator,
+                ir,
             })
         }
         Err(e) => Err(e.located(&expander.sources)),

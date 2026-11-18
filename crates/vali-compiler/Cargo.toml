@@ -11,6 +11,7 @@ repository.workspace = true
 vali-abi.workspace = true
 stacker = "0.1"
 vali-bytecode.workspace = true
+vali-dist.workspace = true
 vali-num.workspace = true
 vali-runtime.workspace = true
 vali-syntax.workspace = true

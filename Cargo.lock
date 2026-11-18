@@ -515,6 +515,7 @@ dependencies = [
  "stacker",
  "vali-abi",
  "vali-bytecode",
+ "vali-dist",
  "vali-num",
  "vali-runtime",
  "vali-syntax",

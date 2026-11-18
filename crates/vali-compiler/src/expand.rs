@@ -509,6 +509,9 @@ pub(crate) struct Expander {
     available: crate::loader::Available,
     /// The sources read, which spans' source ids index.
     pub(crate) sources: vali_syntax::Sources,
+    /// The IR of the last module compiled, in debug builds, which lowers
+    /// every module beside the baseline compiler to check it.
+    pub(crate) last_ir: Option<vali_dist::Module>,
 }
 
 impl Expander {
@@ -553,6 +556,7 @@ impl Expander {
             includes: crate::loader::Includes::new(),
             available: crate::loader::Available::new(),
             sources: vali_syntax::Sources::new(),
+            last_ir: None,
             repl: None,
         };
         Ok(expander)
@@ -1051,8 +1055,18 @@ impl Expander {
 
     /// Compiles the `lambda` `body` as a module's body, exporting every
     /// variable the module defines under its own name.
-    fn module(&self, body: LambdaId, name: &str) -> Result<Module> {
+    fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
         let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
+        if cfg!(debug_assertions) {
+            let ir =
+                crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
+            vali_dist::validate(&ir).map_err(|e| CompileError {
+                message: format!("{name}: lowering produced invalid IR: {e}"),
+                span: None,
+                location: None,
+            })?;
+            self.last_ir = Some(ir);
+        }
         let generator = crate::codegen::Generator {
             vars: &self.vars,
             lambdas: &self.lambdas,
