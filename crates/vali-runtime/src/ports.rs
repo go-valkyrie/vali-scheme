@@ -14,7 +14,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::RustObject;
-use crate::bridge::{Bytes, Eof, IntoScheme, Isolate, NativeLibrary};
+use crate::bridge::{Bytes, Context, Eof, IntoScheme, NativeLibrary};
 use crate::cx::Cx;
 use crate::handle::{Error, Handle};
 use crate::rust_objects::Borrow;
@@ -64,7 +64,7 @@ pub enum Read<T> {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: IntoScheme> IntoScheme for Read<T> {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         match self {
             Read::Value(x) => x.into_scheme(cx),
             Read::Eof => Eof.into_scheme(cx),

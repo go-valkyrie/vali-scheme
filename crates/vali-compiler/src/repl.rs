@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use vali_runtime::{Cx, Error, Handle, HeapConfig, Strategy};
+use vali_runtime::{Error, Handle, HeapConfig, Isolate, Strategy};
 use vali_syntax::{LexErrorKind, ParseErrorKind, ReadErrorKind, SourceId};
 
 use crate::loader::{Identity, Loader};
@@ -40,7 +40,7 @@ const STARTING_IMPORTS: &str = "(import (scheme case-lambda) (scheme char) (sche
 /// A REPL: an isolate, and the procedure that evaluates in its interaction
 /// environment.
 pub struct Repl<S: Strategy> {
-    cx: Cx<S>,
+    isolate: Isolate<S>,
     eval: Handle,
 }
 
@@ -62,25 +62,28 @@ impl<S: Strategy> Repl<S> {
         let fetcher = crate::eval::Fetcher(loader.as_deref());
         let program = crate::compile_program(BOOT, &identity, &fetcher)
             .map_err(|e| Error::scheme(format!("starting the REPL: {e}")))?;
-        let mut cx = Cx::<S>::new(config);
-        cx.install_primitives()?;
-        let id = match loader {
-            Some(loader) => crate::load_with(&mut cx, program, loader)?,
-            None => crate::load(&mut cx, program)?,
-        };
-        cx.run(id)?;
-        let eval = cx
-            .variable(id, "%repl-eval")
-            .expect("the REPL's program defines %repl-eval");
-        let mut repl = Repl { cx, eval };
+        let mut isolate = Isolate::<S>::new(config);
+        let eval = isolate.with(|cx| {
+            cx.install_primitives()?;
+            let id = match loader {
+                Some(loader) => crate::load_with(cx, program, loader)?,
+                None => crate::load(cx, program)?,
+            };
+            cx.run(id)?;
+            Ok::<_, Error>(
+                cx.variable(id, "%repl-eval")
+                    .expect("the REPL's program defines %repl-eval"),
+            )
+        })?;
+        let mut repl = Repl { isolate, eval };
         repl.eval(STARTING_IMPORTS)?;
         Ok(repl)
     }
 
     /// The REPL's isolate, for the host to set up further: to give it Rust
     /// procedures or native libraries, or to drain its console output.
-    pub fn isolate(&mut self) -> &mut Cx<S> {
-        &mut self.cx
+    pub fn isolate(&mut self) -> &mut Isolate<S> {
+        &mut self.isolate
     }
 
     /// Reads `text` and evaluates each datum in it, in order, in the
@@ -88,16 +91,19 @@ impl<S: Strategy> Repl<S> {
     /// `write` prints it, leaving out unspecified values; or the first
     /// error, after which the rest of `text` is not evaluated.
     pub fn eval(&mut self, text: &str) -> Result<Vec<String>, Error> {
-        let mut shown = Vec::new();
-        for datum in self.cx.read(text)? {
-            let mut values = self.cx.call(&self.eval, &[datum])?;
-            while values.is_pair() {
-                let value = values.car(&mut self.cx)?;
-                shown.push(self.cx.write_string(&value)?);
-                values = values.cdr(&mut self.cx)?;
+        let eval = &self.eval;
+        self.isolate.with(|cx| {
+            let mut shown = Vec::new();
+            for datum in cx.read(text)? {
+                let mut values = cx.call(eval, &[datum])?;
+                while values.is_pair() {
+                    let value = values.car(cx)?;
+                    shown.push(cx.write_string(&value)?);
+                    values = values.cdr(cx)?;
+                }
             }
-        }
-        Ok(shown)
+            Ok(shown)
+        })
     }
 
     /// Whether `text` ends in the middle of a datum, so a line-by-line REPL

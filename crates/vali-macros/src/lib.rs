@@ -328,7 +328,7 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
         .raw(
             #name,
             ::vali_runtime::bridge::__private::arity(&[#(#kinds),*]),
-            |cx: &mut dyn ::vali_runtime::bridge::Isolate, args: &[::vali_runtime::Value]| {
+            |cx: &mut dyn ::vali_runtime::bridge::Context, args: &[::vali_runtime::Value]| {
                 use ::vali_runtime::bridge::__private as __p;
                 let mut __next = 0usize;
                 let mut __held: ::std::vec::Vec<::vali_runtime::Value> = ::std::vec::Vec::new();

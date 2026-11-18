@@ -7,8 +7,8 @@
 //! `&T` or `&mut T` for a [`RustObject`] type `T`, is borrowed from the
 //! isolate's table for the call only, checked against other borrows.
 //!
-//! Bridges see the isolate through [`Isolate`], an object-safe view, so a
-//! native library works with any memory strategy.
+//! Bridges see the isolate through [`Context`], the object-safe view of its
+//! [`Cx`], so a native library works with any memory strategy.
 //!
 //! [`RustObject`]: crate::RustObject
 
@@ -29,12 +29,13 @@ use crate::rust_objects::{Borrow, ErasedObject};
 use crate::strategy::Strategy;
 use crate::value::Value;
 
-/// An isolate as a bridge's conversions see it. Object-safe, so one native
-/// library serves isolates of every memory strategy.
+/// An isolate's context as a bridge's conversions see it: a [`Cx`] with its
+/// strategy erased. Object-safe, so one native library serves isolates of
+/// every memory strategy.
 ///
 /// The methods taking a [`Value`] are `unsafe`: the value must be one the
 /// bridge was called with, or one these methods made during the call.
-pub trait Isolate {
+pub trait Context {
     /// The number `v` is, if it is one.
     ///
     /// # Safety
@@ -100,7 +101,7 @@ pub trait Isolate {
     /// Moves `value` into the isolate's table, as a new Rust object.
     fn object_value(&mut self, value: Box<dyn ErasedObject>) -> Result<Value, Error>;
     /// Borrows the Rust object `v`, which must be of the type `id`, until
-    /// [`Isolate::release_object`]: an error if it is not one, or if a
+    /// [`Context::release_object`]: an error if it is not one, or if a
     /// conflicting borrow is held.
     ///
     /// # Safety
@@ -136,7 +137,7 @@ pub enum BorrowError {
     Borrowed,
 }
 
-impl<S: Strategy> Isolate for Cx<S> {
+impl<S: Strategy> Context for Cx<S> {
     unsafe fn number(&self, v: Value) -> Option<Number> {
         Cx::number(self, v)
     }
@@ -263,7 +264,7 @@ pub trait FromScheme: Sized {
     /// # Safety
     ///
     /// `v` must be a value the bridge was called with.
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self>;
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self>;
 }
 
 /// A Rust type that converts to a Scheme value.
@@ -274,7 +275,7 @@ pub trait FromScheme: Sized {
 /// immediate, or an object `cx` made during the call. The VM trusts it.
 pub unsafe trait IntoScheme {
     /// This as a Scheme value. An error is raised as a condition.
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error>;
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error>;
 }
 
 /// How a parameter takes its arguments.
@@ -299,7 +300,7 @@ pub trait Param: Sized {
     /// # Safety
     ///
     /// `args` must be the values the bridge was called with.
-    unsafe fn take(cx: &mut dyn Isolate, args: &[Value], next: &mut usize) -> Result<Self, BadArg>;
+    unsafe fn take(cx: &mut dyn Context, args: &[Value], next: &mut usize) -> Result<Self, BadArg>;
 }
 
 /// An argument that did not convert: its position, from 1, what it had to
@@ -314,7 +315,7 @@ pub struct BadArg {
 impl<T: FromScheme> Param for T {
     const KIND: ParamKind = ParamKind::Required;
 
-    unsafe fn take(cx: &mut dyn Isolate, args: &[Value], next: &mut usize) -> Result<Self, BadArg> {
+    unsafe fn take(cx: &mut dyn Context, args: &[Value], next: &mut usize) -> Result<Self, BadArg> {
         let v = args[*next];
         *next += 1;
         // SAFETY: passed on to the caller.
@@ -329,7 +330,7 @@ impl<T: FromScheme> Param for T {
 impl<T: FromScheme> Param for Option<T> {
     const KIND: ParamKind = ParamKind::Optional;
 
-    unsafe fn take(cx: &mut dyn Isolate, args: &[Value], next: &mut usize) -> Result<Self, BadArg> {
+    unsafe fn take(cx: &mut dyn Context, args: &[Value], next: &mut usize) -> Result<Self, BadArg> {
         match args.get(*next).copied().filter(|&v| v != Value::DEFAULT) {
             None => {
                 *next += 1;
@@ -348,7 +349,7 @@ pub struct Rest<T>(pub Vec<T>);
 impl<T: FromScheme> Param for Rest<T> {
     const KIND: ParamKind = ParamKind::Rest;
 
-    unsafe fn take(cx: &mut dyn Isolate, args: &[Value], next: &mut usize) -> Result<Self, BadArg> {
+    unsafe fn take(cx: &mut dyn Context, args: &[Value], next: &mut usize) -> Result<Self, BadArg> {
         let mut items = Vec::new();
         while *next < args.len() {
             // SAFETY: passed on to the caller.
@@ -375,7 +376,7 @@ macro_rules! integers {
         impl FromScheme for $t {
             const EXPECTED: &'static str = concat!("an exact integer that fits in ", stringify!($t));
 
-            unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+            unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
                 if let Some(n) = v.as_fixnum() {
                     return <$t>::try_from(n).ok();
                 }
@@ -389,7 +390,7 @@ macro_rules! integers {
 
         // SAFETY: it returns an immediate, or a value `cx` makes in the call.
         unsafe impl IntoScheme for $t {
-            fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+            fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
                 match i64::try_from(self).ok().and_then(Value::fixnum) {
                     Some(v) => Ok(v),
                     None => cx.number_value(&Number::from(self)),
@@ -404,7 +405,7 @@ integers!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 impl FromScheme for f64 {
     const EXPECTED: &'static str = "a real number";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller.
         match vali_num::arith::to_inexact(&unsafe { cx.number(v) }?) {
             Number::Real(x) => Some(x),
@@ -415,7 +416,7 @@ impl FromScheme for f64 {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for f64 {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.number_value(&Number::Real(self))
     }
 }
@@ -423,7 +424,7 @@ unsafe impl IntoScheme for f64 {
 impl FromScheme for Number {
     const EXPECTED: &'static str = "a number";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller.
         unsafe { cx.number(v) }
     }
@@ -431,7 +432,7 @@ impl FromScheme for Number {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for Number {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.number_value(&self)
     }
 }
@@ -439,14 +440,14 @@ unsafe impl IntoScheme for Number {
 impl FromScheme for bool {
     const EXPECTED: &'static str = "a boolean";
 
-    unsafe fn from_scheme(_cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(_cx: &mut dyn Context, v: Value) -> Option<Self> {
         v.as_boolean()
     }
 }
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for bool {
-    fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, _cx: &mut dyn Context) -> Result<Value, Error> {
         Ok(Value::boolean(self))
     }
 }
@@ -454,14 +455,14 @@ unsafe impl IntoScheme for bool {
 impl FromScheme for char {
     const EXPECTED: &'static str = "a character";
 
-    unsafe fn from_scheme(_cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(_cx: &mut dyn Context, v: Value) -> Option<Self> {
         v.as_character()
     }
 }
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for char {
-    fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, _cx: &mut dyn Context) -> Result<Value, Error> {
         Ok(Value::character(self))
     }
 }
@@ -469,7 +470,7 @@ unsafe impl IntoScheme for char {
 impl FromScheme for String {
     const EXPECTED: &'static str = "a string";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller.
         unsafe { cx.string(v) }
     }
@@ -477,14 +478,14 @@ impl FromScheme for String {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for String {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.string_value(&self)
     }
 }
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for &str {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.string_value(self)
     }
 }
@@ -496,7 +497,7 @@ pub struct Bytes(pub Vec<u8>);
 impl FromScheme for Bytes {
     const EXPECTED: &'static str = "a bytevector";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller.
         unsafe { cx.bytes(v) }.map(Bytes)
     }
@@ -504,7 +505,7 @@ impl FromScheme for Bytes {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for Bytes {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.bytes_value(&self.0)
     }
 }
@@ -512,7 +513,7 @@ unsafe impl IntoScheme for Bytes {
 impl FromScheme for Handle {
     const EXPECTED: &'static str = "a value";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller.
         Some(unsafe { cx.root(v) })
     }
@@ -520,14 +521,14 @@ impl FromScheme for Handle {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for Handle {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.handle_value(&self)
     }
 }
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for () {
-    fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, _cx: &mut dyn Context) -> Result<Value, Error> {
         Ok(Value::UNSPECIFIED)
     }
 }
@@ -538,7 +539,7 @@ pub struct Eof;
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl IntoScheme for Eof {
-    fn into_scheme(self, _cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, _cx: &mut dyn Context) -> Result<Value, Error> {
         Ok(Value::EOF)
     }
 }
@@ -547,7 +548,7 @@ unsafe impl IntoScheme for Eof {
 impl<T: FromScheme> FromScheme for Vec<T> {
     const EXPECTED: &'static str = "a proper list";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller; the elements are its values.
         unsafe {
             cx.list(v)?
@@ -561,7 +562,7 @@ impl<T: FromScheme> FromScheme for Vec<T> {
 /// A list of the elements.
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: IntoScheme> IntoScheme for Vec<T> {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         let items = self
             .into_iter()
             .map(|item| item.into_scheme(cx))
@@ -579,7 +580,7 @@ pub struct Vector<T>(pub Vec<T>);
 impl<T: FromScheme> FromScheme for Vector<T> {
     const EXPECTED: &'static str = "a vector";
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller; the elements are its values.
         unsafe {
             cx.vector(v)?
@@ -593,7 +594,7 @@ impl<T: FromScheme> FromScheme for Vector<T> {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: IntoScheme> IntoScheme for Vector<T> {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         let items = self
             .0
             .into_iter()
@@ -607,7 +608,7 @@ unsafe impl<T: IntoScheme> IntoScheme for Vector<T> {
 /// `None` is `#f`.
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: IntoScheme> IntoScheme for Option<T> {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         match self {
             Some(x) => x.into_scheme(cx),
             None => Ok(Value::FALSE),
@@ -618,7 +619,7 @@ unsafe impl<T: IntoScheme> IntoScheme for Option<T> {
 /// An error is raised as a condition, its text the message.
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: IntoScheme, E: fmt::Display> IntoScheme for Result<T, E> {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         match self {
             Ok(x) => x.into_scheme(cx),
             Err(e) => Err(Error::scheme(e.to_string())),
@@ -629,7 +630,7 @@ unsafe impl<T: IntoScheme, E: fmt::Display> IntoScheme for Result<T, E> {
 /// A Rust value moves into the isolate's table.
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: RustObject> IntoScheme for T {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.object_value(Box::new(self))
     }
 }
@@ -667,7 +668,7 @@ impl<T: RustObject> Obj<T> {
 impl<T: RustObject> FromScheme for Obj<T> {
     const EXPECTED: &'static str = T::NAME;
 
-    unsafe fn from_scheme(cx: &mut dyn Isolate, v: Value) -> Option<Self> {
+    unsafe fn from_scheme(cx: &mut dyn Context, v: Value) -> Option<Self> {
         // SAFETY: passed on to the caller.
         unsafe {
             cx.is_object(v, TypeId::of::<T>()).then(|| Obj {
@@ -680,7 +681,7 @@ impl<T: RustObject> FromScheme for Obj<T> {
 
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
 unsafe impl<T: RustObject> IntoScheme for Obj<T> {
-    fn into_scheme(self, cx: &mut dyn Isolate) -> Result<Value, Error> {
+    fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         cx.handle_value(&self.handle)
     }
 }
@@ -721,7 +722,7 @@ pub mod __private {
     ///
     /// `args` must be the values the bridge was called with.
     pub unsafe fn take<P: Param>(
-        cx: &mut dyn Isolate,
+        cx: &mut dyn Context,
         args: &[Value],
         next: &mut usize,
     ) -> Result<P, Error> {
@@ -735,7 +736,7 @@ pub mod __private {
     ///
     /// As `take`.
     pub unsafe fn text(
-        cx: &mut dyn Isolate,
+        cx: &mut dyn Context,
         args: &[Value],
         next: &mut usize,
     ) -> Result<String, Error> {
@@ -749,7 +750,7 @@ pub mod __private {
     ///
     /// As `take`.
     pub unsafe fn bytes(
-        cx: &mut dyn Isolate,
+        cx: &mut dyn Context,
         args: &[Value],
         next: &mut usize,
     ) -> Result<Vec<u8>, Error> {
@@ -765,7 +766,7 @@ pub mod __private {
     /// As `take`; the pointer is valid until the borrow is released, and
     /// only as `&mut` if `exclusive`.
     pub unsafe fn borrow<T: RustObject>(
-        cx: &mut dyn Isolate,
+        cx: &mut dyn Context,
         args: &[Value],
         next: &mut usize,
         exclusive: bool,
@@ -802,7 +803,7 @@ pub mod __private {
     /// # Safety
     ///
     /// Each value must hold a borrow.
-    pub unsafe fn release(cx: &mut dyn Isolate, values: &[Value]) {
+    pub unsafe fn release(cx: &mut dyn Context, values: &[Value]) {
         for &v in values {
             // SAFETY: passed on to the caller.
             unsafe { cx.release_object(v) };
@@ -810,7 +811,7 @@ pub mod __private {
     }
 
     /// Converts a result.
-    pub fn finish<R: IntoScheme>(cx: &mut dyn Isolate, r: R) -> Result<Value, Error> {
+    pub fn finish<R: IntoScheme>(cx: &mut dyn Context, r: R) -> Result<Value, Error> {
         r.into_scheme(cx)
     }
 
@@ -828,7 +829,7 @@ pub mod __private {
 
 // Functions and methods.
 
-type Call = dyn Fn(&mut dyn Isolate, &[Value]) -> Result<Value, Error> + Send + Sync;
+type Call = dyn Fn(&mut dyn Context, &[Value]) -> Result<Value, Error> + Send + Sync;
 
 /// A Rust function exposed to Scheme: its name, arity and conversions.
 pub struct NativeFunction {
@@ -867,7 +868,7 @@ impl NativeFunction {
 
     /// Calls it with `args`, which the VM has checked against its arity.
     /// A panic becomes an error naming the function.
-    pub(crate) fn invoke(&self, cx: &mut dyn Isolate, args: &[Value]) -> Result<Value, Error> {
+    pub(crate) fn invoke(&self, cx: &mut dyn Context, args: &[Value]) -> Result<Value, Error> {
         match catch_unwind(AssertUnwindSafe(|| (self.call)(cx, args))) {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(Error::Scheme(mut e))) => {
@@ -896,7 +897,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// A conversion failure as an error.
-fn bad_arg(cx: &dyn Isolate, bad: BadArg) -> Error {
+fn bad_arg(cx: &dyn Context, bad: BadArg) -> Error {
     // SAFETY: the value is one the bridge was called with.
     let got = unsafe { cx.written(bad.got) };
     Error::scheme(format!(
@@ -916,7 +917,7 @@ pub trait IntoFunction<M>: Send + Sync + 'static {
     /// # Safety
     ///
     /// `args` must be the values the bridge was called with.
-    unsafe fn call(&self, cx: &mut dyn Isolate, args: &[Value]) -> Result<Value, Error>;
+    unsafe fn call(&self, cx: &mut dyn Context, args: &[Value]) -> Result<Value, Error>;
 }
 
 /// A Rust method a bridge can call: its receiver `&T` or `&mut T`, then
@@ -930,7 +931,7 @@ pub trait IntoMethod<T, M>: Send + Sync + 'static {
     /// # Safety
     ///
     /// As [`IntoFunction::call`].
-    unsafe fn call(&self, cx: &mut dyn Isolate, args: &[Value]) -> Result<Value, Error>;
+    unsafe fn call(&self, cx: &mut dyn Context, args: &[Value]) -> Result<Value, Error>;
 }
 
 /// Marks a method whose receiver is `&mut T`.
@@ -953,7 +954,7 @@ macro_rules! functions {
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
-            unsafe fn call(&self, cx: &mut dyn Isolate, args: &[Value]) -> Result<Value, Error> {
+            unsafe fn call(&self, cx: &mut dyn Context, args: &[Value]) -> Result<Value, Error> {
                 let mut next = 0;
                 // SAFETY: passed on to the caller.
                 $(let $a = unsafe { $a::take(cx, args, &mut next) }.map_err(|bad| bad_arg(cx, bad))?;)*
@@ -973,7 +974,7 @@ macro_rules! functions {
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
-            unsafe fn call(&self, cx: &mut dyn Isolate, args: &[Value]) -> Result<Value, Error> {
+            unsafe fn call(&self, cx: &mut dyn Context, args: &[Value]) -> Result<Value, Error> {
                 let mut next = 1;
                 // SAFETY: passed on to the caller.
                 $(let $a = unsafe { $a::take(cx, args, &mut next) }.map_err(|bad| bad_arg(cx, bad))?;)*
@@ -1009,7 +1010,7 @@ macro_rules! functions {
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
-            unsafe fn call(&self, cx: &mut dyn Isolate, args: &[Value]) -> Result<Value, Error> {
+            unsafe fn call(&self, cx: &mut dyn Context, args: &[Value]) -> Result<Value, Error> {
                 let mut next = 1;
                 // SAFETY: passed on to the caller.
                 $(let $a = unsafe { $a::take(cx, args, &mut next) }.map_err(|bad| bad_arg(cx, bad))?;)*
@@ -1046,9 +1047,9 @@ functions!(A1, A2, A3, A4, A5, A6);
 ///
 /// # Safety
 ///
-/// As [`Isolate::borrow_object`].
+/// As [`Context::borrow_object`].
 unsafe fn receiver(
-    cx: &mut dyn Isolate,
+    cx: &mut dyn Context,
     v: Value,
     id: TypeId,
     exclusive: bool,
@@ -1159,7 +1160,7 @@ impl NativeLibrary {
         self,
         name: &str,
         arity: Arity,
-        call: impl Fn(&mut dyn Isolate, &[Value]) -> Result<Value, Error> + Send + Sync + 'static,
+        call: impl Fn(&mut dyn Context, &[Value]) -> Result<Value, Error> + Send + Sync + 'static,
     ) -> NativeLibrary {
         self.add(name, arity, Box::new(call))
     }

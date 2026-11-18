@@ -19,6 +19,7 @@ mod cycles;
 pub mod debug;
 mod epoch;
 mod handle;
+mod isolate;
 mod no_collection;
 mod numbers;
 mod objects;
@@ -49,6 +50,7 @@ pub use counting::{
 };
 pub use cx::Cx;
 pub use handle::{Error, Frame, Handle, Position, SchemeError};
+pub use isolate::Isolate;
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
 pub use primitives::{FEATURES, primitive_names};

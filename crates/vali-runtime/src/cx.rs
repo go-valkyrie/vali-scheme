@@ -1,7 +1,8 @@
 //! An isolate's context, and the raw object API.
 //!
-//! A [`Cx`] holds an isolate's heap and its root table. One thread at a time
-//! uses it (ADR 0008), so the strategy's state needs no locks and its counts
+//! A [`Cx`] holds an isolate's heap, its root table, what is loaded into it
+//! and its current task; an [`Isolate`](crate::Isolate) lends it to a host
+//! through `with`. One thread at a time uses it (ADR 0008), so the strategy's state needs no locks and its counts
 //! no atomics. The object constructors and accessors here
 //! work on raw [`Value`]s, so the accessors are `unsafe`: a raw value is
 //! valid only until the next allocation, and must have the type the accessor
@@ -28,7 +29,8 @@ const MAX_FIELDS: usize = (i32::MAX as usize / 8) - 2;
 /// A variable's cell that the isolate owns, boxed so it stays put.
 pub(crate) type OwnCell = Box<std::cell::UnsafeCell<Value>>;
 
-/// An isolate's context: its heap and its root table. Holding `&mut Cx`
+/// An isolate's context: its heap, its root table, what is loaded into it
+/// and the task it is running. Holding `&mut Cx`
 /// proves the isolate is not running Scheme code anywhere else, which is
 /// what using a handle requires (ADR 0003).
 pub struct Cx<S: Strategy> {

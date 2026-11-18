@@ -65,8 +65,11 @@ fn repl() -> ExitCode {
         let result = repl.eval(&input);
         input.clear();
         // What the code wrote to the console comes first.
-        print!("{}", repl.isolate().take_output());
-        eprint!("{}", repl.isolate().take_error_output());
+        let (output, error_output) = repl
+            .isolate()
+            .with(|cx| (cx.take_output(), cx.take_error_output()));
+        print!("{output}");
+        eprint!("{error_output}");
         match result {
             Ok(values) => {
                 for value in values {

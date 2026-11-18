@@ -238,7 +238,7 @@ impl vali_runtime::bridge::FromScheme for Touchy {
     const EXPECTED: &'static str = "an exact integer";
 
     unsafe fn from_scheme(
-        cx: &mut dyn vali_runtime::bridge::Isolate,
+        cx: &mut dyn vali_runtime::bridge::Context,
         v: vali_runtime::Value,
     ) -> Option<Self> {
         assert!(v != vali_runtime::Value::FALSE, "touchy about #f");
