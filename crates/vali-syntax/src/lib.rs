@@ -49,6 +49,6 @@ pub use reader::{
 };
 pub use scope::{Remap, Scope, ScopeContext, ScopeKind, ScopeSetId, TooManyScopes};
 pub use span::{Location, SourceId, Sources, Span};
-pub use syntax::{Exposed, Syntax, bound_identifier_eq, free_identifier_eq};
+pub use syntax::{Effect, Exposed, NewNode, Node, Syntax, bound_identifier_eq, free_identifier_eq};
 pub use text_size::{TextRange, TextSize};
 pub use tree::{SyntaxElement, SyntaxNode, SyntaxToken, TreeSink, ValiLanguage};

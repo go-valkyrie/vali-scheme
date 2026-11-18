@@ -82,6 +82,27 @@ impl Sources {
         map
     }
 
+    /// The identity and text of the source `id`, if there is one.
+    pub fn source(&self, id: SourceId) -> Option<(&str, &str)> {
+        let source = self
+            .sources
+            .get(usize::try_from(id.0).ok()?.checked_sub(1)?)?;
+        Some((&source.identity, &source.text))
+    }
+
+    /// The id of the source `identity` with `text`, adding it unless it is
+    /// held already.
+    pub fn intern(&mut self, identity: &str, text: &str) -> SourceId {
+        match self
+            .sources
+            .iter()
+            .position(|s| &*s.identity == identity && &*s.text == text)
+        {
+            Some(at) => SourceId(u32::try_from(at + 1).expect("fewer than 2^32 sources")),
+            None => self.add(identity, text),
+        }
+    }
+
     /// Adds the text of the source `identity`, returning its id.
     pub fn add(&mut self, identity: &str, text: &str) -> SourceId {
         let line_starts = std::iter::once(0)

@@ -134,6 +134,16 @@ impl ScopeContext {
         self.sets.len()
     }
 
+    /// Every scope this context has made, in the order it made them.
+    pub fn all_scopes(&self) -> impl Iterator<Item = Scope> {
+        (0..self.kinds.len() as u32).map(Scope)
+    }
+
+    /// Every set this context has interned, in the order it interned them.
+    pub fn all_sets(&self) -> impl Iterator<Item = ScopeSetId> {
+        (0..self.sets.len() as u32).map(ScopeSetId)
+    }
+
     /// The scopes in `set`, in increasing order.
     pub fn scopes(&self, set: ScopeSetId) -> &[Scope] {
         &self.sets[set.0 as usize]

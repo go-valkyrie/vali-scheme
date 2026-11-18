@@ -32,6 +32,8 @@ use vali_syntax::{
 use vali_bytecode::{Link, Module, ModuleBuilder, validate};
 use vali_runtime::{Cx, DeferredHeadered, Handle};
 
+mod artifact;
+
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
 use crate::library::{ExportSpec, ImportSet, LibraryForm, LibraryName};
@@ -224,6 +226,47 @@ fn remap_bindings(
         let _ = table.bind(to, symbol.clone(), scopes, phases.clone(), binding.clone());
     }
     Ok(())
+}
+
+/// Remaps `export`, a syntax export, into a context whose core forms are
+/// bound in `core_scope`: its macros and compiled syntax not there
+/// already, then the bindings they reach. Taken in a fixed order, so the
+/// scopes made are numbered the same every time (ADR 0001 #4).
+fn remap_export(
+    export: &ContextState,
+    core_scope: Scope,
+    context: &mut ScopeContext,
+    macros: &mut HashMap<MacroId, Macro>,
+    compiled: &mut phase::CompiledByUnit,
+    table: &mut BindingTable<String, Binding>,
+) -> std::result::Result<(), TooManyScopes> {
+    let from = &export.context;
+    let mut remap = Remap::new();
+    remap.identify(export.core_scope, core_scope);
+    let mut ids: Vec<MacroId> = export.macros.keys().copied().collect();
+    ids.sort();
+    for id in ids {
+        if let std::collections::hash_map::Entry::Vacant(entry) = macros.entry(id) {
+            entry.insert(export.macros[&id].remap(&mut remap, from, context)?);
+        }
+    }
+    let mut names: Vec<&String> = export.compiled.keys().collect();
+    names.sort();
+    for name in names {
+        if !compiled.contains_key(name) {
+            let copy = remap_compiled(&export.compiled[name], &mut remap, from, context)?;
+            compiled.insert(name.clone(), copy);
+        }
+    }
+    remap_bindings(&export.table, from, &mut remap, table, context)
+}
+
+/// Whether every library's syntax export, and later its whole artifact, is
+/// encoded and decoded as it is finished, so the test suite runs on what
+/// artifacts hold: set by the `VALI_ROUND_TRIP` environment variable.
+fn round_trip() -> bool {
+    static ROUND_TRIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROUND_TRIP.get_or_init(|| std::env::var_os("VALI_ROUND_TRIP").is_some())
 }
 
 /// Merges `from`, a program's syntax data for run time, into `into`, the
@@ -778,7 +821,15 @@ impl Expander {
         };
         let state = self.swap_state(placeholder);
         match self.owner {
-            Some(ContextOwner::Unit(unit)) => self.units[unit].syntax = Some(Arc::new(state)),
+            Some(ContextOwner::Unit(unit)) => {
+                let state = if round_trip() {
+                    let bytes = self.encode_syntax(&state)?;
+                    self.decode_syntax(&bytes)?
+                } else {
+                    state
+                };
+                self.units[unit].syntax = Some(Arc::new(state));
+            }
             Some(ContextOwner::Repl) => self.repl_state = Some(state),
             None => {}
         }
@@ -838,37 +889,45 @@ impl Expander {
         let Some(export) = self.units[unit].syntax.clone() else {
             return Ok(());
         };
-        let from = &export.context;
-        let mut remap = Remap::new();
-        remap.identify(export.core_scope, self.core_scope);
-        let mut ids: Vec<MacroId> = export.macros.keys().copied().collect();
-        ids.sort();
-        for id in ids {
-            if !self.macros.contains_key(&id) {
-                let copy = export.macros[&id]
-                    .remap(&mut remap, from, &mut self.context)
-                    .map_err(too_many)?;
-                self.macros.insert(id, copy);
-            }
-        }
-        let mut names: Vec<&String> = export.compiled.keys().collect();
-        names.sort();
-        for name in names {
-            if !self.compiled.contains_key(name) {
-                let copy =
-                    remap_compiled(&export.compiled[name], &mut remap, from, &mut self.context)
-                        .map_err(too_many)?;
-                self.compiled.insert(name.clone(), copy);
-            }
-        }
-        remap_bindings(
-            &export.table,
-            from,
-            &mut remap,
-            &mut self.table,
+        remap_export(
+            &export,
+            self.core_scope,
             &mut self.context,
+            &mut self.macros,
+            &mut self.compiled,
+            &mut self.table,
         )
         .map_err(too_many)
+    }
+
+    /// The bytes of `state`, the syntax export of a unit of this build, as
+    /// an importer would see it: remapped into a context of its own first.
+    fn encode_syntax(&self, state: &ContextState) -> Result<Vec<u8>> {
+        let mut fresh = ContextState::fresh()?;
+        remap_export(
+            state,
+            fresh.core_scope,
+            &mut fresh.context,
+            &mut fresh.macros,
+            &mut fresh.compiled,
+            &mut fresh.table,
+        )
+        .map_err(too_many)?;
+        fresh.imported.clone_from(&state.imported);
+        fresh.next_macro = state.next_macro;
+        let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
+        artifact::encode(&fresh, &identities, &self.sources).map_err(|message| CompileError {
+            message: format!("encoding a syntax export: {message}"),
+            span: None,
+            location: None,
+        })
+    }
+
+    /// A syntax export from its bytes, naming units of this build.
+    fn decode_syntax(&mut self, bytes: &[u8]) -> Result<ContextState> {
+        let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
+        let resolve = |identity: &str| identities.iter().position(|i| i == identity);
+        artifact::decode(bytes, &resolve, &mut self.sources)
     }
 
     /// Notes `m`, a macro the current unit defines, and returns its name.

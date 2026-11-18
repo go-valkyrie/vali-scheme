@@ -45,7 +45,7 @@ enum Content {
 
 /// What one scope change does to whether a set holds the scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Effect {
+pub enum Effect {
     Add,
     Remove,
     Flip,
@@ -109,6 +109,31 @@ fn compose(
         out.extend(next);
     }
     (!out.is_empty()).then(|| out.into())
+}
+
+/// A syntax object's own node, with pending scope changes not applied:
+/// what an encoding stores (ADR 0001 #7), from [`Syntax::node`].
+#[derive(Clone, Copy, Debug)]
+pub enum Node<'a> {
+    Identifier(&'a str),
+    List {
+        items: &'a [Syntax],
+        tail: Option<&'a Syntax>,
+    },
+    Vector(&'a [Syntax]),
+    Atom(&'a DatumKind),
+}
+
+/// A node to build a syntax object from, with [`Syntax::from_parts`].
+#[derive(Clone, Debug)]
+pub enum NewNode {
+    Identifier(Box<str>),
+    List {
+        items: Vec<Syntax>,
+        tail: Option<Syntax>,
+    },
+    Vector(Vec<Syntax>),
+    Atom(DatumKind),
 }
 
 /// A syntax object taken apart one level, from [`Syntax::expose`].
@@ -332,6 +357,53 @@ impl Syntax {
     /// The macro use that produced it, if any.
     pub fn origin(&self) -> Option<&Arc<Origin>> {
         self.origin.as_ref()
+    }
+
+    /// Its own node, children and all, with pending changes not applied.
+    pub fn node(&self) -> Node<'_> {
+        match &*self.content {
+            Content::Identifier(name) => Node::Identifier(name),
+            Content::List { items, tail } => Node::List {
+                items,
+                tail: tail.as_ref(),
+            },
+            Content::Vector(items) => Node::Vector(items),
+            Content::Atom(datum) => Node::Atom(datum),
+        }
+    }
+
+    /// The scope changes waiting to reach its children, sorted by scope.
+    pub fn pending(&self) -> &[(Scope, Effect)] {
+        self.pending.as_deref().unwrap_or(&[])
+    }
+
+    /// A syntax object from its parts, as [`Syntax::node`] and
+    /// [`Syntax::pending`] give them: the node as it is, a list's tail not
+    /// spliced. `None` if `pending` is not sorted by scope, one change a
+    /// scope.
+    pub fn from_parts(
+        node: NewNode,
+        scopes: ScopeSetId,
+        pending: Vec<(Scope, Effect)>,
+        span: Span,
+        origin: Option<Arc<Origin>>,
+    ) -> Option<Syntax> {
+        if pending.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return None;
+        }
+        let content = match node {
+            NewNode::Identifier(name) => Content::Identifier(name),
+            NewNode::List { items, tail } => Content::List { items, tail },
+            NewNode::Vector(items) => Content::Vector(items),
+            NewNode::Atom(datum) => Content::Atom(datum),
+        };
+        Some(Syntax {
+            content: Arc::new(content),
+            scopes,
+            pending: (!pending.is_empty()).then(|| pending.into()),
+            span,
+            origin,
+        })
     }
 
     /// The identifier's name, if this is an identifier.

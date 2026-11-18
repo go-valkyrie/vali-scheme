@@ -60,10 +60,10 @@ pub(crate) enum Pattern {
 /// The part of a list pattern from the ellipsis on.
 #[derive(Clone, Debug)]
 pub(crate) struct Repeat {
-    each: Box<Pattern>,
+    pub(crate) each: Box<Pattern>,
     /// The variables `each` binds.
-    vars: Vec<usize>,
-    after: Vec<Pattern>,
+    pub(crate) vars: Vec<usize>,
+    pub(crate) after: Vec<Pattern>,
 }
 
 /// What a pattern variable matched: one form, or at depth `n`, a list of
