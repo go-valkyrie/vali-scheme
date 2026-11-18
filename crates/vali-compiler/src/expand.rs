@@ -158,7 +158,8 @@ impl Macro {
             ),
             // Its syntax is in its unit's compiled table, remapped with it.
             Transformer::Procedure(p) => Transformer::Procedure(Procedure {
-                module: p.module.clone(),
+                ir: Arc::clone(&p.ir),
+                code: Arc::clone(&p.code),
                 phase: p.phase,
                 made: None,
             }),
@@ -333,8 +334,12 @@ enum Transformer {
 /// runs at, so no expansion sees what another left behind (ADR 0001 #2).
 #[derive(Clone)]
 struct Procedure {
-    /// The module whose body evaluates to the procedure.
-    module: Module,
+    /// The module whose body evaluates to the procedure, as distribution
+    /// code: what a library's artifact holds for it (ADR 0012 #5).
+    ir: Arc<vali_dist::Module>,
+    /// It converted to run format, once something makes it; shared by
+    /// every copy of the macro.
+    code: Arc<std::sync::OnceLock<Module>>,
     /// The isolate it runs in: 0 for phase 1, 1 for phase 2, and so on.
     phase: usize,
     /// The procedure, once made in the current unit's isolate, with the
@@ -1057,18 +1062,16 @@ impl Expander {
     /// Everything compiled goes through the IR (ADR 0017): the tree is
     /// lowered to it, then converted to run-format bytecode.
     fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
-        let fail = |message: String| CompileError {
-            message,
-            span: None,
-            location: None,
-        };
-        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        let ir = crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
-        let module = vali_bytecode::convert(&ir).map_err(|e| fail(format!("{name}: {e}")))?;
-        validate(&module)
-            .map_err(|e| fail(format!("{name}: conversion produced invalid bytecode: {e}")))?;
+        let ir = self.lowered(body, name)?;
+        let module = converted(&ir)?;
         self.last_ir = Some(ir);
         Ok(module)
+    }
+
+    /// The `lambda` `body` lowered to the IR, as a module's body.
+    fn lowered(&self, body: LambdaId, name: &str) -> Result<vali_dist::Module> {
+        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
+        crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)
     }
 
     /// What the library `name` exports, by name.
@@ -1369,7 +1372,8 @@ impl Expander {
         self.floors.pop();
         self.close_lambda(body, Vec::new(), None, expr?);
         Ok(Procedure {
-            module: self.module(body, name)?,
+            ir: Arc::new(self.lowered(body, name)?),
+            code: Arc::default(),
             phase,
             made: None,
         })
@@ -1388,7 +1392,15 @@ impl Expander {
         {
             return Ok(made.clone());
         }
-        let (module, phase) = (procedure.module.clone(), procedure.phase);
+        let module = match procedure.code.get() {
+            Some(module) => module.clone(),
+            None => {
+                let module = converted(&procedure.ir)?;
+                let _ = procedure.code.set(module.clone());
+                module
+            }
+        };
+        let phase = procedure.phase;
         let name = self.macros[&m].name.clone();
         let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), span);
         for variable in &module.variables {
@@ -2621,4 +2633,21 @@ impl Expander {
             Box::new(body),
         ))
     }
+}
+
+/// `ir` converted to run-format bytecode, and validated.
+fn converted(ir: &vali_dist::Module) -> Result<Module> {
+    let fail = |message: String| CompileError {
+        message,
+        span: None,
+        location: None,
+    };
+    let module = vali_bytecode::convert(ir).map_err(|e| fail(format!("{}: {e}", ir.name)))?;
+    validate(&module).map_err(|e| {
+        fail(format!(
+            "{}: conversion produced invalid bytecode: {e}",
+            ir.name
+        ))
+    })?;
+    Ok(module)
 }
