@@ -582,6 +582,7 @@ name = "vali-stdlib"
 version = "0.0.0"
 dependencies = [
  "vali-compiler",
+ "vali-dist",
  "vali-runtime",
 ]
 

@@ -1,6 +1,10 @@
 //! The import graph: a program's libraries and theirs, fetched from the
 //! loader, with the files they include and the libraries their
 //! `cond-expand`s ask about, in the order they are compiled.
+//!
+//! A standard library with a prebuilt artifact is not read from its
+//! source: what it imports comes from the artifact, which is loaded in
+//! place of expanding it.
 
 use super::*;
 
@@ -8,7 +12,13 @@ use super::*;
 #[derive(Clone, Debug)]
 pub(crate) struct Library {
     pub(crate) identity: Identity,
-    pub(crate) form: LibraryForm,
+    /// The name it was first fetched under.
+    pub(crate) name: LibraryName,
+    /// Its form, as read from its source; `None` for a standard library
+    /// whose prebuilt artifact is to be loaded instead.
+    pub(crate) form: Option<LibraryForm>,
+    /// The libraries it imports, by name, built-in ones included.
+    pub(crate) imports: Vec<LibraryName>,
     /// The native library, if it is one.
     pub(crate) native: Option<Arc<vali_runtime::NativeLibrary>>,
     /// Whether it is one of Vali's own, served from the sources Vali
@@ -502,10 +512,11 @@ pub(super) async fn walk(
         }
         // Standard libraries come first, so no loader can replace them,
         // except those a host serves to grant what they need.
-        let (library_identity, form, native, own) = match local.get(&name) {
+        let (library_identity, form, prebuilt, native, own) = match local.get(&name) {
             Some(form) => (
                 Identity::new(&format!("{identity}#{name}")),
-                (*form).clone(),
+                Some((*form).clone()),
+                None,
                 None,
                 false,
             ),
@@ -530,28 +541,46 @@ pub(super) async fn walk(
                     by_name.insert(name, index);
                     continue;
                 }
-                let form = read_library(&name, &source, loader, &names, sources).await?;
-                (source.identity, form, source.native, own)
+                // One of Vali's own with a prebuilt artifact is not read.
+                let prebuilt = own.then(|| prebuilt_imports(&source.identity)).flatten();
+                let form = match prebuilt {
+                    Some(_) => None,
+                    None => Some(read_library(&name, &source, loader, &names, sources).await?),
+                };
+                (source.identity, form, prebuilt, source.native, own)
             }
         };
-        for set in form.imports.iter().rev() {
-            work.push((set.library().clone(), Some(library_identity.clone())));
+        let imports: Vec<LibraryName> = match (prebuilt, &form) {
+            (Some(imports), _) => imports,
+            (None, Some(form)) => form
+                .imports
+                .iter()
+                .map(|set| set.library().clone())
+                .collect(),
+            (None, None) => unreachable!("a library is read unless it is prebuilt"),
+        };
+        for import in imports.iter().rev() {
+            work.push((import.clone(), Some(library_identity.clone())));
         }
-        fetch_includes(
-            &form.body,
-            &library_identity,
-            loader,
-            &names,
-            &mut includes,
-            &mut available,
-        )
-        .await;
+        if let Some(form) = &form {
+            fetch_includes(
+                &form.body,
+                &library_identity,
+                loader,
+                &names,
+                &mut includes,
+                &mut available,
+            )
+            .await;
+        }
         let index = found.len();
         by_identity.insert(library_identity.clone(), index);
-        by_name.insert(name, index);
+        by_name.insert(name.clone(), index);
         found.push(Library {
             identity: library_identity,
+            name,
             form,
+            imports,
             native,
             own,
         });
@@ -585,20 +614,20 @@ pub(super) fn order(found: Vec<Library>, by_name: HashMap<LibraryName, usize>) -
                 let cycle: Vec<String> = path[from..]
                     .iter()
                     .chain([&i])
-                    .map(|&p| found[p].form.name.to_string())
+                    .map(|&p| found[p].name.to_string())
                     .collect();
                 return Err(error(
                     format!("libraries import each other: {}", cycle.join(" -> ")),
-                    Some(found[i].form.span),
+                    found[i].form.as_ref().map(|f| f.span),
                 ));
             }
             State::New => {}
         }
         state[i] = State::Open;
         path.push(i);
-        for set in &found[i].form.imports {
+        for import in &found[i].imports {
             // Built-in libraries are not in the graph.
-            if let Some(&j) = by_name.get(set.library()) {
+            if let Some(&j) = by_name.get(import) {
                 visit(j, found, by_name, state, path, order)?;
             }
         }

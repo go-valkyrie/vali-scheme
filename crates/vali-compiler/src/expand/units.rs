@@ -63,6 +63,37 @@ pub(super) fn build_stamp() -> String {
     )
 }
 
+/// A library's artifact, decoded, if this build of Vali wrote it, with
+/// what its `depends` section says: each library it imports, by identity,
+/// and the hash of that library's exports it was compiled against.
+pub(crate) fn decode_library_artifact(
+    bytes: &[u8],
+) -> std::result::Result<(vali_dist::Artifact, Vec<(String, u64)>), String> {
+    let artifact =
+        vali_dist::Artifact::decode(bytes, LIBRARY_SECTIONS).map_err(|e| e.to_string())?;
+    let section = |name: &str| {
+        artifact
+            .section(name)
+            .ok_or_else(|| format!("the artifact has no {name} section"))
+    };
+    if section("build")? != build_stamp().as_bytes() {
+        return Err("the artifact is from another build of Vali".into());
+    }
+    let mut depends = vali_dist::Reader::new(section("depends")?);
+    let needed = (|| {
+        let n = depends.count(2)?;
+        let mut needed = Vec::with_capacity(n);
+        for _ in 0..n {
+            let dependency = depends.str()?.to_owned();
+            needed.push((dependency, depends.uint()?));
+        }
+        depends.end()?;
+        Ok::<_, vali_dist::DecodeError>(needed)
+    })()
+    .map_err(|e| format!("its dependencies: {e}"))?;
+    Ok((artifact, needed))
+}
+
 /// The FNV-1a hash of `bytes`.
 pub(super) fn bytes_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
@@ -324,29 +355,13 @@ impl Expander {
             span: None,
             location: None,
         };
-        let artifact = vali_dist::Artifact::decode(bytes, LIBRARY_SECTIONS)
-            .map_err(|e| fail(e.to_string()))?;
+        let (artifact, needed) = decode_library_artifact(bytes).map_err(fail)?;
         let section = |name: &str| {
             artifact
                 .section(name)
                 .ok_or_else(|| fail(format!("the artifact has no {name} section")))
         };
-        if section("build")? != build_stamp().as_bytes() {
-            return Err(fail("the artifact is from another build of Vali".into()));
-        }
-        let mut depends = vali_dist::Reader::new(section("depends")?);
-        let read = (|| {
-            let n = depends.count(2)?;
-            let mut needed = Vec::with_capacity(n);
-            for _ in 0..n {
-                let dependency = depends.str()?.to_owned();
-                needed.push((dependency, depends.uint()?));
-            }
-            depends.end()?;
-            Ok::<_, vali_dist::DecodeError>(needed)
-        })()
-        .map_err(|e| fail(format!("its dependencies: {e}")))?;
-        for (dependency, hash) in read {
+        for (dependency, hash) in needed {
             let unit = self
                 .unit_of(&dependency)
                 .ok_or_else(|| fail(format!("it needs {dependency}, which is not loaded")))?;

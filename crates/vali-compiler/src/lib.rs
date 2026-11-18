@@ -103,6 +103,10 @@ pub struct Program {
     /// The libraries loaded from artifacts rather than compiled.
     #[doc(hidden)]
     pub loaded: Vec<Identity>,
+    /// The libraries whose source the import graph was read from; a
+    /// standard library with a prebuilt artifact is not among them.
+    #[doc(hidden)]
+    pub read: Vec<Identity>,
 }
 
 /// Library artifacts to use in place of compiling libraries, by identity,
@@ -304,6 +308,12 @@ fn build(
     sources: vali_syntax::Sources,
     artifacts: &Artifacts,
 ) -> Result<Program, CompileError> {
+    let read = graph
+        .libraries
+        .iter()
+        .filter(|l| l.form.is_some() && l.native.is_none())
+        .map(|l| l.identity.clone())
+        .collect();
     let mut expander = expand::Expander::new()?;
     expander.sources = sources;
     match expand_all(&mut expander, program, graph, identity, &artifacts.read) {
@@ -341,6 +351,7 @@ fn build(
                 ir,
                 artifacts: written,
                 loaded,
+                read,
             })
         }
         Err(e) => Err(e.located(&expander.sources)),
@@ -492,7 +503,8 @@ fn load_inner<S: vali_runtime::Strategy>(
 /// Compiles `library`, or loads it from its prebuilt artifact if it is one
 /// of Vali's own and was not served by a host. A prebuilt artifact that
 /// does not fit, because what it was compiled against differs, is set
-/// aside and the library compiled from source.
+/// aside and the library compiled from source, which the import graph
+/// did not read if it meant to load the artifact.
 pub(crate) fn compile_library(
     expander: &mut expand::Expander,
     library: &loader::Library,
@@ -504,7 +516,13 @@ pub(crate) fn compile_library(
     {
         return Ok(module);
     }
-    expander.library(identity, &library.form, library.own)
+    match &library.form {
+        Some(form) => expander.library(identity, form, library.own),
+        None => {
+            let form = loader::standard_form(&library.name, &mut expander.sources)?;
+            expander.library(identity, &form, library.own)
+        }
+    }
 }
 
 /// The names of Vali's own libraries written in Scheme, which

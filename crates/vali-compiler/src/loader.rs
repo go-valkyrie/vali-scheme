@@ -333,6 +333,52 @@ fn standard(name: &LibraryName) -> Option<Source> {
     ))
 }
 
+/// The name of the standard library whose identity is `identity`, if it
+/// is one.
+fn standard_name(identity: &str) -> Option<LibraryName> {
+    if identity == "vali:vali/ports" {
+        return Some(LibraryName::new(["vali", "ports"]));
+    }
+    let path = identity.strip_prefix("vali:")?;
+    STANDARD
+        .iter()
+        .find(|(parts, _)| path.split('/').eq(parts.iter().copied()))
+        .map(|(parts, _)| LibraryName::new(parts.iter().copied()))
+}
+
+/// What the standard library `identity` imports, by name, read from its
+/// prebuilt artifact rather than its source, if it has one that this build
+/// of Vali can load and that names only standard libraries.
+fn prebuilt_imports(identity: &Identity) -> Option<Vec<LibraryName>> {
+    crate::prebuilt::depends(identity.as_str())?
+        .iter()
+        .map(|dependency| standard_name(dependency))
+        .collect()
+}
+
+/// The form of the standard library `name`, read from its source, for one
+/// whose prebuilt artifact was meant to be loaded but did not fit. Vali's
+/// own libraries include no files and test no libraries in `cond-expand`,
+/// so no loader is needed.
+pub(crate) fn standard_form(
+    name: &LibraryName,
+    sources: &mut vali_syntax::Sources,
+) -> Result<LibraryForm> {
+    let source = standard(name).ok_or_else(|| error(format!("{name} is not standard"), None))?;
+    let local = HashSet::new();
+    let future = pin!(read_library(
+        name,
+        &source,
+        &Sync_(&crate::NoLibraries),
+        &local,
+        sources,
+    ));
+    match future.poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => result,
+        Poll::Pending => unreachable!("a synchronous loader never waits"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -362,11 +408,7 @@ mod tests {
     }
 
     fn names(graph: &Graph) -> Vec<String> {
-        graph
-            .libraries
-            .iter()
-            .map(|l| l.form.name.to_string())
-            .collect()
+        graph.libraries.iter().map(|l| l.name.to_string()).collect()
     }
 
     fn libraries() -> Map {

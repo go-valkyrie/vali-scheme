@@ -40,6 +40,7 @@ mod units;
 pub(crate) use context::merge_syntax;
 use context::*;
 use transformers::*;
+pub(crate) use units::decode_library_artifact;
 use units::*;
 
 use crate::CompileError;

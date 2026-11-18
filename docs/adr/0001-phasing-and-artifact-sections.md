@@ -9,6 +9,7 @@
 - **Amended:** 2026-11-18, the interface section records the library's ABI version, and offers no bodies for inlining: inlining across libraries happens at link time (item 5, ADRs 0017 and 0018)
 - **Amended:** 2026-11-18, as-built notes: fresh expansion-time instances per unit and phase, and numbering and scope contexts per unit (items 2 and 4)
 - **Amended:** 2026-11-18, as built: library artifacts, their sections, how syntax is stored, and the validity they check so far (items 5 to 8)
+- **Amended:** 2026-11-18, as built: the import graph of Vali's own libraries is read from their prebuilt artifacts, not their sources (item 5)
 - **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces), 0017 (link-time optimisation), 0018 (library ABI versions)
 
 ## Context
@@ -60,7 +61,7 @@ R6RS lets an import say at which phase it is needed (`(import (for (lib) expand)
 
    A library's `syntax` section holds only its own macros and compiled syntax, and the bindings they reach; its imports' macros come from their own exports, which importing it imports too. Without this, every library that imports `(scheme base)` carried a copy of base's macros and of `base.sld`, about 82 KB each, and loading one cost more than compiling it.
 
-   The `vali-stdlib` crate's build script compiles the standard libraries and embeds their artifacts; the CLI and the test harness install them. Each is loaded from its artifact unless a host serves its own version, or the artifact does not fit what it was compiled against, when it is compiled from source. The REPL starts in about 28 ms, against about 48 ms compiling them (`VALI_NO_PREBUILT`, release build); `(scheme base)` loads in about 6 ms, against 13 ms to compile it. The import graph is still found by reading each library's source.
+   The `vali-stdlib` crate's build script compiles the standard libraries and embeds their artifacts; the CLI and the test harness install them. Each is loaded from its artifact unless a host serves its own version, or the artifact does not fit what it was compiled against, when it is compiled from source. The import graph is read from the artifacts too: a standard library whose artifact this build can load is never read from its source; what it imports comes from its `depends` section, read once per process. Vali's own libraries include no files and test no libraries in `cond-expand`, so their sources hold nothing more the graph needs. If such an artifact then does not fit, the library's source is read when it is compiled. This also spares every `eval` and REPL input, which fetch their import graph afresh, from reading `base.sld` again. In a release build, compiling a program that imports `(scheme base)` takes about 2.3 ms in a warm process, against 4.2 ms when the graph was read from source; of what is left, converting base's distribution code to bytecode is about 1 ms. The `vali` REPL, as a whole process, starts in about 16.5 ms, against 23 ms before; about 6 ms of that is starting the executable at all. `cargo run --release -p vali-stdlib --example startup` measures these.
 
 ### Cache validity
 

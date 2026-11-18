@@ -12,6 +12,7 @@ build = "build.rs"
 vali-compiler.workspace = true
 
 [dev-dependencies]
+vali-dist.workspace = true
 vali-runtime.workspace = true
 
 [build-dependencies]

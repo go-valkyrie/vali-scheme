@@ -64,6 +64,23 @@ fn standard_libraries_load_from_their_artifacts() {
 }
 
 #[test]
+fn the_import_graph_is_read_from_the_artifacts() {
+    let program = compile(
+        "(import (scheme base) (scheme write) (srfi 1) (scheme case-lambda) (scheme eval))
+         (fold + 0 '(1 2 3))",
+    );
+    assert!(program.read.is_empty(), "read {:?}", program.read);
+    assert_eq!(run(program), "6");
+    // A library a host serves is read from its source, and only it.
+    let program = compile(
+        "(import (scheme base) (scheme process-context))
+         (get-environment-variable \"HOME\")",
+    );
+    let read: Vec<&str> = program.read.iter().map(Identity::as_str).collect();
+    assert_eq!(read, ["host:process-context"]);
+}
+
+#[test]
 fn a_library_a_host_serves_is_compiled_from_its_source() {
     let program = compile(
         "(import (scheme base) (scheme process-context))
