@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use vali_syntax::{Exposed, Origin, ScopeContext, Span, Syntax, bound_identifier_eq};
+use vali_syntax::{
+    Exposed, Origin, Remap, ScopeContext, Span, Syntax, TooManyScopes, bound_identifier_eq,
+};
 
 use crate::CompileError;
 
@@ -605,5 +607,114 @@ impl Builder<'_> {
                 }
             }
         }
+    }
+}
+
+/// Syntax a compiled pattern or template holds, made in one expansion
+/// context and used in another (ADR 0015 #5).
+type Remapped<T> = std::result::Result<T, TooManyScopes>;
+
+impl Pattern {
+    /// This pattern, compiled in `from`, with its literals' scopes mapped
+    /// into `to`.
+    pub(crate) fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> Remapped<Pattern> {
+        let all = |ps: &[Pattern], remap: &mut Remap, to: &mut ScopeContext| {
+            ps.iter()
+                .map(|p| p.remap(remap, from, to))
+                .collect::<Remapped<Vec<_>>>()
+        };
+        Ok(match self {
+            Pattern::Discard => Pattern::Discard,
+            Pattern::Var(i) => Pattern::Var(*i),
+            Pattern::Literal(id) => Pattern::Literal(id.remap(remap, from, to)?),
+            Pattern::Datum(d) => Pattern::Datum(d.clone()),
+            Pattern::List {
+                before,
+                repeat,
+                tail,
+            } => Pattern::List {
+                before: all(before, remap, to)?,
+                repeat: repeat
+                    .as_ref()
+                    .map(|r| r.remap(remap, from, to))
+                    .transpose()?,
+                tail: tail
+                    .as_ref()
+                    .map(|t| t.remap(remap, from, to).map(Box::new))
+                    .transpose()?,
+            },
+            Pattern::Vector { before, repeat } => Pattern::Vector {
+                before: all(before, remap, to)?,
+                repeat: repeat
+                    .as_ref()
+                    .map(|r| r.remap(remap, from, to))
+                    .transpose()?,
+            },
+        })
+    }
+}
+
+impl Repeat {
+    fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> Remapped<Repeat> {
+        Ok(Repeat {
+            each: Box::new(self.each.remap(remap, from, to)?),
+            vars: self.vars.clone(),
+            after: self
+                .after
+                .iter()
+                .map(|p| p.remap(remap, from, to))
+                .collect::<Remapped<_>>()?,
+        })
+    }
+}
+
+impl Template {
+    /// This template, compiled in `from`, with its syntax's scopes mapped
+    /// into `to`.
+    pub(crate) fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> Remapped<Template> {
+        let items = |items: &[(Template, usize)], remap: &mut Remap, to: &mut ScopeContext| {
+            items
+                .iter()
+                .map(|(t, depth)| Ok((t.remap(remap, from, to)?, *depth)))
+                .collect::<Remapped<Vec<_>>>()
+        };
+        Ok(match self {
+            Template::Var(i) => Template::Var(*i),
+            Template::Constant(s) => Template::Constant(s.remap(remap, from, to)?),
+            Template::List {
+                items: list,
+                tail,
+                syntax,
+            } => Template::List {
+                items: items(list, remap, to)?,
+                tail: tail
+                    .as_ref()
+                    .map(|t| t.remap(remap, from, to).map(Box::new))
+                    .transpose()?,
+                syntax: syntax.remap(remap, from, to)?,
+            },
+            Template::Vector {
+                items: list,
+                syntax,
+            } => Template::Vector {
+                items: items(list, remap, to)?,
+                syntax: syntax.remap(remap, from, to)?,
+            },
+        })
     }
 }

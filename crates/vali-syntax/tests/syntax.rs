@@ -184,3 +184,45 @@ fn datum_conversions() {
     assert_eq!(items[1].span(), span);
     assert_eq!(context.scopes(items[1].scopes()), &[scope]);
 }
+
+/// Remapping syntax into another context keeps its structure and, scope
+/// for scope, its sets, pending changes included: each scope maps to one
+/// fresh scope of the same kind, and an identified scope to the one given.
+#[test]
+fn remapping_keeps_structure_and_scopes() {
+    use vali_syntax::{Exposed, Remap, ScopeContext, ScopeKind, SourceId, Syntax};
+    let mut from = ScopeContext::new();
+    let core = from.new_scope(ScopeKind::Library).unwrap();
+    let library = from.new_scope(ScopeKind::Library).unwrap();
+    let step = from.new_scope(ScopeKind::Macro).unwrap();
+    let top = from.intern(&[core, library]).unwrap();
+    let datum = &vali_syntax::read("(x (y))", SourceId(0)).datums[0];
+    // The flip is pending below the list's own node.
+    let stx = Syntax::from_datum(datum, top)
+        .flip(&mut from, step)
+        .unwrap();
+
+    let mut to = ScopeContext::new();
+    let to_core = to.new_scope(ScopeKind::Library).unwrap();
+    let _ = to.new_scope(ScopeKind::Other).unwrap();
+    let mut remap = Remap::new();
+    remap.identify(core, to_core);
+    let copy = stx.remap(&mut remap, &from, &mut to).unwrap();
+
+    let Exposed::List { items, .. } = copy.expose(&mut to).unwrap() else {
+        panic!("a list");
+    };
+    let x = &items[0];
+    assert_eq!(x.as_identifier(), Some("x"));
+    let scopes = to.scopes(x.scopes()).to_vec();
+    assert_eq!(scopes.len(), 3);
+    assert!(scopes.contains(&to_core));
+    let kinds: Vec<ScopeKind> = scopes.iter().map(|&s| to.kind(s)).collect();
+    assert!(kinds.contains(&ScopeKind::Macro), "{kinds:?}");
+    assert!(remap.has_met_all(&from, top));
+    // The same scope maps to the same scope wherever it is met.
+    let again = Syntax::from_datum(datum, top)
+        .remap(&mut remap, &from, &mut to)
+        .unwrap();
+    assert!(to.is_subset(again.scopes(), x.scopes()));
+}

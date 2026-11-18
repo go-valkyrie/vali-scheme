@@ -6,7 +6,7 @@
 - **Amended:** 2026-11-17, `syntax-rules` stays built into the expander (item 14)
 - **Amended:** 2026-11-17, the binding table keeps each symbol's entries by the newest scope in their sets, so resolving stays linear in the program (item 2)
 - **Amended:** 2026-11-18, calls to standard procedures become the IR's primitive operations (item 16, ADR 0017)
-- **Amended:** 2026-11-18, as-built note: one scope context still serves a whole build (item 5)
+- **Amended:** 2026-11-18, as built: a scope context per unit, syntax exports remapped into importers, and bindings named apart from any context (item 5)
 - **Related:** 0001 (phasing, determinism, stable scope identities), 0007 (`syntax-case` and the syntax procedures), 0012 (distribution format), 0013 (standalone executables, `eval`), 0014 (spans and macro origins), 0017 (primitive operations)
 
 ## Context
@@ -37,7 +37,9 @@ Syntax objects are values that macros manipulate. Most exist only at expansion t
 ### Representation
 
 5. **Scopes and scope sets are numbered within an expansion context.**
-   - **A context per library expansion.** Expanding a library creates a context, and scopes are numbered from zero within it. The numbers depend only on the library being expanded, so expansion stays deterministic. **As built, until fixed:** one context serves a whole build, so the numbers depend on compile order (ADR 0001 #4).
+   - **A context per library expansion.** Expanding a library creates a context, and scopes are numbered from zero within it. The numbers depend only on the library being expanded, so expansion stays deterministic.
+
+     **As built:** each unit (library, program or `eval`) expands in a context of its own, and when it is finished, its context, macros, compiled syntax and bindings are its *syntax export*. An importer remaps an export into its own context once, as it imports it: macros and compiled syntax first, then every binding whose scopes all came across with them, since a binding with any other scope could never match an identifier the importer sees. Everything is taken in a fixed order, so the scopes made are numbered the same every time. A unit's context starts as a copy of the export of the first library it imports, which is the same remapping with every scope mapped to itself, and saves remapping `(scheme base)` into every unit. Bindings name what they refer to apart from any context: a variable by its unit and name, a macro by the unit that defined it and its number there, so the same macro reached through two imports is one binding and its literals still match. The interaction environment's inputs share one context, set aside while other units expand. Interfaces and exports are Rust values for now; the distribution format will encode them (ADR 0012).
    - **32-bit numbers, checked.** A scope and an interned scope set are each a 32-bit index into their context. Running out is an error, "too many scopes in one expansion", never a wrap-around. One library would need four billion macro steps and binding forms to reach it.
    - **Scope sets are interned and the operations memoised.** Equal sets get the same index, so comparing sets is comparing integers. Adding, flipping and removing a scope are each cached, so the same operation on the same set computes its result once.
    - **Remapping on load.** A stored syntax object's scopes are numbered densely within its artifact. Loading it allocates fresh scopes in the loading context and remaps them (ADR 0001 #7).

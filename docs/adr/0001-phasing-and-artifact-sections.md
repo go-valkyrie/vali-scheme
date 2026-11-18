@@ -7,7 +7,7 @@
 - **Amended:** 2026-11-16, the runtime's own sources of non-determinism, and how each is closed
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
 - **Amended:** 2026-11-18, the interface section records the library's ABI version, and offers no bodies for inlining: inlining across libraries happens at link time (item 5, ADRs 0017 and 0018)
-- **Amended:** 2026-11-18, as-built notes: fresh expansion-time instances per unit and phase, and numbering per unit; scopes still shared (items 2 and 4)
+- **Amended:** 2026-11-18, as-built notes: fresh expansion-time instances per unit and phase, and numbering and scope contexts per unit (items 2 and 4)
 - **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces), 0017 (link-time optimisation), 0018 (library ABI versions)
 
 ## Context
@@ -32,7 +32,7 @@ R6RS lets an import say at which phase it is needed (`(import (for (lib) expand)
 3. **Static information on bindings** (Chez's `define-property`, Racket's `syntax-local-value`) is serialisable data: syntax objects, symbols, numbers, strings, and lists, vectors and records of those. It cannot hold procedures or other run-time values.
 4. **Expansion is deterministic.** Fresh names, scope identities and any iteration order that reaches the output come from the library being expanded, never from global counters, addresses or the time.
 
-   **As built:** fresh names and the indices of compiled patterns, templates and quoted syntax are numbered within each unit, and code names its unit beside each index; a `cond-expand` in a body asks the loader, before expansion, whether a library exists. **Until fixed:** scopes are still numbered across the whole build, in one scope context (ADR 0015 #5).
+   **As built:** fresh names and the indices of compiled patterns, templates and quoted syntax are numbered within each unit, and code names its unit beside each index; a `cond-expand` in a body asks the loader, before expansion, whether a library exists. Each unit also expands in a scope context of its own (ADR 0015 #5).
 
    Expansion-time code can only reach the outside world through capabilities and bridges (ADR 0009), and its own state starts fresh for each library (item 2). What remains is non-determinism inside the language runtime itself, which ordinary Scheme code can observe with no I/O at all. The runtime closes each such leak:
    - **Hash tables iterate in insertion order.** Neither a per-process hash seed nor an `eq?` table's address-based hashing can change the order. Seeds may still be randomised against hash flooding, since the order no longer depends on them.

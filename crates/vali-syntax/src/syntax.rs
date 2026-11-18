@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use crate::binding::{BindingTable, Phase, Resolution};
-use crate::scope::{Scope, ScopeContext, ScopeSetId, TooManyScopes};
+use crate::scope::{Remap, Scope, ScopeContext, ScopeSetId, TooManyScopes};
 use crate::{Datum, DatumKind, Origin, Span};
 
 /// A syntax object.
@@ -130,6 +130,57 @@ pub enum Exposed<'a> {
 }
 
 impl Syntax {
+    /// This syntax object, made in `from`, with its scopes mapped into
+    /// `to` by `remap`, pending changes included. Spans and origins are
+    /// kept.
+    pub fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> Result<Syntax, TooManyScopes> {
+        let scopes = remap.set(from, to, self.scopes)?;
+        let pending = match &self.pending {
+            None => None,
+            Some(changes) => {
+                let mut mapped = changes
+                    .iter()
+                    .map(|&(scope, effect)| Ok((remap.scope(from, to, scope)?, effect)))
+                    .collect::<Result<Vec<_>, TooManyScopes>>()?;
+                // Pending changes are kept sorted by scope.
+                mapped.sort_by_key(|&(scope, _)| scope);
+                Some(mapped.into())
+            }
+        };
+        let content = match &*self.content {
+            Content::Identifier(name) => Content::Identifier(name.clone()),
+            Content::List { items, tail } => Content::List {
+                items: items
+                    .iter()
+                    .map(|item| item.remap(remap, from, to))
+                    .collect::<Result<_, _>>()?,
+                tail: tail
+                    .as_ref()
+                    .map(|tail| tail.remap(remap, from, to))
+                    .transpose()?,
+            },
+            Content::Vector(items) => Content::Vector(
+                items
+                    .iter()
+                    .map(|item| item.remap(remap, from, to))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Content::Atom(datum) => Content::Atom(datum.clone()),
+        };
+        Ok(Syntax {
+            content: Arc::new(content),
+            scopes,
+            pending,
+            span: self.span,
+            origin: self.origin.clone(),
+        })
+    }
+
     fn new(content: Content, scopes: ScopeSetId, span: Span, origin: Option<Arc<Origin>>) -> Self {
         Syntax {
             content: Arc::new(content),

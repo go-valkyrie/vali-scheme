@@ -47,7 +47,7 @@ pub use reader::{
     DatumBuilder, DatumSink, ParsedTree, Read, ReadError, ReadErrorKind, parse_tree, read,
     read_with,
 };
-pub use scope::{Scope, ScopeContext, ScopeKind, ScopeSetId, TooManyScopes};
+pub use scope::{Remap, Scope, ScopeContext, ScopeKind, ScopeSetId, TooManyScopes};
 pub use span::{Location, SourceId, Sources, Span};
 pub use syntax::{Exposed, Syntax, bound_identifier_eq, free_identifier_eq};
 pub use text_size::{TextRange, TextSize};

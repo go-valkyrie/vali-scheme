@@ -24,8 +24,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use vali_syntax::{
-    AlreadyBound, BindingTable, Datum, DatumKind, Exposed, Origin, Phase, Phases, Resolution,
-    Scope, ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax, TooManyScopes,
+    AlreadyBound, BindingTable, Datum, DatumKind, Exposed, Origin, Phase, Phases, Remap,
+    Resolution, Scope, ScopeContext, ScopeKind, ScopeSetId, SourceId, Span, Syntax, TooManyScopes,
     free_identifier_eq,
 };
 
@@ -108,8 +108,9 @@ pub(crate) enum Binding {
     /// A standard procedure implemented in Rust, reached as the global of
     /// that name, and inlined where the compiler can.
     Primitive(String),
-    /// A macro, by number.
-    Macro(usize),
+    /// A macro, by the unit that defined it and its number there: the same
+    /// macro reached through different imports is the same binding.
+    Macro(MacroId),
     /// A REPL's top-level variable: the isolate's global of that name,
     /// bound late, and never inlined.
     Global(String),
@@ -118,12 +119,145 @@ pub(crate) enum Binding {
     PatternVar(VarId, usize),
 }
 
-/// A `syntax-rules` macro.
+/// A macro: the unit that defined it, by its index in the build, and its
+/// number among that unit's macros.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct MacroId {
+    unit: u32,
+    index: u32,
+}
+
+/// A macro, as one unit's context holds it: its own, or a copy of one it
+/// imported, remapped into its context.
+#[derive(Clone)]
 struct Macro {
     name: String,
     transformer: Transformer,
 }
 
+impl Macro {
+    /// This macro, defined in `from`, with its syntax remapped into `to`.
+    fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> std::result::Result<Macro, TooManyScopes> {
+        let transformer = match &self.transformer {
+            Transformer::Rules(clauses) => Transformer::Rules(
+                clauses
+                    .iter()
+                    .map(|c| {
+                        Ok(Clause {
+                            pattern: c.pattern.remap(remap, from, to)?,
+                            template: c.template.remap(remap, from, to)?,
+                            depths: c.depths.clone(),
+                        })
+                    })
+                    .collect::<std::result::Result<_, TooManyScopes>>()?,
+            ),
+            // Its syntax is in its unit's compiled table, remapped with it.
+            Transformer::Procedure(p) => Transformer::Procedure(Procedure {
+                module: p.module.clone(),
+                phase: p.phase,
+                made: None,
+            }),
+        };
+        Ok(Macro {
+            name: self.name.clone(),
+            transformer,
+        })
+    }
+}
+
+/// Each unit's compiled syntax, remapped from `from` into `to`.
+fn remap_compiled(
+    compiled: &Compiled,
+    remap: &mut Remap,
+    from: &ScopeContext,
+    to: &mut ScopeContext,
+) -> std::result::Result<Compiled, TooManyScopes> {
+    Ok(Compiled {
+        quoted: compiled
+            .quoted
+            .iter()
+            .map(|s| s.remap(remap, from, to))
+            .collect::<std::result::Result<_, _>>()?,
+        patterns: compiled
+            .patterns
+            .iter()
+            .map(|(p, n)| Ok((p.remap(remap, from, to)?, *n)))
+            .collect::<std::result::Result<_, TooManyScopes>>()?,
+        templates: compiled
+            .templates
+            .iter()
+            .map(|(t, d)| Ok((t.remap(remap, from, to)?, d.clone())))
+            .collect::<std::result::Result<_, TooManyScopes>>()?,
+    })
+}
+
+/// The scope context a unit expands in, and what is bound there: its own
+/// definitions, and what its imports brought, remapped into it (ADR 0015
+/// #5). A finished unit's state is its syntax export.
+#[derive(Clone)]
+struct ContextState {
+    context: ScopeContext,
+    table: BindingTable<String, Binding>,
+    /// The scope of the core forms, and its set.
+    core_scope: Scope,
+    core: ScopeSetId,
+    macros: HashMap<MacroId, Macro>,
+    compiled: phase::CompiledByUnit,
+    /// The units whose syntax exports are remapped in.
+    imported: HashSet<usize>,
+    /// The number of the next macro the unit defines.
+    next_macro: u32,
+}
+
+impl ContextState {
+    /// A fresh context, with the core forms bound.
+    fn fresh() -> Result<ContextState> {
+        let mut context = ScopeContext::new();
+        let core_scope = context.new_scope(ScopeKind::Library).map_err(too_many)?;
+        let core = context.intern(&[core_scope]).map_err(too_many)?;
+        let mut table = BindingTable::new();
+        for &(name, form) in CORE {
+            table
+                .bind(
+                    &context,
+                    name.to_owned(),
+                    core,
+                    Phases::All,
+                    Binding::Core(form),
+                )
+                .map_err(|_| CompileError {
+                    message: format!("{name} is bound twice"),
+                    span: None,
+                    location: None,
+                })?;
+        }
+        Ok(ContextState {
+            context,
+            table,
+            core_scope,
+            core,
+            macros: HashMap::new(),
+            compiled: Default::default(),
+            imported: HashSet::new(),
+            next_macro: 0,
+        })
+    }
+}
+
+/// Who the live context belongs to.
+#[derive(Clone, Copy, Debug)]
+enum ContextOwner {
+    Unit(usize),
+    /// The interaction environment, whose inputs share one context.
+    Repl,
+}
+
+#[derive(Clone)]
 enum Transformer {
     /// `syntax-rules`, run in Rust.
     Rules(Vec<Clause>),
@@ -134,6 +268,7 @@ enum Transformer {
 /// A transformer written in Scheme: compiled code, which each unit's
 /// expansion runs afresh in its own isolate for the phase the transformer
 /// runs at, so no expansion sees what another left behind (ADR 0001 #2).
+#[derive(Clone)]
 struct Procedure {
     /// The module whose body evaluates to the procedure.
     module: Module,
@@ -151,6 +286,7 @@ struct PhaseIsolate {
     units: HashSet<usize>,
 }
 
+#[derive(Clone)]
 struct Clause {
     pattern: Pattern,
     template: Template,
@@ -217,6 +353,10 @@ struct Unit {
     /// environment: its top-level definitions are REPL globals, and an
     /// unbound identifier names one.
     repl: bool,
+    /// Its syntax export, once it is finished: its context, and the
+    /// macros, compiled syntax and bindings there, which an importer
+    /// remaps into its own context. None for a native library.
+    syntax: Option<Arc<ContextState>>,
 }
 
 /// The isolate global a REPL's top-level `name` is. REPL globals have
@@ -231,8 +371,19 @@ pub(crate) struct Expander {
     pub(crate) lambdas: Vec<Lambda>,
     context: ScopeContext,
     table: BindingTable<String, Binding>,
-    /// The scopes of the core forms.
+    /// The scope of the core forms, and its set.
+    core_scope: Scope,
     core: ScopeSetId,
+    /// The units whose syntax exports are remapped into the context.
+    imported_syntax: HashSet<usize>,
+    /// The number of the next macro the current unit defines.
+    next_macro: u32,
+    /// Who the live context (`context`, `table`, `macros` and
+    /// `compiled`) belongs to.
+    owner: Option<ContextOwner>,
+    /// The interaction environment's context, set aside while another
+    /// unit expands.
+    repl_state: Option<ContextState>,
     /// The scopes of the current unit's own forms.
     top: ScopeSetId,
     /// The units compiled so far, the current one last.
@@ -248,7 +399,8 @@ pub(crate) struct Expander {
     /// Suffixes for REPL globals that macros introduce, which, unlike a
     /// unit's own variables, every REPL input shares.
     repl_fresh: usize,
-    macros: Vec<Macro>,
+    /// The macros of the live context, its own and imported copies.
+    macros: HashMap<MacroId, Macro>,
     /// Macro uses in expressions being expanded, one inside another.
     depth: usize,
     /// The isolates expansion-time code runs in for the unit being
@@ -283,31 +435,24 @@ pub(crate) struct Expander {
 
 impl Expander {
     pub(crate) fn new() -> Result<Expander> {
-        let mut context = ScopeContext::new();
-        let core_scope = context.new_scope(ScopeKind::Library).map_err(too_many)?;
-        let core = context.intern(&[core_scope]).map_err(too_many)?;
-        let mut table = BindingTable::new();
-        for &(name, form) in CORE {
-            table
-                .bind(
-                    &context,
-                    name.to_owned(),
-                    core,
-                    Phases::All,
-                    Binding::Core(form),
-                )
-                .map_err(|_| CompileError {
-                    message: format!("{name} is bound twice"),
-                    span: None,
-                    location: None,
-                })?;
-        }
+        let ContextState {
+            context,
+            table,
+            core_scope,
+            core,
+            ..
+        } = ContextState::fresh()?;
         let expander = Expander {
             vars: Vec::new(),
             lambdas: Vec::new(),
             context,
             table,
+            core_scope,
             core,
+            imported_syntax: HashSet::new(),
+            next_macro: 0,
+            owner: None,
+            repl_state: None,
             top: core,
             units: Vec::new(),
             by_name: HashMap::new(),
@@ -318,7 +463,7 @@ impl Expander {
             stack: Vec::new(),
             fresh: 0,
             repl_fresh: 0,
-            macros: Vec::new(),
+            macros: HashMap::new(),
             depth: 0,
             phases: Vec::new(),
             generation: 0,
@@ -460,6 +605,7 @@ impl Expander {
         if self.natives.iter().any(|(i, _)| i == identity) {
             return self.native_library(identity, form);
         }
+        self.start_context(false, &form.imports)?;
         self.next_own = own;
         let scope = self.scope(ScopeKind::Library)?;
         let top = self.context.intern(&[scope]).map_err(too_many)?;
@@ -515,8 +661,154 @@ impl Expander {
             module: Some(module.clone()),
             own: false,
             repl: false,
+            syntax: None,
         });
         Ok(module)
+    }
+
+    /// Starts the context the next unit expands in, which imports
+    /// `imports`: for a REPL's input, the interaction environment's own;
+    /// otherwise a copy of the syntax export of the first library it
+    /// imports that has one, which is remapping it with every scope mapped
+    /// to itself, or a fresh context. The state of the unit that had the
+    /// live context becomes its syntax export; the REPL's is set aside for
+    /// its next input.
+    fn start_context(&mut self, repl: bool, imports: &[ImportSet]) -> Result<()> {
+        if repl && matches!(self.owner, Some(ContextOwner::Repl)) {
+            // The REPL's next input, with nothing in between.
+            return Ok(());
+        }
+        let placeholder = ContextState {
+            context: ScopeContext::new(),
+            table: BindingTable::new(),
+            core_scope: self.core_scope,
+            core: self.core,
+            macros: HashMap::new(),
+            compiled: Default::default(),
+            imported: HashSet::new(),
+            next_macro: 0,
+        };
+        let state = self.swap_state(placeholder);
+        match self.owner {
+            Some(ContextOwner::Unit(unit)) => self.units[unit].syntax = Some(Arc::new(state)),
+            Some(ContextOwner::Repl) => self.repl_state = Some(state),
+            None => {}
+        }
+        let seed = imports.iter().find_map(|set| {
+            let unit = *self.by_name.get(set.library())?;
+            self.units[unit].syntax.as_ref().map(|s| (unit, s))
+        });
+        let next = if repl && self.repl_state.is_some() {
+            self.repl_state.take().expect("checked")
+        } else if let Some((unit, export)) = seed {
+            let mut copy = ContextState::clone(export);
+            copy.imported.insert(unit);
+            copy.next_macro = 0;
+            // Transformers are made afresh in each unit's isolates.
+            for m in copy.macros.values_mut() {
+                if let Transformer::Procedure(p) = &mut m.transformer {
+                    p.made = None;
+                }
+            }
+            copy
+        } else {
+            ContextState::fresh()?
+        };
+        self.swap_state(next);
+        self.owner = Some(if repl {
+            ContextOwner::Repl
+        } else {
+            ContextOwner::Unit(self.units.len())
+        });
+        Ok(())
+    }
+
+    /// Makes `state` the live context, returning the one it replaces.
+    fn swap_state(&mut self, state: ContextState) -> ContextState {
+        ContextState {
+            context: std::mem::replace(&mut self.context, state.context),
+            table: std::mem::replace(&mut self.table, state.table),
+            core_scope: std::mem::replace(&mut self.core_scope, state.core_scope),
+            core: std::mem::replace(&mut self.core, state.core),
+            macros: std::mem::replace(&mut self.macros, state.macros),
+            compiled: std::mem::replace(&mut self.compiled, state.compiled),
+            imported: std::mem::replace(&mut self.imported_syntax, state.imported),
+            next_macro: std::mem::replace(&mut self.next_macro, state.next_macro),
+        }
+    }
+
+    /// Remaps the syntax export of `unit`, which the current unit imports,
+    /// into the current context, once: its macros and compiled syntax,
+    /// then every binding whose scopes all came across with them. A binding
+    /// with any other scope could never match an identifier the importer
+    /// sees. Everything is taken in a fixed order, so the scopes it makes
+    /// are numbered the same every time (ADR 0001 #4).
+    fn import_syntax(&mut self, unit: usize) -> Result<()> {
+        if !self.imported_syntax.insert(unit) {
+            return Ok(());
+        }
+        let Some(export) = self.units[unit].syntax.clone() else {
+            return Ok(());
+        };
+        let from = &export.context;
+        let mut remap = Remap::new();
+        remap.identify(export.core_scope, self.core_scope);
+        let mut ids: Vec<MacroId> = export.macros.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            if !self.macros.contains_key(&id) {
+                let copy = export.macros[&id]
+                    .remap(&mut remap, from, &mut self.context)
+                    .map_err(too_many)?;
+                self.macros.insert(id, copy);
+            }
+        }
+        let mut names: Vec<&String> = export.compiled.keys().collect();
+        names.sort();
+        for name in names {
+            if !self.compiled.contains_key(name) {
+                let copy =
+                    remap_compiled(&export.compiled[name], &mut remap, from, &mut self.context)
+                        .map_err(too_many)?;
+                self.compiled.insert(name.clone(), copy);
+            }
+        }
+        let mut entries: Vec<_> = export
+            .table
+            .entries()
+            .filter(|(_, _, _, binding)| {
+                !matches!(binding, Binding::Local(_) | Binding::PatternVar(..))
+            })
+            .collect();
+        entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        for (symbol, scopes, phases, binding) in entries {
+            if !remap.has_met_all(from, scopes) {
+                continue;
+            }
+            let scopes = remap
+                .set(from, &mut self.context, scopes)
+                .map_err(too_many)?;
+            // Bound already, the same way, through another import.
+            let _ = self.table.bind(
+                &self.context,
+                symbol.clone(),
+                scopes,
+                phases.clone(),
+                binding.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Notes `m`, a macro the current unit defines, and returns its name.
+    fn add_macro(&mut self, m: Macro) -> MacroId {
+        let id = MacroId {
+            unit: u32::try_from(self.units.len() - 1).expect("at most 2^32 units"),
+            index: self.next_macro,
+        };
+        self.next_macro += 1;
+        self.macros.insert(id, m);
+        id
     }
 
     /// Expands and compiles a program. With imports, it sees only what it
@@ -532,6 +824,7 @@ impl Expander {
         body: &[vali_syntax::Datum],
         internal: bool,
     ) -> Result<Module> {
+        self.start_context(false, imports)?;
         self.next_own = internal;
         let span = body.first().map_or(
             Span {
@@ -560,6 +853,7 @@ impl Expander {
         imports: &[ImportSet],
         body: &[vali_syntax::Datum],
     ) -> Result<Module> {
+        self.start_context(true, imports)?;
         let span = body.first().map_or(
             Span {
                 source: SourceId(0),
@@ -649,6 +943,7 @@ impl Expander {
             module: None,
             own: std::mem::take(&mut self.next_own),
             repl,
+            syntax: None,
         });
         self.top = top;
         for set in imports {
@@ -807,6 +1102,10 @@ impl Expander {
                 span,
             ));
         }
+        // Its macros, and what they refer to, come across first.
+        if let Some(&unit) = self.by_name.get(set.library()) {
+            self.import_syntax(unit)?;
+        }
         for (name, binding) in self.import_bindings(set, span)? {
             match self.table.bind(
                 &self.context,
@@ -906,15 +1205,14 @@ impl Expander {
     // Macros.
 
     /// Compiles a transformer, `(syntax-rules ...)`, for the macro `name`.
-    fn transformer(&mut self, spec: &Syntax, name: &str) -> Result<usize> {
+    fn transformer(&mut self, spec: &Syntax, name: &str) -> Result<MacroId> {
         let Some((Core::SyntaxRules, items)) = self.core_form(spec)? else {
             let procedure = self.procedure(spec, name)?;
-            self.macros.push(Macro {
+            let m = self.add_macro(Macro {
                 name: name.to_owned(),
                 transformer: Transformer::Procedure(procedure),
             });
             // Made now, so a transformer that fails is an error here.
-            let m = self.macros.len() - 1;
             self.made_transformer(m, spec.span())?;
             return Ok(m);
         };
@@ -992,11 +1290,10 @@ impl Expander {
                 depths: vars.depths(),
             });
         }
-        self.macros.push(Macro {
+        Ok(self.add_macro(Macro {
             name: name.to_owned(),
             transformer: Transformer::Rules(compiled),
-        });
-        Ok(self.macros.len() - 1)
+        }))
     }
 
     /// Expands and compiles a transformer written in Scheme, which runs at
@@ -1019,8 +1316,8 @@ impl Expander {
     /// made in the current unit's isolate for its phase unless it was
     /// already: the libraries it uses are instantiated there afresh, then
     /// its module runs.
-    fn made_transformer(&mut self, m: usize, span: Span) -> Result<Handle> {
-        let Transformer::Procedure(procedure) = &self.macros[m].transformer else {
+    fn made_transformer(&mut self, m: MacroId, span: Span) -> Result<Handle> {
+        let Transformer::Procedure(procedure) = &self.macros[&m].transformer else {
             unreachable!("only procedures are made");
         };
         if let Some((generation, made)) = &procedure.made
@@ -1029,7 +1326,7 @@ impl Expander {
             return Ok(made.clone());
         }
         let (module, phase) = (procedure.module.clone(), procedure.phase);
-        let name = self.macros[m].name.clone();
+        let name = self.macros[&m].name.clone();
         let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), span);
         for variable in &module.variables {
             if let Link::Imported(identity) = &variable.link
@@ -1047,7 +1344,12 @@ impl Expander {
                 span,
             ));
         }
-        let Transformer::Procedure(procedure) = &mut self.macros[m].transformer else {
+        let Transformer::Procedure(procedure) = &mut self
+            .macros
+            .get_mut(&m)
+            .expect("a macro of this unit's context")
+            .transformer
+        else {
             unreachable!("as above");
         };
         procedure.made = Some((self.generation, made.clone()));
@@ -1107,14 +1409,14 @@ impl Expander {
     /// expander's scopes for the syntax procedures.
     fn run_transformer(
         &mut self,
-        m: usize,
+        m: MacroId,
         phase: usize,
         procedure: &Handle,
         input: Syntax,
         form: &Syntax,
         origin: Arc<Origin>,
     ) -> Result<Syntax> {
-        let name = self.macros[m].name.clone();
+        let name = self.macros[&m].name.clone();
         let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), form.span());
         let shared = Shared {
             context: std::mem::replace(&mut self.context, ScopeContext::new()),
@@ -1205,7 +1507,7 @@ impl Expander {
     /// `chain` is how many macro steps produced `form` in a body.
     fn apply_macro(
         &mut self,
-        m: usize,
+        m: MacroId,
         form: &Syntax,
         use_site: Option<Scope>,
         chain: usize,
@@ -1214,7 +1516,7 @@ impl Expander {
             return Err(error(
                 format!(
                     "{}: too many macro steps; does the macro expand into itself forever?",
-                    self.macros[m].name
+                    self.macros[&m].name
                 ),
                 form.span(),
             ));
@@ -1225,11 +1527,11 @@ impl Expander {
             input = self.add(&input, use_site)?;
         }
         let origin = Arc::new(Origin {
-            macro_name: self.macros[m].name.as_str().into(),
+            macro_name: self.macros[&m].name.as_str().into(),
             use_site: form.span(),
             parent: form.origin().cloned(),
         });
-        if let Transformer::Procedure(procedure) = &self.macros[m].transformer {
+        if let Transformer::Procedure(procedure) = &self.macros[&m].transformer {
             let phase = procedure.phase;
             let procedure = self.made_transformer(m, form.span())?;
             let output = self.run_transformer(m, phase, &procedure, input, form, origin)?;
@@ -1239,7 +1541,7 @@ impl Expander {
         let same = |cx: &ScopeContext, a: &Syntax, b: &Syntax| {
             free_identifier_eq(cx, table, Phase(0), a, b)
         };
-        let mac = &self.macros[m];
+        let mac = &self.macros[&m];
         let Transformer::Rules(clauses) = &mac.transformer else {
             unreachable!("procedures were handled above")
         };
@@ -1268,7 +1570,7 @@ impl Expander {
     }
 
     /// Expands a macro use as an expression.
-    fn macro_expr(&mut self, m: usize, form: &Syntax, name: Option<&str>) -> Result<Expr> {
+    fn macro_expr(&mut self, m: MacroId, form: &Syntax, name: Option<&str>) -> Result<Expr> {
         let output = self.apply_macro(m, form, None, 0)?;
         self.depth += 1;
         let result = match name {

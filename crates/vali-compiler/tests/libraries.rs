@@ -485,3 +485,34 @@ fn cond_expand_in_a_body_asks_the_loader() {
     );
     assert_eq!(result.unwrap(), "(present absent)");
 }
+
+/// Each library expands in a context of its own, and an importer remaps
+/// the macros it imports into its own (ADR 0015 #5). The same macro
+/// reached through two imports is still one binding, so a literal such as
+/// `else`, written by the user and matched by a macro another library's
+/// macro expands into, still matches.
+#[test]
+fn macros_work_across_library_contexts() {
+    check(&[(
+        &format!(
+            "(define-library (my-cond)
+               (import {BASE})
+               (export my-cond)
+               (begin
+                 (define-syntax my-cond
+                   (syntax-rules () ((_ clause ...) (cond clause ...))))))
+             (define-library (wrapped)
+               (import {BASE} (my-cond))
+               (export twice)
+               (begin
+                 (define-syntax twice
+                   (syntax-rules ()
+                     ((_ e) (let ((v e)) (my-cond ((pair? v) (list v v)) (else (list v)))))))))
+             (import {BASE} (my-cond) (wrapped))
+             (list (my-cond (#f 1) (else 2))
+                   (twice 3)
+                   (twice '(4)))"
+        ),
+        "(2 (3) ((4) (4)))",
+    )]);
+}

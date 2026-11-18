@@ -171,6 +171,17 @@ impl<S: Eq + Hash, B> BindingTable<S, B> {
         });
     }
 
+    /// Every entry: its symbol, scope set, phases and binding, in no
+    /// particular order.
+    pub fn entries(&self) -> impl Iterator<Item = (&S, ScopeSetId, &Phases, &B)> {
+        self.entries.iter().flat_map(|(symbol, by_key)| {
+            by_key
+                .values()
+                .flatten()
+                .map(move |e| (symbol, e.scopes, &e.phases, &e.binding))
+        })
+    }
+
     /// What `symbol` with `scopes` refers to at `phase`.
     pub fn resolve<Q>(
         &self,

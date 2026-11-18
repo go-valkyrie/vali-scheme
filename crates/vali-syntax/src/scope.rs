@@ -298,3 +298,67 @@ mod tests {
         assert_eq!(cx.scope_count(), 3);
     }
 }
+
+/// Maps the scopes of one context into another, each to a fresh scope of
+/// the same kind the first time it is met, so syntax made in one
+/// expansion context can be used in another (ADR 0015 #5): a library's
+/// macros in an importer's context, or stored syntax as it loads.
+#[derive(Debug, Default)]
+pub struct Remap {
+    scopes: HashMap<Scope, Scope>,
+    sets: HashMap<ScopeSetId, ScopeSetId>,
+}
+
+impl Remap {
+    /// A remapping that has met no scope yet.
+    pub fn new() -> Remap {
+        Remap::default()
+    }
+
+    /// Maps `from` to `to`, an existing scope, rather than a fresh one: the
+    /// scope of the core forms, which every context has.
+    pub fn identify(&mut self, from: Scope, to: Scope) {
+        self.scopes.insert(from, to);
+    }
+
+    /// The scope `scope` of `from` maps to in `to`.
+    pub fn scope(
+        &mut self,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+        scope: Scope,
+    ) -> Result<Scope, TooManyScopes> {
+        if let Some(&mapped) = self.scopes.get(&scope) {
+            return Ok(mapped);
+        }
+        let mapped = to.new_scope(from.kind(scope))?;
+        self.scopes.insert(scope, mapped);
+        Ok(mapped)
+    }
+
+    /// The set `set` of `from` maps to in `to`.
+    pub fn set(
+        &mut self,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+        set: ScopeSetId,
+    ) -> Result<ScopeSetId, TooManyScopes> {
+        if let Some(&mapped) = self.sets.get(&set) {
+            return Ok(mapped);
+        }
+        let scopes = from
+            .scopes(set)
+            .iter()
+            .map(|&s| self.scope(from, to, s))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mapped = to.intern(&scopes)?;
+        self.sets.insert(set, mapped);
+        Ok(mapped)
+    }
+
+    /// Whether every scope of `set` has been met: only then can an
+    /// identifier mapped so far have a set that holds it.
+    pub fn has_met_all(&self, from: &ScopeContext, set: ScopeSetId) -> bool {
+        from.scopes(set).iter().all(|s| self.scopes.contains_key(s))
+    }
+}
