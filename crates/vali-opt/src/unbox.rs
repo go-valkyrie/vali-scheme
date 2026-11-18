@@ -2,11 +2,14 @@
 //!
 //! Lowering boxes every assigned variable. A box can go when nothing
 //! could tell: it is only unboxed and set, never captured by a closure or
-//! passed anywhere, and no call that might capture a continuation happens
-//! in its scope, where re-entering that continuation would copy the frame
-//! and with it a value the box would have shared. For now any non-tail
-//! call in its scope keeps a box, which is more than needed: only a call
-//! the variable is live across must.
+//! passed anywhere, and no call that might capture a continuation could
+//! show the difference. Re-entering a continuation copies the frame, and
+//! with it the value the variable had when the call captured it, where a
+//! box would hold the value last set. That differs only when, after the
+//! call returns, the variable may be read before it is set again, and it
+//! may also be set again. So a call keeps a box only when both hold, and
+//! the call may capture: a call to a quiet function the module defines
+//! cannot ([`Known`]).
 //!
 //! Such a box becomes values: reading it is its current value, setting it
 //! makes the value set current, and every join point in its scope takes
@@ -15,24 +18,19 @@
 
 use std::collections::HashMap;
 
-use vali_dist::{Constant, ConstantId, JoinId, Module, Operand, Term, TermId, Value, Var};
+use vali_dist::{
+    Constant, ConstantId, Function, JoinId, Module, Operand, Term, TermId, Value, Var,
+};
 
 use crate::build::{Builder, Field, HOLE, Hole};
+use crate::known::Known;
 
-/// Which boxes of function `n` can go.
-fn candidates(module: &Module, n: usize) -> Vec<Var> {
-    let f = &module.functions[n];
+/// The boxes of `f` that are only unboxed and set.
+fn private(f: &Function) -> Vec<Var> {
     let vars = f.vars as usize;
     let mut boxed = vec![false; vars];
     let mut uses = vec![0u32; vars];
     let mut allowed = vec![0u32; vars];
-    let mut crossed = vec![false; vars];
-    enum Task {
-        Enter(TermId),
-        Exit,
-    }
-    let mut open: Vec<Var> = Vec::new();
-    let mut tasks = vec![Task::Enter(f.body)];
     let count = |xs: &[Operand], uses: &mut Vec<u32>| {
         for x in xs {
             if let Operand::Var(v) = x {
@@ -40,81 +38,206 @@ fn candidates(module: &Module, n: usize) -> Vec<Var> {
             }
         }
     };
-    while let Some(task) = tasks.pop() {
-        let id = match task {
-            Task::Exit => {
-                open.pop();
-                continue;
-            }
-            Task::Enter(id) => id,
-        };
-        match f.term(id) {
-            Term::Let {
-                var, value, body, ..
-            } => {
+    for term in &f.terms {
+        match term {
+            Term::Let { var, value, .. } => {
                 match value {
-                    Value::Box(x) => {
-                        count(&[*x], &mut uses);
-                        boxed[var.0 as usize] = true;
-                        open.push(*var);
-                        tasks.push(Task::Exit);
+                    Value::Box(_) => boxed[var.0 as usize] = true,
+                    Value::Unbox(Operand::Var(b)) | Value::SetBox(Operand::Var(b), _) => {
+                        allowed[b.0 as usize] += 1;
                     }
-                    Value::Unbox(x) => {
-                        count(&[*x], &mut uses);
-                        if let Operand::Var(b) = x {
-                            allowed[b.0 as usize] += 1;
-                        }
-                    }
-                    Value::SetBox(cell, x) => {
-                        count(&[*cell, *x], &mut uses);
-                        if let Operand::Var(b) = cell {
-                            allowed[b.0 as usize] += 1;
-                        }
-                    }
-                    Value::Call { callee, args } => {
-                        count(&[*callee], &mut uses);
-                        count(args, &mut uses);
-                        for b in &open {
-                            crossed[b.0 as usize] = true;
-                        }
-                    }
-                    Value::Operand(x) | Value::SetGlobal(_, x) => count(&[*x], &mut uses),
-                    Value::Primitive { args, .. } => count(args, &mut uses),
-                    Value::Closure { free, .. } => count(free, &mut uses),
-                    Value::Global(_) => {}
-                    Value::SetFree { closure, value, .. } => {
-                        count(&[*closure, *value], &mut uses);
-                    }
+                    _ => {}
                 }
-                tasks.push(Task::Enter(*body));
-            }
-            Term::Join { handler, body, .. } => {
-                tasks.push(Task::Enter(*handler));
-                tasks.push(Task::Enter(*body));
+                count(&crate::operands(value), &mut uses);
             }
             Term::Jump { args, .. } => count(args, &mut uses),
-            Term::If {
-                test,
-                then,
-                otherwise,
-            } => {
-                count(&[*test], &mut uses);
-                tasks.push(Task::Enter(*then));
-                tasks.push(Task::Enter(*otherwise));
-            }
-            Term::Return(x) => count(&[*x], &mut uses),
+            Term::If { test, .. } | Term::Return(test) => count(&[*test], &mut uses),
             Term::TailCall { callee, args, .. } => {
                 count(&[*callee], &mut uses);
                 count(args, &mut uses);
             }
+            Term::Join { .. } => {}
         }
     }
     (0..vars)
-        .filter(|&v| boxed[v] && uses[v] == allowed[v] && !crossed[v])
+        .filter(|&v| boxed[v] && uses[v] == allowed[v])
         .map(|v| Var(v as u32))
         .collect()
 }
 
+/// A set of boxes, by their place in the candidates.
+#[derive(Clone, PartialEq)]
+struct Set(Vec<u64>);
+
+impl Set {
+    fn new(n: usize) -> Set {
+        Set(vec![0; n.div_ceil(64)])
+    }
+
+    fn insert(&mut self, i: usize) {
+        self.0[i / 64] |= 1 << (i % 64);
+    }
+
+    fn remove(&mut self, i: usize) {
+        self.0[i / 64] &= !(1 << (i % 64));
+    }
+
+    fn union(&mut self, other: &Set) {
+        for (a, b) in self.0.iter_mut().zip(&other.0) {
+            *a |= b;
+        }
+    }
+
+    /// Adds every box in both `a` and `b`.
+    fn union_both(&mut self, a: &Set, b: &Set) {
+        for ((x, y), z) in self.0.iter_mut().zip(&a.0).zip(&b.0) {
+            *x |= y & z;
+        }
+    }
+
+    fn contains(&self, i: usize) -> bool {
+        self.0[i / 64] & (1 << (i % 64)) != 0
+    }
+}
+
+/// From the start of a term on: the boxes that may be read before they
+/// are set, and the boxes that may be set.
+#[derive(Clone, PartialEq)]
+struct Flow {
+    live: Set,
+    set: Set,
+}
+
+/// Which boxes of function `n` can go.
+fn candidates(module: &Module, n: usize, known: &Known) -> Vec<Var> {
+    let f = &module.functions[n];
+    let boxes = private(f);
+    if boxes.is_empty() {
+        return boxes;
+    }
+    let mut place = vec![usize::MAX; f.vars as usize];
+    for (i, b) in boxes.iter().enumerate() {
+        place[b.0 as usize] = i;
+    }
+    let of = |x: &Operand| match x {
+        Operand::Var(v) => Some(place[v.0 as usize]).filter(|&i| i != usize::MAX),
+        Operand::Const(_) => None,
+    };
+    let callees = known.callees(module, n);
+    // The terms reached from the body, each after the ones it contains.
+    let mut order = Vec::new();
+    let mut stack = vec![(f.body, false)];
+    while let Some((id, done)) = stack.pop() {
+        if done {
+            order.push(id);
+            continue;
+        }
+        stack.push((id, true));
+        match f.term(id) {
+            Term::Let { body, .. } => stack.push((*body, false)),
+            Term::Join { handler, body, .. } => {
+                stack.push((*handler, false));
+                stack.push((*body, false));
+            }
+            Term::If {
+                then, otherwise, ..
+            } => {
+                stack.push((*then, false));
+                stack.push((*otherwise, false));
+            }
+            Term::Jump { .. } | Term::Return(_) | Term::TailCall { .. } => {}
+        }
+    }
+    let empty = Flow {
+        live: Set::new(boxes.len()),
+        set: Set::new(boxes.len()),
+    };
+    let mut flow = vec![empty.clone(); f.terms.len()];
+    let mut joins = vec![empty.clone(); f.joins as usize];
+    // Each round can only add to the sets, so this ends; a jump to a join
+    // point seen later, or back to a loop, needs another round.
+    loop {
+        let mut changed = false;
+        for &id in &order {
+            let next = match f.term(id) {
+                Term::Let {
+                    var, value, body, ..
+                } => {
+                    let mut next = flow[body.0 as usize].clone();
+                    match value {
+                        Value::Unbox(x) => {
+                            if let Some(i) = of(x) {
+                                next.live.insert(i);
+                            }
+                        }
+                        // Making a box again, in a loop, is a new box;
+                        // counting it as a set is simpler, and safe.
+                        Value::SetBox(x, _) | Value::Box(x) => {
+                            let i = match value {
+                                Value::Box(_) => of(&Operand::Var(*var)),
+                                _ => of(x),
+                            };
+                            if let Some(i) = i {
+                                next.live.remove(i);
+                                next.set.insert(i);
+                            }
+                        }
+                        _ => {}
+                    }
+                    next
+                }
+                Term::Join {
+                    join,
+                    handler,
+                    body,
+                    ..
+                } => {
+                    let handler = &flow[handler.0 as usize];
+                    if joins[join.0 as usize] != *handler {
+                        joins[join.0 as usize] = handler.clone();
+                        changed = true;
+                    }
+                    flow[body.0 as usize].clone()
+                }
+                Term::Jump { join, .. } => joins[join.0 as usize].clone(),
+                Term::If {
+                    then, otherwise, ..
+                } => {
+                    let mut next = flow[then.0 as usize].clone();
+                    next.live.union(&flow[otherwise.0 as usize].live);
+                    next.set.union(&flow[otherwise.0 as usize].set);
+                    next
+                }
+                Term::Return(_) | Term::TailCall { .. } => continue,
+            };
+            flow[id.0 as usize] = next;
+        }
+        if !changed {
+            break;
+        }
+    }
+    // A box is kept by a call that may capture, if after it the box may
+    // be read before it is set, and may be set.
+    let mut kept = Set::new(boxes.len());
+    for &id in &order {
+        if let Term::Let {
+            value: Value::Call { callee, .. },
+            body,
+            ..
+        } = f.term(id)
+            && !known.is_quiet(&callees, *callee)
+        {
+            let after = &flow[body.0 as usize];
+            kept.union_both(&after.live, &after.set);
+        }
+    }
+    boxes
+        .into_iter()
+        .enumerate()
+        .filter(|&(i, _)| !kept.contains(i))
+        .map(|(_, b)| b)
+        .collect()
+}
 /// Each unboxed variable's current value, sorted by variable.
 type Env = Vec<(Var, Operand)>;
 
@@ -137,8 +260,8 @@ fn set(env: &mut Env, b: Var, x: Operand) {
 
 /// Turns the boxes of function `n` that can go into values. Returns
 /// whether any did.
-pub(crate) fn unbox(module: &mut Module, n: usize) -> bool {
-    let boxes = candidates(module, n);
+pub(crate) fn unbox(module: &mut Module, n: usize, known: &Known) -> bool {
+    let boxes = candidates(module, n, known);
     if boxes.is_empty() {
         return false;
     }

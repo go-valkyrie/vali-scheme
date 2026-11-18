@@ -11,10 +11,13 @@
 //!   effect beyond allocating or reading, and join points nothing jumps
 //!   to. Run to a fixed point, at most a few rounds.
 //! - [`unbox`](optimise): assigned variables that need no box become
-//!   values again, threaded through join points (ADR 0017 #5). Runs first.
+//!   values again, threaded through join points (ADR 0017 #5). Runs after
+//!   contification, using what the module's own code shows about which
+//!   calls cannot capture a continuation.
 
 mod build;
 mod contify;
+mod known;
 mod simplify;
 mod unbox;
 
@@ -58,13 +61,18 @@ const ROUNDS: usize = 4;
 
 /// Optimises `module` in place. It stays valid.
 pub fn optimise(module: &mut Module) {
+    // Every function is contified before any is analysed: a function whose
+    // only calls were to its loops calls nothing once they are join points.
     for n in 0..module.functions.len() {
         for _ in 0..CONTIFICATIONS {
             if !contify::contify(module, n) {
                 break;
             }
         }
-        unbox::unbox(module, n);
+    }
+    let known = known::Known::new(module);
+    for n in 0..module.functions.len() {
+        unbox::unbox(module, n, &known);
         for _ in 0..ROUNDS {
             if !simplify::simplify(module, n) {
                 break;

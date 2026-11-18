@@ -65,14 +65,47 @@ fn assigned_variables_need_no_box_without_calls() {
         "(define (count n) (define i 0) (let loop () (if (< i n) (begin (set! i (+ i 1)) (loop)))) i)",
     );
     assert!(!counted.contains("box"), "{counted}");
-    println!("{counted}");
-    // A call in its scope could capture a continuation, which copies the
-    // frame: the box stays.
-    let called = ir("(define (f g) (define i 0) (g) (set! i 1) i)");
-    assert!(called.contains("box"), "{called}");
-    // So does a closure that captures it.
+    // A closure that captures it keeps the box.
     let captured = ir("(define (f) (define i 0) (lambda () (set! i 1) i))");
     assert!(captured.contains("box"), "{captured}");
+}
+
+#[test]
+fn a_call_keeps_a_box_only_if_reentering_it_could_tell() {
+    // (g) could capture a continuation, and re-entering it copies the
+    // frame. i is read after the call and set after it too: the copy
+    // would hold the value from before the set, so the box stays.
+    let kept = ir("(define (f g) (define i 0) (g) (set! i (+ i 1)) i)");
+    assert!(kept.contains("box"), "{kept}");
+    // Set again before it is read: the copied value is never seen.
+    let overwritten = ir("(define (f g) (define i 0) (g) (set! i 1) i)");
+    assert!(!overwritten.contains("box"), "{overwritten}");
+    // Read but never set after the call: the copy is the current value.
+    let unchanged = ir("(define (f g) (define i 0) (set! i 1) (g) i)");
+    assert!(!unchanged.contains("box"), "{unchanged}");
+}
+
+#[test]
+fn calls_to_quiet_procedures_keep_no_box() {
+    // h calls nothing, so calling it captures nothing.
+    let quiet = ir("(define (h x) x) (define (f) (define i 0) (h 1) (set! i (+ i 1)) i)");
+    assert!(!quiet.contains("box"), "{quiet}");
+    // A loop in h is a join point, not a call.
+    let looping = ir(
+        "(define (h n) (let loop ((k n)) (if (= k 0) 0 (loop (- k 1)))))
+         (define (f) (define i 0) (h 3) (set! i (+ i 1)) i)",
+    );
+    assert!(!looping.contains("box"), "{looping}");
+    // h calls something unknown, which could capture.
+    let loud = ir("(define (h g) (g)) (define (f g) (define i 0) (h g) (set! i (+ i 1)) i)");
+    assert!(loud.contains("box"), "{loud}");
+    // h is assigned again, so what it holds is not known.
+    let reassigned =
+        ir("(define (h x) x) (define (f) (define i 0) (h 1) (set! i (+ i 1)) i) (set! h car)");
+    assert!(reassigned.contains("box"), "{reassigned}");
+    // The benchmark that measures this allocates no boxes.
+    let benchmark = ir(include_str!("../../../benchmarks/assigned-loop.scm"));
+    assert!(!benchmark.contains("box"), "{benchmark}");
 }
 
 #[test]

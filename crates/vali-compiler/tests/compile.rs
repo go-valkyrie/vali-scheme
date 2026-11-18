@@ -1855,6 +1855,26 @@ fn continuations() {
            (let ((k (%call/cc (lambda (k) k))))
              (set! n (+ n 1))
              (if (< n 3) (%continue k k) n)))",
+        // The same in a procedure, captured by one it calls: n is read and
+        // set after the call, so it keeps its box.
+        "(define (capture) (%call/cc (lambda (k) k)))
+         (define (run)
+           (define n 0)
+           (define k (capture))
+           (set! n (+ n 1))
+           (if (< n 3) (%continue k k) n))
+         (run)",
+        // Set before it is read after the call, n can live in a slot:
+        // each re-entry sees the value it sets.
+        "(define (capture) (%call/cc (lambda (k) k)))
+         (define (run)
+           (define n 0)
+           (define seen '())
+           (define k (capture))
+           (set! n 5)
+           (set! seen (cons n seen))
+           (if (< (length seen) 3) (%continue k k) seen))
+         (run)",
         // Captured deep enough to chain segments, then re-entered.
         "(define r '())
          (define k2 #f)
@@ -1902,6 +1922,8 @@ fn continuations() {
         "(5 5)",
         "(3 4)",
         "3",
+        "3",
+        "(5 5 5)",
         "(20002 20001 20000)",
         "(100 2)",
         "((caught 7) 2)",
