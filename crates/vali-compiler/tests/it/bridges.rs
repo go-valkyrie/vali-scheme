@@ -405,3 +405,45 @@ fn expansion_safe_functions_run_at_expansion_time() {
         "{error}"
     );
 }
+
+#[test]
+#[should_panic(expected = "rest-first: parameter 1 (Rest) is out of order")]
+fn a_rest_parameter_before_a_required_one_is_rejected() {
+    NativeLibrary::new(&["test", "bad"])
+        .function("rest-first", |r: Rest<i64>, x: i64| r.0.len() as i64 + x);
+}
+
+#[test]
+#[should_panic(expected = "opt-first: parameter 2 (Required) is out of order")]
+fn an_optional_parameter_before_a_required_one_is_rejected() {
+    NativeLibrary::new(&["test", "bad"]).function("opt-first", |o: Option<i64>, s: String| {
+        format!("{o:?} {s}")
+    });
+}
+
+#[test]
+#[should_panic(expected = "two-rests: parameter 1 (Rest) is out of order")]
+fn two_rest_parameters_are_rejected() {
+    NativeLibrary::new(&["test", "bad"]).function("two-rests", |a: Rest<i64>, b: Rest<i64>| {
+        a.0.len() + b.0.len()
+    });
+}
+
+#[test]
+#[should_panic(expected = "counter-bad: parameter 2 (Rest) is out of order")]
+fn a_method_with_rest_before_optional_is_rejected() {
+    NativeLibrary::new(&["test", "bad"]).method(
+        "counter-bad",
+        |_: &Counter, r: Rest<i64>, o: Option<i64>| r.0.len() as i64 + o.unwrap_or(0),
+    );
+}
+
+#[test]
+fn required_then_optional_then_rest_is_accepted() {
+    NativeLibrary::new(&["test", "ok"]).function(
+        "ordered",
+        |a: i64, b: Option<i64>, c: Option<i64>, r: Rest<i64>| {
+            a + b.unwrap_or(0) + c.unwrap_or(0) + r.0.len() as i64
+        },
+    );
+}

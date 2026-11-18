@@ -369,6 +369,35 @@ fn arity_of(kinds: &[ParamKind]) -> Arity {
     }
 }
 
+/// Panics unless `kinds` is required parameters, then optional ones, then at
+/// most one rest parameter: the only order the VM's argument layout
+/// can follow. A library is built once, at start-up, so a signature that
+/// breaks it is a bug in the host, reported as the builder reports others
+/// by panicking.
+#[track_caller]
+fn check_order(name: &str, kinds: &[ParamKind]) {
+    let mut stage = ParamKind::Required;
+    for (i, &kind) in kinds.iter().enumerate() {
+        let rank = |k| match k {
+            ParamKind::Required => 0,
+            ParamKind::Optional => 1,
+            ParamKind::Rest => 2,
+        };
+        let ok = if kind == ParamKind::Rest {
+            i + 1 == kinds.len()
+        } else {
+            rank(kind) >= rank(stage)
+        };
+        assert!(
+            ok,
+            "{name}: parameter {} ({kind:?}) is out of order: required parameters come \
+             first, then optional ones, then at most one rest parameter, last",
+            i + 1,
+        );
+        stage = kind;
+    }
+}
+
 // Conversions.
 
 macro_rules! integers {
@@ -712,7 +741,13 @@ pub mod __private {
     pub use std::any::TypeId;
 
     /// A function's arity, from its parameters' kinds.
-    pub fn arity(kinds: &[ParamKind]) -> Arity {
+    ///
+    /// # Panics
+    ///
+    /// If `kinds` is not in the order [`NativeLibrary`] accepts.
+    #[track_caller]
+    pub fn arity(name: &str, kinds: &[ParamKind]) -> Arity {
+        check_order(name, kinds);
         arity_of(kinds)
     }
 
@@ -911,7 +946,11 @@ fn bad_arg(cx: &dyn Context, bad: BadArg) -> Error {
 /// apart.
 pub trait IntoFunction<M>: Send + Sync + 'static {
     /// Its arity.
-    fn arity() -> Arity;
+    fn arity() -> Arity {
+        arity_of(&Self::kinds())
+    }
+    /// Its parameters' kinds, in order.
+    fn kinds() -> Vec<ParamKind>;
     /// Converts the arguments, calls it, and converts the result.
     ///
     /// # Safety
@@ -924,7 +963,11 @@ pub trait IntoFunction<M>: Send + Sync + 'static {
 /// parameters as for [`IntoFunction`].
 pub trait IntoMethod<T, M>: Send + Sync + 'static {
     /// Its arity, the receiver included.
-    fn arity() -> Arity;
+    fn arity() -> Arity {
+        arity_of(&Self::kinds())
+    }
+    /// Its parameters' kinds, in order, the receiver included.
+    fn kinds() -> Vec<ParamKind>;
     /// Borrows the receiver, converts the other arguments, calls it, and
     /// converts the result.
     ///
@@ -949,8 +992,8 @@ macro_rules! functions {
             R: IntoScheme,
             $($a: Param,)*
         {
-            fn arity() -> Arity {
-                arity_of(&[$($a::KIND),*])
+            fn kinds() -> Vec<ParamKind> {
+                vec![$($a::KIND),*]
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
@@ -969,8 +1012,8 @@ macro_rules! functions {
             R: IntoScheme,
             $($a: Param,)*
         {
-            fn arity() -> Arity {
-                arity_of(&[ParamKind::Required, $($a::KIND),*])
+            fn kinds() -> Vec<ParamKind> {
+                vec![ParamKind::Required, $($a::KIND),*]
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
@@ -1005,8 +1048,8 @@ macro_rules! functions {
             R: IntoScheme,
             $($a: Param,)*
         {
-            fn arity() -> Arity {
-                arity_of(&[ParamKind::Required, $($a::KIND),*])
+            fn kinds() -> Vec<ParamKind> {
+                vec![ParamKind::Required, $($a::KIND),*]
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
@@ -1188,8 +1231,15 @@ impl NativeLibrary {
     }
 
     /// Adds the function `f`, as `name`.
+    ///
+    /// # Panics
+    ///
+    /// If its parameters are not required ones, then optional ones
+    /// ([`Option`]), then at most one [`Rest`], last.
+    #[track_caller]
     pub fn function<M, F: IntoFunction<M>>(self, name: &str, f: F) -> NativeLibrary {
         // SAFETY: the VM calls it with the values it was called with.
+        check_order(name, &F::kinds());
         self.add(
             name,
             F::arity(),
@@ -1198,8 +1248,14 @@ impl NativeLibrary {
     }
 
     /// Adds the method `f`, whose receiver is a `T`, as `name`.
+    ///
+    /// # Panics
+    ///
+    /// As [`NativeLibrary::function`].
+    #[track_caller]
     pub fn method<T: RustObject, M, F: IntoMethod<T, M>>(self, name: &str, f: F) -> NativeLibrary {
         // SAFETY: as above.
+        check_order(name, &F::kinds());
         self.add(
             name,
             F::arity(),

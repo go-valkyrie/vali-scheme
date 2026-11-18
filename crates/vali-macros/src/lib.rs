@@ -185,6 +185,31 @@ fn classify(ty: &Type) -> Param {
     Param::Owned(ty.clone())
 }
 
+/// A parameter's kind as written: `Option<..>` is optional and `Rest<..>` is
+/// the rest, by the last segment of the type's path. A type alias hides
+/// its kind here, but the runtime checks the order again when the library is
+/// built.
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+enum Written {
+    Required,
+    Optional,
+    Rest,
+}
+
+fn written_kind(ty: &Type) -> Written {
+    if let Type::Path(p) = ty
+        && let Some(last) = p.path.segments.last()
+    {
+        if last.ident == "Option" {
+            return Written::Optional;
+        }
+        if last.ident == "Rest" {
+            return Written::Rest;
+        }
+    }
+    Written::Required
+}
+
 /// A function's `#[scheme(...)]` options.
 #[derive(Default)]
 struct Options {
@@ -290,6 +315,8 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
     let mut kinds = Vec::new();
     let mut takes = Vec::new();
     let mut uses = Vec::new();
+    // The last kind seen, by the parameter's written type: see `written_kind`.
+    let mut seen = Written::Required;
     for (i, input) in f.sig.inputs.iter().enumerate() {
         let a = format_ident!("__a{i}");
         let v = format_ident!("__v{i}");
@@ -310,7 +337,29 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
                 if !matches!(&*t.pat, Pat::Ident(_) | Pat::Wild(_)) {
                     return Err(Error::new(t.pat.span(), "expected a parameter name"));
                 }
-                classify(&t.ty)
+                let param = classify(&t.ty);
+                if let Param::Owned(ty) = &param {
+                    let kind = written_kind(ty);
+                    if seen == Written::Rest {
+                        return Err(Error::new(
+                            t.ty.span(),
+                            "no parameter can follow a `Rest` parameter",
+                        ));
+                    }
+                    if kind < seen {
+                        return Err(Error::new(
+                            t.ty.span(),
+                            "a required parameter cannot follow an optional one",
+                        ));
+                    }
+                    seen = kind;
+                } else if seen != Written::Required {
+                    return Err(Error::new(
+                        t.ty.span(),
+                        "a required parameter cannot follow an optional or `Rest` one",
+                    ));
+                }
+                param
             }
         };
         let required = quote!(#rt::bridge::ParamKind::Required);
@@ -358,7 +407,7 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
     Ok(quote! {
         .raw(
             #name,
-            #rt::bridge::__private::arity(&[#(#kinds),*]),
+            #rt::bridge::__private::arity(#name, &[#(#kinds),*]),
             |cx: &mut dyn #rt::bridge::Context, args: &[#rt::Value]| {
                 use #rt::bridge::__private as __p;
                 let mut __next = 0usize;
@@ -381,4 +430,39 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
         )
         #mark
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bridge(impl_block: Tokens) -> Result<Tokens, String> {
+        expand_bridge(Tokens::new(), impl_block).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn parameters_in_order_are_accepted() {
+        bridge(quote! {
+            impl T { fn f(&self, a: i64, b: Option<i64>, c: Option<i64>, r: Rest<i64>) {} }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_required_parameter_after_an_optional_one_is_rejected() {
+        let e = bridge(quote! { impl T { fn f(o: Option<i64>, s: String) {} } }).unwrap_err();
+        assert!(e.contains("cannot follow an optional"), "{e}");
+        let e = bridge(quote! { impl T { fn f(o: Option<i64>, s: &str) {} } }).unwrap_err();
+        assert!(e.contains("cannot follow an optional"), "{e}");
+    }
+
+    #[test]
+    fn a_parameter_after_rest_is_rejected() {
+        let e = bridge(quote! { impl T { fn f(r: Rest<i64>, x: i64) {} } }).unwrap_err();
+        assert!(e.contains("follow a `Rest`"), "{e}");
+        let e = bridge(quote! { impl T { fn f(r: Rest<i64>, o: Option<i64>) {} } }).unwrap_err();
+        assert!(e.contains("follow a `Rest`"), "{e}");
+        let e = bridge(quote! { impl T { fn f(r: Rest<i64>, s: Rest<i64>) {} } }).unwrap_err();
+        assert!(e.contains("follow a `Rest`"), "{e}");
+    }
 }
