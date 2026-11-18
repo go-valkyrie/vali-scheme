@@ -15,6 +15,7 @@ mod continuations;
 mod counting;
 mod cx;
 mod cycles;
+pub mod debug;
 mod epoch;
 mod handle;
 mod no_collection;

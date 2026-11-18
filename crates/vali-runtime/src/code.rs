@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicU32;
 use vali_bytecode::{Arity, Module};
 
 use crate::cx::Cx;
+use crate::debug::{DebugFunction, DebugLayout, DebugStr};
 use crate::handle::Error;
 use crate::strategy::Strategy;
 use crate::value::Value;
@@ -22,8 +23,13 @@ use crate::value::Value;
 /// next allocation.
 pub type NativeFn<S> = fn(&mut Cx<S>, &[Value]) -> Result<Value, Error>;
 
-/// One procedure's code.
+/// One procedure's code. C layout, so that its first field, which
+/// debuggers read, is at its start.
+#[repr(C)]
 pub struct Code<S: Strategy> {
+    /// What Vali's debugger extensions read (`debug`); it points into
+    /// `name` and into the module that owns this descriptor.
+    pub(crate) debug: DebugFunction,
     pub(crate) name: Box<str>,
     pub(crate) arity: Arity,
     pub(crate) kind: Kind<S>,
@@ -86,38 +92,40 @@ impl<S: Strategy> fmt::Debug for Code<S> {
 }
 
 impl<S: Strategy> Code<S> {
-    /// A descriptor for a Rust procedure.
-    pub(crate) fn native(name: &str, arity: Arity, f: NativeFn<S>) -> Code<S> {
+    /// This strategy's layout, as the debugger extensions read it.
+    pub(crate) const DEBUG_LAYOUT: DebugLayout = DebugLayout::of(Cx::<S>::LAYOUT);
+
+    /// A descriptor with no Scheme frames: for a procedure implemented in
+    /// Rust, or one the VM handles itself.
+    fn without_frames(name: &str, arity: Arity, kind: Kind<S>) -> Code<S> {
+        let name: Box<str> = name.into();
         Code {
-            name: name.into(),
+            // The name's bytes stay where they are as the box moves.
+            debug: DebugFunction::native(&Self::DEBUG_LAYOUT, &name),
+            name,
             arity,
-            kind: Kind::Native(f),
+            kind,
             calls: AtomicU32::new(0),
             stub: crate::trampoline::resume(),
         }
     }
 
+    /// A descriptor for a Rust procedure.
+    pub(crate) fn native(name: &str, arity: Arity, f: NativeFn<S>) -> Code<S> {
+        Code::without_frames(name, arity, Kind::Native(f))
+    }
+
     /// A descriptor for a function from a native library.
     pub(crate) fn bridge(f: std::sync::Arc<crate::bridge::NativeFunction>) -> Code<S> {
-        Code {
-            name: f.name().into(),
-            arity: f.arity(),
-            kind: Kind::Bridge(f),
-            calls: AtomicU32::new(0),
-            stub: crate::trampoline::resume(),
-        }
+        let (name, arity) = (f.name().to_owned(), f.arity());
+        Code::without_frames(&name, arity, Kind::Bridge(f))
     }
 
     /// `%catch`, `%call/cc` and `%continue`: procedures the VM handles
     /// itself, since they work on the stack.
     pub(crate) fn control() -> [Code<S>; 3] {
-        let code = |name: &str, arity, kind| Code {
-            name: name.into(),
-            arity: Arity::exactly(arity),
-            kind,
-            calls: AtomicU32::new(0),
-            stub: crate::trampoline::resume(),
-        };
+        let code =
+            |name: &str, arity, kind| Code::without_frames(name, Arity::exactly(arity), kind);
         [
             code("%catch", 2, Kind::Catch),
             code("%call/cc", 1, Kind::Capture),
@@ -135,6 +143,11 @@ impl<S: Strategy> Code<S> {
 pub(crate) struct Loaded<S: Strategy> {
     pub(crate) module: Module,
     pub(crate) functions: Box<[Code<S>]>,
+    /// The module's source names, as the debugger extensions read them;
+    /// they point into `module`. Only debuggers read it, through the
+    /// pointers each function's `DebugFunction` holds.
+    #[expect(dead_code, reason = "kept alive for debuggers, which read it in place")]
+    debug_sources: Box<[DebugStr]>,
 }
 
 impl<S: Strategy> Loaded<S> {
@@ -158,6 +171,8 @@ impl<S: Strategy> Loaded<S> {
         } else {
             None
         };
+        let debug_sources: Box<[DebugStr]> =
+            module.sources.iter().map(|s| DebugStr::of(s)).collect();
         Arc::new_cyclic(|this| {
             let this = this.as_ptr();
             let functions = module
@@ -166,6 +181,18 @@ impl<S: Strategy> Loaded<S> {
                 .zip(names)
                 .enumerate()
                 .map(|(i, (f, name))| Code {
+                    // The name, positions and sources stay where they are as
+                    // their owners move into the `Loaded`.
+                    debug: DebugFunction {
+                        version: crate::debug::DEBUG_VERSION,
+                        slots: u32::from(f.slots),
+                        layout: Self::debug_layout(),
+                        name: DebugStr::of(&name),
+                        positions: f.positions.as_ptr(),
+                        positions_len: f.positions.len(),
+                        sources: debug_sources.as_ptr(),
+                        sources_len: debug_sources.len(),
+                    },
                     name,
                     arity: f.arity,
                     kind: Kind::Bytecode {
@@ -180,8 +207,17 @@ impl<S: Strategy> Loaded<S> {
                         .map_or_else(crate::trampoline::resume, |s| s.resume(i)),
                 })
                 .collect();
-            Loaded { module, functions }
+            Loaded {
+                module,
+                functions,
+                debug_sources,
+            }
         })
+    }
+
+    /// The strategy's layout, for the debugger extensions.
+    fn debug_layout() -> &'static DebugLayout {
+        &Code::<S>::DEBUG_LAYOUT
     }
 }
 

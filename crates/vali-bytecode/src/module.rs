@@ -109,6 +109,8 @@ pub struct Function {
 /// Where an instruction came from: its index in the code, then a source
 /// in the module's table, a line from 1 and a column from 0, counting
 /// Unicode scalar values (ADR 0014 #9).
+/// C layout, so debuggers can read line tables in place.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
     /// The instruction's index.

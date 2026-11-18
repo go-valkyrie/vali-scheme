@@ -35,6 +35,9 @@ fn run_scheme() -> i64 {
     let stop_var = m.variable("stop");
     let mut f = FunctionBuilder::new(Some("f"), Arity::exactly(1), 7, 0);
     let recur = f.label();
+    // Positions as if from source, for the extensions' line tables.
+    let source = m.source("debugger.scm");
+    f.position(source, 1, 0);
     f.emit(I::LoadInt { dst: 2, value: 0 });
     f.branch(
         I::IfNumEq {
@@ -44,6 +47,7 @@ fn run_scheme() -> i64 {
         },
         recur,
     );
+    f.position(source, 2, 4);
     f.emit(I::GetVariable {
         dst: 5,
         variable: stop_var,
@@ -52,6 +56,7 @@ fn run_scheme() -> i64 {
     .emit(I::Call { base: 2, argc: 1 })
     .emit(I::Return { src: 5 });
     f.bind(recur);
+    f.position(source, 3, 4);
     f.emit(I::GetVariable {
         dst: 5,
         variable: f_var,
@@ -209,4 +214,121 @@ fn lldb_backtrace() {
         frames.join("\n")
     );
     assert_eq!(named, 3, "{}", frames.join("\n"));
+}
+
+/// The extensions in `tools/debugger/`.
+fn extension(name: &str) -> String {
+    format!("{}/../../tools/debugger/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// What the extensions show of the four frames of `f` and their slots,
+/// with or without native frames: their names and positions, from the
+/// line table, and their slots as Scheme writes them.
+fn check_scheme_frames(text: &str) {
+    assert!(text.contains("#0 f (debugger.scm:2:5)"), "{text}");
+    for n in 1..=3 {
+        assert!(
+            text.contains(&format!("#{n} f (debugger.scm:3:5)")),
+            "{text}"
+        );
+    }
+    assert!(text.contains("slot 1 = 0"), "{text}");
+    assert!(text.contains("slot 5 = #<procedure stop>"), "{text}");
+    assert!(text.contains("slot 1 = 3"), "{text}");
+    assert!(
+        text.contains("slot 2 = (the header of the call it waits in)"),
+        "{text}"
+    );
+    assert!(text.contains("slot 5 = #<procedure f>"), "{text}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn gdb_shows_scheme_frames() {
+    if std::process::Command::new("gdb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("gdb is not installed; skipping");
+        return;
+    }
+    let output = std::process::Command::new("gdb")
+        .args(["-batch", "-nx", "-ex"])
+        .arg(format!("source {}", extension("vali_gdb.py")))
+        .args([
+            "-ex",
+            "break vali_test_breakpoint",
+            "-ex",
+            "run",
+            "-ex",
+            "vali-bt",
+            "-ex",
+            "vali-frame 0",
+            "-ex",
+            "vali-frame 3",
+            "-ex",
+            "frame function debugger::stop",
+            "-ex",
+            "print args[0]",
+            "-ex",
+            "vali-print 0x17",
+            "--args",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "debugger_child", "--test-threads=1"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    check_scheme_frames(&text);
+    // The pretty-printer shows the value `stop` was called with, and
+    // `vali-print` decodes a raw word: 0x17 is the empty list.
+    assert!(text.contains("= 0\n"), "{text}");
+    assert!(text.contains("\n()\n"), "{text}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn lldb_shows_scheme_frames() {
+    if std::process::Command::new("lldb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("lldb is not installed; skipping");
+        return;
+    }
+    let output = std::process::Command::new("lldb")
+        .args(["--batch", "-o"])
+        .arg(format!(
+            "command script import {}",
+            extension("vali_lldb.py")
+        ))
+        .args([
+            "-o",
+            "breakpoint set -n vali_test_breakpoint",
+            "-o",
+            "process launch -- --exact debugger_child --test-threads=1",
+            "-o",
+            "vali-bt",
+            "-o",
+            "vali-frame 0",
+            "-o",
+            "vali-frame 3",
+            "-o",
+            "up",
+            "-o",
+            "frame variable args.data_ptr[0]",
+            "-o",
+            "vali-print 0x17",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    check_scheme_frames(&text);
+    assert!(text.contains("args.data_ptr[0] = 0"), "{text}");
+    assert!(text.contains("\n()\n"), "{text}");
 }

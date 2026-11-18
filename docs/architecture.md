@@ -72,6 +72,7 @@ docs/bytecode.md              the run-format instruction set (ADR 0005)
 docs/distribution-format.md   the distribution format specification (ADR 0012)
 tests/regressions/            one test per row of the requirements list, failing until fixed
 tests/third-party/<name>/     vendored test suites, each with its licence (ADR 0011)
+tools/debugger/               GDB and LLDB extensions: Scheme backtraces, frames and values (ADR 0004 #6)
 fuzz/                         cargo-fuzz targets, a workspace of its own that needs nightly; CI runs them on a schedule
 bench/                        fib, a list loop, queens, browse
 ```

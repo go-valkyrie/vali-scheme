@@ -7,6 +7,7 @@
 - **Amended:** 2026-11-16, which libraries `eval` keeps, what it brings in, and how its cost is contained (items 11 to 14)
 - **Amended:** 2026-11-17, `eval` as built in tier 0: the compiling expander kept only for programs that import `(scheme eval)`, and evaluated code run through thunks (item 14)
 - **Amended:** 2026-11-17, the interaction environment and the REPL: definitions as REPL globals, apart from the globals libraries link to (item 14)
+- **Amended:** 2026-11-18, a build must be able to include full debug information for the runtime, which Vali's debugger extensions read (Left open)
 - **Amended:** 2026-11-18, `vali build` publishes an application, and runs the optimiser over the whole program; inlining across libraries needs no consent anywhere now (item 9, ADR 0017)
 - **Related:** 0003 (memory-management strategies), 0006 (code generator), 0009 (capabilities), 0010 (static dispatch), 0012 (distribution format), 0015 (run-time syntax objects)
 
@@ -70,7 +71,7 @@ A standalone build has needs that the embedded case doesn't:
 - Whether `vali build` also produces shared and static libraries, for embedding compiled Scheme in programs written in other languages (related to the C ABI in the design overview).
 - What a standalone executable's default host grants: probably what the `vali` tool grants scripts, with build flags to restrict it (ADR 0009).
 - Static or dynamic linking of the system C library, and code signing on macOS and Windows.
-- Native debug information (DWARF, PDB) generated from Vali's debug information (ADR 0014), so system debuggers and profilers can map machine code back to Scheme source. Vali's own debug information is always included unless stripped.
+- Native debug information (DWARF, PDB) generated from Vali's debug information (ADR 0014), so system debuggers and profilers can map machine code back to Scheme source. Vali's own debug information is always included unless stripped. Whatever is decided, a build must be able to include full debug information for the runtime it links, because Vali's debugger extensions read the interpreter's locals through it (ADR 0004 #6).
 
 ## References
 
