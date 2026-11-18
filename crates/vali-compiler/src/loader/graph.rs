@@ -355,70 +355,87 @@ pub(super) async fn fetch_includes(
     includes: &mut Includes,
     available: &mut Available,
 ) {
-    let mut work: Vec<Datum> = forms.to_vec();
-    while let Some(d) = work.pop() {
-        match &d.kind {
-            DatumKind::List { items, tail } => {
-                match head(&d) {
-                    Some(("quote" | "quasiquote" | "quote-syntax", _)) => continue,
-                    // Its clauses' forms are scanned below, as any list's.
-                    Some(("cond-expand", clauses)) => {
-                        let mut asked = Vec::new();
-                        for clause in clauses {
-                            if let DatumKind::List { items, .. } = &clause.kind
-                                && let Some(requirement) = items.first()
-                            {
-                                let _ = crate::features::libraries(requirement, &mut asked);
+    // The forms are walked by reference, so a deeply nested form costs
+    // its size, not its size times its depth. What an included file reads
+    // as is owned, so it waits in `included` for a walk of its own.
+    let mut included: Vec<Vec<Datum>> = Vec::new();
+    let mut first = true;
+    loop {
+        let owned;
+        let roots: &[Datum] = if first {
+            first = false;
+            forms
+        } else if let Some(datums) = included.pop() {
+            owned = datums;
+            &owned
+        } else {
+            break;
+        };
+        let mut work: Vec<&Datum> = roots.iter().collect();
+        while let Some(d) = work.pop() {
+            match &d.kind {
+                DatumKind::List { items, tail } => {
+                    match head(d) {
+                        Some(("quote" | "quasiquote" | "quote-syntax", _)) => continue,
+                        // Its clauses' forms are scanned below, as any list's.
+                        Some(("cond-expand", clauses)) => {
+                            let mut asked = Vec::new();
+                            for clause in clauses {
+                                if let DatumKind::List { items, .. } = &clause.kind
+                                    && let Some(requirement) = items.first()
+                                {
+                                    let _ = crate::features::libraries(requirement, &mut asked);
+                                }
+                            }
+                            for name in asked {
+                                if available.contains_key(&name) {
+                                    continue;
+                                }
+                                let found = is_standard(&name)
+                                    || local.contains(&name)
+                                    || known(&name)
+                                    || matches!(loader.fetch(&name, Some(from)).await, Ok(Some(_)));
+                                available.insert(name, found);
                             }
                         }
-                        for name in asked {
-                            if available.contains_key(&name) {
+                        Some((keyword @ ("include" | "include-ci"), args)) => {
+                            let Ok(paths) = include_paths(keyword, args, d.span) else {
                                 continue;
-                            }
-                            let found = is_standard(&name)
-                                || local.contains(&name)
-                                || known(&name)
-                                || matches!(loader.fetch(&name, Some(from)).await, Ok(Some(_)));
-                            available.insert(name, found);
-                        }
-                    }
-                    Some((keyword @ ("include" | "include-ci"), args)) => {
-                        let Ok(paths) = include_paths(keyword, args, d.span) else {
-                            continue;
-                        };
-                        for path in paths {
-                            let key = (from.as_str().to_owned(), path.to_owned());
-                            if includes.contains_key(&key) {
-                                continue;
-                            }
-                            let text = match loader.include(path, from).await {
-                                Ok(Some(text)) => Ok(text),
-                                Ok(None) => Err(format!("{from} may not read {path}")),
-                                Err(e) => Err(format!("{path}: {e}")),
                             };
-                            // Read only to find what it includes: the
-                            // expander registers it when it reads it.
-                            if let Ok(text) = &text
-                                && let Ok(datums) = read_included(
-                                    text,
-                                    keyword == "include-ci",
-                                    path,
-                                    &mut vali_syntax::Sources::new(),
-                                )
-                            {
-                                work.extend(datums);
+                            for path in paths {
+                                let key = (from.as_str().to_owned(), path.to_owned());
+                                if includes.contains_key(&key) {
+                                    continue;
+                                }
+                                let text = match loader.include(path, from).await {
+                                    Ok(Some(text)) => Ok(text),
+                                    Ok(None) => Err(format!("{from} may not read {path}")),
+                                    Err(e) => Err(format!("{path}: {e}")),
+                                };
+                                // Read only to find what it includes: the
+                                // expander registers it when it reads it.
+                                if let Ok(text) = &text
+                                    && let Ok(datums) = read_included(
+                                        text,
+                                        keyword == "include-ci",
+                                        path,
+                                        &mut vali_syntax::Sources::new(),
+                                    )
+                                {
+                                    included.push(datums);
+                                }
+                                includes.insert(key, text);
                             }
-                            includes.insert(key, text);
+                            continue;
                         }
-                        continue;
+                        _ => {}
                     }
-                    _ => {}
+                    work.extend(items.iter());
+                    work.extend(tail.iter().map(|t| &**t));
                 }
-                work.extend(items.iter().cloned());
-                work.extend(tail.iter().map(|t| (**t).clone()));
+                DatumKind::Vector(items) => work.extend(items.iter()),
+                _ => {}
             }
-            DatumKind::Vector(items) => work.extend(items.iter().cloned()),
-            _ => {}
         }
     }
 }
