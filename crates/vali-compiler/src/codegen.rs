@@ -67,6 +67,10 @@ pub(crate) struct Generator<'a> {
     pub(crate) lambdas: &'a [Lambda],
     pub(crate) loops: &'a HashSet<VarId>,
     pub(crate) module: ModuleBuilder,
+    /// The sources spans are in, which positions are resolved from.
+    pub(crate) sources: &'a vali_syntax::Sources,
+    /// The spans of the calls being compiled, one inside another.
+    pub(crate) calls: Vec<Span>,
 }
 
 fn error(message: impl Into<String>, span: Option<Span>) -> CompileError {
@@ -232,7 +236,10 @@ impl Generator<'_> {
         if let Expr::Call(callee, args, span) = e
             && self.is_general_call(callee, args.len())
         {
-            return self.general_call(f, callee, args, *span);
+            self.enter_call(f, *span);
+            let result = self.general_call(f, callee, args, *span);
+            self.leave_call(f);
+            return result;
         }
         let t = self.alloc(f)?;
         self.compile(f, e, Target::Slot(t))?;
@@ -393,7 +400,12 @@ impl Generator<'_> {
                 self.compile(f, body, target)
             }
             Expr::Letrec(bindings, body) => self.letrec(f, bindings, body, target),
-            Expr::Call(callee, args, span) => self.call(f, callee, args, *span, target),
+            Expr::Call(callee, args, span) => {
+                self.enter_call(f, *span);
+                let result = self.call(f, callee, args, *span, target);
+                self.leave_call(f);
+                result
+            }
         }
     }
 
@@ -450,9 +462,44 @@ impl Generator<'_> {
         Ok(())
     }
 
+    /// Notes the position of a call being compiled: its instructions, and
+    /// what follows up to the next position, came from it.
+    fn enter_call(&mut self, f: &mut Frame, span: Span) {
+        self.calls.push(span);
+        self.mark(f, span);
+    }
+
+    /// The call being compiled is done: what follows is its caller's again,
+    /// such as the call instruction that takes it as an argument.
+    fn leave_call(&mut self, f: &mut Frame) {
+        self.calls.pop();
+        if let Some(&outer) = self.calls.last() {
+            self.mark(f, outer);
+        }
+    }
+
+    /// Notes that the next instructions came from `span`, if its source is
+    /// known (ADR 0014 #9).
+    fn mark(&mut self, f: &mut Frame, span: Span) {
+        if let Some((source, line, column)) = self.sources.line_column(span) {
+            let source = self.module.source(&source);
+            f.b.position(source, line, column);
+        }
+    }
+
     /// Continues if `c` is true; jumps to `otherwise` if not. Comparisons
     /// and type tests of standard procedures become one branch.
     fn test(&mut self, f: &mut Frame, c: &Expr, otherwise: Label) -> Result<()> {
+        if let Expr::Call(_, _, span) = c {
+            self.enter_call(f, *span);
+            let result = self.test_here(f, c, otherwise);
+            self.leave_call(f);
+            return result;
+        }
+        self.test_here(f, c, otherwise)
+    }
+
+    fn test_here(&mut self, f: &mut Frame, c: &Expr, otherwise: Label) -> Result<()> {
         let saved = f.next;
         if let Expr::Call(callee, args, _) = c
             && let Expr::Free(name) = &**callee

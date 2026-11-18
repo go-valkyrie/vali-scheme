@@ -6,7 +6,7 @@ use crate::instruction::{DecodeError, Instruction};
 
 /// The run format's version. Any mismatch means rebuilding from source or
 /// from the distribution artifact (ADR 0005 #9).
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// How many arguments a function takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -100,6 +100,25 @@ pub struct Function {
     pub free: u8,
     /// Its instructions.
     pub code: Vec<u32>,
+    /// Where its instructions came from, sorted by instruction: each
+    /// position covers its instruction and those after it, up to the next
+    /// (ADR 0014 #9).
+    pub positions: Vec<Position>,
+}
+
+/// Where an instruction came from: its index in the code, then a source
+/// in the module's table, a line from 1 and a column from 0, counting
+/// Unicode scalar values (ADR 0014 #9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    /// The instruction's index.
+    pub pc: u32,
+    /// The source, an index into [`Module::sources`].
+    pub source: u16,
+    /// The line, from 1.
+    pub line: u32,
+    /// The column, from 0.
+    pub column: u32,
 }
 
 /// A compiled module: what one library's body compiles to.
@@ -116,6 +135,8 @@ pub struct Module {
     pub exports: Vec<Export>,
     /// Its functions. `closure` refers to them by index.
     pub functions: Vec<Function>,
+    /// The identities of the sources its functions' positions are in.
+    pub sources: Vec<Box<str>>,
     /// The function that runs the module's body.
     pub body: u32,
 }

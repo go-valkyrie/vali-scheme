@@ -44,7 +44,7 @@ pub use counting::{
     PreciseSideCounts,
 };
 pub use cx::Cx;
-pub use handle::{Error, Handle, SchemeError};
+pub use handle::{Error, Frame, Handle, Position, SchemeError};
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
 pub use primitives::{FEATURES, primitive_names};

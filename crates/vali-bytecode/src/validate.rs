@@ -94,6 +94,20 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             );
         }
 
+        let mut last = None;
+        for position in &function.positions {
+            if position.pc as usize >= function.code.len()
+                || last.is_some_and(|l| position.pc <= l)
+                || usize::from(position.source) >= module.sources.len()
+            {
+                return fail(
+                    Some(position.pc as usize),
+                    "positions must be in order, at instructions, in the module's sources".into(),
+                );
+            }
+            last = Some(position.pc);
+        }
+
         let mut starts = HashSet::new();
         let mut decoded = Vec::new();
         let mut pc = 0;

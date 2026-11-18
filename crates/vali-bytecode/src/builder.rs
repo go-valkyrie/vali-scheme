@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::instruction::{Instruction, JUMP_RANGE};
-use crate::module::{Arity, Constant, Export, Function, Link, Module, Variable};
+use crate::module::{Arity, Constant, Export, Function, Link, Module, Position, Variable};
 
 /// A position in a function's code, bound once and used by any number of
 /// branches.
@@ -51,6 +51,7 @@ pub struct FunctionBuilder {
     code: Vec<u32>,
     labels: Vec<Option<usize>>,
     fixups: Vec<Fixup>,
+    positions: Vec<Position>,
 }
 
 impl FunctionBuilder {
@@ -65,7 +66,27 @@ impl FunctionBuilder {
             code: Vec::new(),
             labels: Vec::new(),
             fixups: Vec::new(),
+            positions: Vec::new(),
         }
+    }
+
+    /// Notes that the next instruction, and those after it, came from
+    /// `line` and `column` of the module's source `source`.
+    pub fn position(&mut self, source: u16, line: u32, column: u32) -> &mut Self {
+        let pc = u32::try_from(self.code.len()).expect("a function under 4 G instructions");
+        let position = Position {
+            pc,
+            source,
+            line,
+            column,
+        };
+        match self.positions.last_mut() {
+            // A later position for the same instruction replaces the earlier.
+            Some(last) if last.pc == pc => *last = position,
+            Some(last) if (last.source, last.line, last.column) == (source, line, column) => {}
+            _ => self.positions.push(position),
+        }
+        self
     }
 
     /// A new, unbound label.
@@ -126,12 +147,16 @@ impl FunctionBuilder {
                 self.code[fixup.at + 1] = offset as u32;
             }
         }
+        // A position noted after the last instruction covers nothing.
+        let end = self.code.len();
+        self.positions.retain(|p| (p.pc as usize) < end);
         Ok(Function {
             name: self.name,
             arity: self.arity,
             slots: self.slots,
             free: self.free,
             code: self.code,
+            positions: self.positions,
         })
     }
 }
@@ -145,6 +170,7 @@ pub struct ModuleBuilder {
     variable_index: HashMap<Variable, u16>,
     exports: Vec<Export>,
     functions: Vec<Option<Function>>,
+    sources: Vec<Box<str>>,
 }
 
 impl ModuleBuilder {
@@ -243,6 +269,16 @@ impl ModuleBuilder {
         *slot = Some(function);
     }
 
+    /// The index of the source `identity` in the module's table, added if
+    /// it is not there yet.
+    pub fn source(&mut self, identity: &str) -> u16 {
+        if let Some(i) = self.sources.iter().position(|s| &**s == identity) {
+            return u16::try_from(i).expect("at most 65,536 sources");
+        }
+        self.sources.push(identity.into());
+        u16::try_from(self.sources.len() - 1).expect("at most 65,536 sources")
+    }
+
     /// Adds a function, returning its index.
     pub fn function(&mut self, function: Function) -> u32 {
         self.functions.push(Some(function));
@@ -267,6 +303,7 @@ impl ModuleBuilder {
             variables: self.variables,
             exports: self.exports,
             functions,
+            sources: self.sources,
             body,
         }
     }

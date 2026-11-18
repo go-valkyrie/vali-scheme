@@ -15,9 +15,10 @@ A **module** is what one library's body compiles to:
   - **global**: the isolate's global of that name, which a host defines, before or after the module loads;
 - an **export table**: the names other modules import variables by, each naming an entry of the variable table;
 - a **function table**;
+- a **source table**: the identities of the sources its functions' positions are in;
 - the index of its **body**, a function of no arguments and no free variables.
 
-A **function** has a name, an arity, a frame size in slots, a count of free variables, and its code. An **arity** is a number of required arguments, a number of optional ones, and whether the rest are collected into a list.
+A **function** has a name, an arity, a frame size in slots, a count of free variables, its code, and its positions. An **arity** is a number of required arguments, a number of optional ones, and whether the rest are collected into a list. A function's **positions** say where its instructions came from (ADR 0014 #9): each names an instruction, a source in the module's source table, a line from 1 and a column from 0, counting Unicode scalar values, and covers its instruction and those after it, up to the next. The compiler notes one at each call it compiles, inlined ones included, and the call's own again after its arguments, so a failing instruction, and each frame's waiting call, has the position of the call it belongs to. The validator checks that positions are in order, at instructions, and in the source table.
 
 ## Frames
 

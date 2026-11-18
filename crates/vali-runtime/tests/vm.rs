@@ -474,7 +474,8 @@ fn errors_carry_a_backtrace() {
         panic!("expected a Scheme error");
     };
     assert_eq!(e.message, "car: expected a pair, got 5");
-    assert_eq!(e.backtrace, ["inner", "outer"]);
+    let names: Vec<&str> = e.backtrace.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["inner", "outer"]);
 
     let unbound = cx.variable(id, "unbound").unwrap();
     let Error::Scheme(e) = cx.call(&unbound, &[]).unwrap_err() else {

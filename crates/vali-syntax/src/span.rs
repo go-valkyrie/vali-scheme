@@ -75,6 +75,28 @@ impl Sources {
         SourceId(u32::try_from(self.sources.len()).expect("fewer than 2^32 sources"))
     }
 
+    /// The identity, line (from 1) and column (from 0) of where `span`
+    /// starts: what [`Sources::locate`] gives, without counting characters
+    /// from the start of the source, so asking for every call in a source
+    /// stays linear.
+    pub fn line_column(&self, span: Span) -> Option<(std::sync::Arc<str>, u32, u32)> {
+        let source = self
+            .sources
+            .get(usize::try_from(span.source.0).ok()?.checked_sub(1)?)?;
+        let start = u32::from(span.range.start());
+        let line = source.line_starts.partition_point(|&s| s <= start);
+        let line_start = source.line_starts[line - 1] as usize;
+        let column = source
+            .text
+            .get(line_start..start as usize)
+            .map_or(0, |s| s.chars().count());
+        Some((
+            std::sync::Arc::clone(&source.identity),
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(column).unwrap_or(u32::MAX),
+        ))
+    }
+
     /// Where `span` is, if its source is one of these.
     pub fn locate(&self, span: Span) -> Option<Location> {
         let source = self

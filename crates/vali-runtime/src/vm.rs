@@ -209,6 +209,27 @@ fn constant_number(constant: &Constant) -> Option<vali_num::Number> {
     }
 }
 
+/// Where the instruction at `pc` of `code` came from, if its module says.
+fn position_of<S: Strategy>(code: &Code<S>, pc: usize) -> Option<crate::handle::Position> {
+    let Kind::Bytecode { module, index, .. } = code.kind else {
+        return None;
+    };
+    // SAFETY: a function's descriptor points to the module that owns it,
+    // which outlives it.
+    let module = unsafe { &(*module).module };
+    let function = module.functions.get(index as usize)?;
+    let at = function
+        .positions
+        .partition_point(|p| p.pc as usize <= pc)
+        .checked_sub(1)?;
+    let position = function.positions[at];
+    Some(crate::handle::Position {
+        source: module.sources.get(usize::from(position.source))?.clone(),
+        line: position.line,
+        column: position.column,
+    })
+}
+
 /// FNV-1a: a fixed, deterministic hash for symbol names (ADR 0001 #4).
 fn symbol_hash(name: &str) -> u64 {
     name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
@@ -787,7 +808,7 @@ impl<S: Strategy> Cx<S> {
     /// # Safety
     ///
     /// `fp` must be the frame pointer of a live frame.
-    unsafe fn with_backtrace(&self, mut fp: *mut u64, error: Error) -> Error {
+    unsafe fn with_backtrace(&self, mut fp: *mut u64, mut pc: usize, error: Error) -> Error {
         let Error::Scheme(mut e) = error else {
             return error;
         };
@@ -796,11 +817,17 @@ impl<S: Strategy> Cx<S> {
             // links to its caller, up to the entry frame.
             unsafe {
                 if let Ok(code) = self.procedure_code(slot(fp, 0)) {
-                    e.backtrace.push(code.name().to_owned());
+                    e.backtrace.push(crate::handle::Frame {
+                        name: code.name().to_owned(),
+                        position: position_of(code, pc),
+                    });
                 }
-                if *fp.add(2) == ENTRY {
+                let position = *fp.add(2);
+                if position == ENTRY {
                     break;
                 }
+                // The caller waits at the call before where it resumes.
+                pc = (position_resume(position) as usize).saturating_sub(1);
                 fp = *fp as *mut u64;
             }
         }
@@ -1226,7 +1253,8 @@ impl<S: Strategy> Cx<S> {
         // SAFETY: `top` is the entry frame's frame pointer, inside the
         // segment.
         unsafe { *top = link.host_cfa };
-        let mut pc: usize;
+        // Read before the first instruction only by a backtrace.
+        let mut pc: usize = 0;
         let mut code: *const u32 = std::ptr::null();
         let mut constants: *const Value = std::ptr::null();
         let mut variables: *const Cell = std::ptr::null();
@@ -1407,7 +1435,7 @@ impl<S: Strategy> Cx<S> {
                                 self.release_slots(top, 3, 3 + frame_slots);
                                 return Err(error);
                             }
-                            let error = self.with_backtrace(fp, error);
+                            let error = self.with_backtrace(fp, pc, error);
                             self.release_frames(fp, frame_slots, std::ptr::null_mut());
                             return Err(error);
                         };

@@ -291,7 +291,7 @@ fn errors() {
         panic!("expected a type error");
     };
     assert_eq!(e.message, "car: expected a pair, got 5");
-    assert_eq!(e.backtrace.first().map(String::as_str), Some("f"));
+    assert_eq!(e.backtrace.first().map(|f| f.name.as_str()), Some("f"));
 }
 
 #[test]
@@ -2714,5 +2714,33 @@ fn source_locations() {
     assert!(
         error.to_string().contains("syntax-line: expected syntax"),
         "{error}"
+    );
+}
+
+/// Backtraces say where each frame was: the instruction that failed, then
+/// each caller's call (ADR 0014 #9).
+#[test]
+fn backtraces_have_positions() {
+    let source = "(define (f x)
+  (car x))
+(define (g x)
+  (+ 1 (f x)))
+(list (g 5))";
+    let program =
+        vali_compiler::compile_program(source, &Identity::new("located"), &NoLibraries).unwrap();
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    let id = vali_compiler::load(&mut cx, program).unwrap();
+    let Err(Error::Scheme(e)) = cx.run(id) else {
+        panic!("expected an error");
+    };
+    let frames: Vec<String> = e.backtrace.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        frames,
+        [
+            "f (located:2:3)",
+            "g (located:4:8)",
+            "located#0 (located:5:7)"
+        ]
     );
 }

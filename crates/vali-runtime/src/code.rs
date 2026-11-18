@@ -43,6 +43,8 @@ pub(crate) enum Kind<S: Strategy> {
         code: *const u32,
         /// Its frame size.
         slots: u16,
+        /// Its index in its module, for its positions.
+        index: u32,
     },
     Native(NativeFn<S>),
     /// A Rust function from a native library (ADR 0016), which works with
@@ -163,6 +165,7 @@ impl<S: Strategy> Loaded<S> {
                         module: this,
                         code: f.code.as_ptr(),
                         slots: f.slots,
+                        index: i as u32,
                     },
                     calls: AtomicU32::new(0),
                     stub: stubs

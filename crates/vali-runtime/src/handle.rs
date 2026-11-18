@@ -51,7 +51,7 @@ pub struct SchemeError {
     /// What went wrong.
     pub message: String,
     /// The procedures that were running, innermost first.
-    pub backtrace: Vec<String>,
+    pub backtrace: Vec<Frame>,
     /// What Scheme code raised, if it raised something: an error object
     /// for `error`, or any value for `raise`. Errors from Rust procedures
     /// raise nothing; a handler sees them as error objects with their
@@ -62,6 +62,46 @@ pub struct SchemeError {
     /// procedure (scheme base) registers, where it happened, while an
     /// exception handler is installed.
     pub(crate) escaping: bool,
+}
+
+/// One frame of a backtrace: the procedure running, and where in its
+/// source, if its code carries positions (ADR 0014 #9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    /// The procedure's name.
+    pub name: String,
+    /// The call it was making, or the instruction that failed, in the
+    /// innermost frame.
+    pub position: Option<Position>,
+}
+
+/// `name (source:line:column)`, or the name alone.
+impl fmt::Display for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.position {
+            Some(position) => write!(f, "{} ({position})", self.name),
+            None => f.write_str(&self.name),
+        }
+    }
+}
+
+/// Where an instruction came from: a source's identity, a line from 1 and a
+/// column from 0.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Position {
+    /// The source's identity.
+    pub source: Box<str>,
+    /// The line, from 1.
+    pub line: u32,
+    /// The column, from 0.
+    pub column: u32,
+}
+
+/// `source:line:column`, the column from 1, as compilers print positions.
+impl fmt::Display for Position {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.source, self.line, self.column + 1)
+    }
 }
 
 /// Errors are equal if their messages and backtraces are; what they raised
@@ -130,8 +170,8 @@ impl fmt::Display for Error {
             Error::Exit(code) => write!(f, "the program exited with code {code}"),
             Error::Scheme(e) => {
                 f.write_str(&e.message)?;
-                for name in &e.backtrace {
-                    write!(f, "\n  in {name}")?;
+                for frame in &e.backtrace {
+                    write!(f, "\n  in {frame}")?;
                 }
                 Ok(())
             }

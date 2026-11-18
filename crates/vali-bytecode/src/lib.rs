@@ -21,7 +21,7 @@ pub use instruction::{
     DecodeError, Instruction, JUMP_RANGE, Opcode, Slot, field_d, field_e_signed, fields,
 };
 pub use module::{
-    Arity, Constant, Export, FORMAT_VERSION, Function, Link, Module, Variable, branch_target,
-    disassemble, instructions,
+    Arity, Constant, Export, FORMAT_VERSION, Function, Link, Module, Position, Variable,
+    branch_target, disassemble, instructions,
 };
 pub use validate::{MAX_SLOTS, ValidationError, validate};

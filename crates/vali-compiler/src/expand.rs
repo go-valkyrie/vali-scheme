@@ -584,6 +584,8 @@ impl Expander {
             lambdas: &self.lambdas,
             loops: &loops,
             module: ModuleBuilder::new(name),
+            sources: &self.sources,
+            calls: Vec::new(),
         };
         let mut module = generator.program(body)?;
         for (i, variable) in module.variables.iter().enumerate() {

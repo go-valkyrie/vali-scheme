@@ -4,7 +4,7 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
 - **Amended:** 2026-11-16, lexer details: fold-case moves to the datum sink; strict atoms; Unicode identifiers by R6RS's categories with NFC; directives; shebang lines
-- **Amended:** 2026-11-18, source locations as built: a table of sources per compilation, located compile errors, and `(vali syntax)` with Racket's names and counts (item 6)
+- **Amended:** 2026-11-18, source locations as built: a table of sources per compilation, located compile errors, and `(vali syntax)` with Racket's names and counts (item 6); line tables in run-format bytecode, and backtraces with positions (item 9)
 - **Related:** 0001 (determinism, stable scope identities), 0005 (source spans per instruction), 0007 (syntax in scope), 0009 (source identities), 0015 (scopes and syntax objects)
 
 ## Context
@@ -53,6 +53,8 @@ Scheme's syntax has a few features that a plain table of token patterns cannot h
    - function names, and a line table mapping instructions to positions, compressed as DWARF line programs and the JVM's `LineNumberTable` are;
    - local variable names for each frame slot, with the instructions where each is live (ADR 0005);
    - macro-origin chains, resolved the same way, so a stack trace can name the macro that produced the code and where it was used.
+
+   **As built in tier 0:** each run-format function has a table of positions, sorted by instruction, each a source in the module's table of identities, a line and a column; a position covers instructions up to the next. Codegen notes one at each call, inlined ones included, and the enclosing call's again once a nested call is done. A backtrace frame is the procedure's name and the position of its failing instruction or waiting call: `f (source:3:5)`. The table is plain for now; compressing it, local variable names and macro-origin chains come later.
 
    Error messages, stack traces and debuggers read only this information, never the source. Debug information can be stripped, or shipped as a separate file matched to its artifact by hash, as .NET's PDB files and Apple's dSYM bundles are. It can optionally embed the source text itself, so a debugger can show code that no one has a copy of.
 10. **Top-level forms reparse independently.** A tool can reparse only the top-level form containing an edit and splice the result into the Rowan tree.
