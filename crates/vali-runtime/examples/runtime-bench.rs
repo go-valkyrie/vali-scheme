@@ -1,7 +1,8 @@
 //! First tier-0 benchmarks, on hand-assembled bytecode, under no
-//! collection. Run with `cargo run --release -p vali-runtime --example
-//! bench`. These are the M1 baselines that counting strategies are
-//! measured against (ADR 0003).
+//! collection. Run with
+//! `cargo run --release -p vali-runtime --example runtime-bench`. These
+//! are the M1 baselines that counting strategies are measured against
+//! (ADR 0003).
 
 use std::time::Instant;
 

@@ -1,6 +1,6 @@
-//! The tier-0 benchmarks of `vali-runtime`'s `bench` example, compiled
+//! The tier-0 benchmarks of `vali-runtime`'s `runtime-bench` example, compiled
 //! from Scheme source instead of assembled by hand. Run with
-//! `cargo run --release -p vali-compiler --example bench`, with
+//! `cargo run --release -p vali-compiler --example compiler-bench`, with
 //! `--strategy deferred`, `deferred-side`, `precise` or `precise-side` for
 //! a counting strategy.
 
