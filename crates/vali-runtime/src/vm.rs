@@ -297,6 +297,9 @@ impl<S: Strategy> Cx<S> {
     pub fn load(&mut self, module: Module) -> Result<ModuleId, Error> {
         validate(&module)
             .map_err(|e| Error::scheme(format!("invalid bytecode in {}: {e}", module.name)))?;
+        // Modules link to the primitives as they load, so the first load
+        // installs them.
+        self.install_primitives()?;
         let loaded = Loaded::<S>::new(module);
         let mut constants = Vec::with_capacity(loaded.module.constants.len());
         for constant in &loaded.module.constants {
@@ -1302,20 +1305,6 @@ impl<S: Strategy> Cx<S> {
         let pointer = &*code as *const Code<S>;
         self.natives.push(code);
         Ok(self.closure_raw(pointer, &[])?)
-    }
-
-    /// Binds each function of `library` as a global, by its name, for
-    /// programs that import nothing: otherwise, serve it through the loader.
-    pub fn define_globals(&mut self, library: &crate::bridge::NativeLibrary) -> Result<(), Error> {
-        for f in library.functions() {
-            let closure = self.bridge_procedure(std::sync::Arc::clone(f))?;
-            // SAFETY: the cell belongs to this isolate.
-            unsafe {
-                let cell = self.global_cell(f.name());
-                self.write_cell(cell, closure);
-            }
-        }
-        Ok(())
     }
 
     /// The constants and variables of the loaded module at `module`.

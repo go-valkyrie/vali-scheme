@@ -8,18 +8,6 @@ use vali_runtime::{
     PreciseHeadered, RustObject, Strategy,
 };
 
-struct NoLibraries;
-
-impl Loader for NoLibraries {
-    fn load(
-        &self,
-        _name: &LibraryName,
-        _importer: Option<&Identity>,
-    ) -> Result<Option<Source>, LoadError> {
-        Ok(None)
-    }
-}
-
 struct Counter {
     n: i64,
 }
@@ -66,12 +54,34 @@ fn library() -> NativeLibrary {
         .function("boom", || -> i64 { panic!("kaboom") })
 }
 
+/// Serves `(test bridges)` as a native library.
+struct Bridges;
+
+impl Loader for Bridges {
+    fn load(
+        &self,
+        name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        Ok((name.to_string() == "(test bridges)").then(|| {
+            Source::native(
+                Identity::new("native:test/bridges"),
+                std::sync::Arc::new(library()),
+            )
+        }))
+    }
+}
+
+/// Runs `source`, a program body that sees `(scheme base)` and `(test
+/// bridges)`, under strategy `S`.
 fn run_under<S: Strategy>(source: &str) -> Result<String, Error> {
-    let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
-        .unwrap_or_else(|e| panic!("{source}\n{e}"));
+    let program = vali_compiler::compile_program(
+        &format!("(import (scheme base) (test bridges)) {source}"),
+        &Identity::new("test"),
+        &Bridges,
+    )
+    .unwrap_or_else(|e| panic!("{source}\n{e}"));
     let mut cx = Cx::<S>::new(&HeapConfig::default());
-    cx.install_primitives()?;
-    cx.define_globals(&library())?;
     let id = vali_compiler::load(&mut cx, program)?;
     let result = cx.run(id)?;
     cx.collect_garbage();
@@ -301,11 +311,13 @@ fn greeters() -> NativeLibrary {
 #[test]
 fn the_macros_write_the_bridges() {
     let run = |source: &str| -> Result<String, String> {
-        let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
-            .map_err(|e| e.message)?;
+        let program = vali_compiler::compile_program(
+            &format!("(import (scheme base) (test greeters)) {source}"),
+            &Identity::new("test"),
+            &Greeters,
+        )
+        .map_err(|e| e.message)?;
         let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
-        cx.install_primitives().map_err(|e| e.to_string())?;
-        cx.define_globals(&greeters()).map_err(|e| e.to_string())?;
         let id = vali_compiler::load(&mut cx, program).map_err(|e| e.to_string())?;
         let result = cx.run(id).map_err(|e| e.to_string())?;
         cx.write_string(&result).map_err(|e| e.to_string())

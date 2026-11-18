@@ -606,12 +606,18 @@ impl<S: Strategy> Cx<S> {
     /// which `(vali primitive)` exports, and
     /// registers Vali's own native libraries, which are deterministic, so
     /// they work at expansion time too.
+    /// Loading a module does this first, so a host need not; doing it
+    /// again does nothing.
     pub fn install_primitives(&mut self) -> Result<(), Error> {
+        if self.primitives_installed {
+            return Ok(());
+        }
         for (name, arity, f) in table::<S>() {
             self.define_primitive(name, arity, f)?;
         }
         self.define_control()?;
         self.register_native_library(crate::ports::PORTS_IDENTITY, crate::ports::library());
+        self.primitives_installed = true;
         Ok(())
     }
 }

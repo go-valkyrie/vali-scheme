@@ -8,7 +8,7 @@
 - **Amended:** 2026-11-17, variables are defined or imported, and belong to library instances (item 4)
 - **Amended:** 2026-11-17, every assigned local is boxed, captured or not, so re-entering a continuation shares it (item 4)
 - **Amended:** 2026-11-18, instructions the IR needs: direct calls, dispatch sites with link slots, and ownership operations (item 5); constancy across libraries is used by the linker (item 4; ADR 0017)
-- **Amended:** 2026-11-18, after review: untrusted code arrives as source or distribution artifacts, and run format is validated as defence in depth (context, consequences); conversion inserts ownership operations (item 5); an as-built note on globals linked by name (item 4)
+- **Amended:** 2026-11-18, after review: untrusted code arrives as source or distribution artifacts, and run format is validated as defence in depth (context, consequences); conversion inserts ownership operations (item 5); an as-built note on primitives and globals (item 4)
 - **Related:** 0001 (artifacts), 0002 (values), 0004 (frames), 0006 (versioning), 0009 (untrusted code), 0012 (distribution format), 0017 (the IR)
 
 ## Context
@@ -50,7 +50,7 @@ Options **B and D**, as follows.
 
    No variable access takes a lock. scheme-rs kept every global behind a lock and cloned it on each read, which cost a quarter of `fib`'s run time in our profiling.
 
-   **As built, until fixed:** a program with no imports links its unbound names to isolate globals by name, which reaches the internal `%` primitives too. That contradicts this item, and is among the first things being fixed.
+   **As built:** the procedures implemented in Rust are linked as primitives, a table only `(vali primitive)` imports reach, and a native library's functions are linked straight to its module as it loads. Isolate globals remain only for REPL variables and for bytecode a host builds itself.
 5. **Fast paths are in the instruction set** for what dominates Scheme loops: fixnum arithmetic with an overflow fallback, fixnum compare-and-branch, `car`, `cdr`, `null?`, `pair?`, `eq?`-and-branch, and vector access with a fixnum index. Generic operations call into the runtime function table, which the JIT shares.
 
    **The IR adds** (ADR 0017): direct calls to a known function, with no procedure check; dispatch sites, each with a slot in a per-module table that the linker fills; and `dup`, `drop`, `drop-reuse` and constructors that build in a reused cell, which conversion inserts itself, from its own liveness, and only under strategies that count references (ADR 0017 #6).

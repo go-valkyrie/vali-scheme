@@ -4,6 +4,7 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, decided: the full numeric tower, SRFI 125 with SRFI 128, partial `(rnrs …)` aliases, SRFI 226; adds the Rust interface to numbers
 - **Amended:** 2026-11-17, standard libraries as embedded sources; programs without imports see `(scheme base)` (item 11)
+- **Amended:** 2026-11-18, the internal library of primitives is Vali's own: no program, host library or `eval` environment can import it, and a program with no imports sees only `(scheme base)` (item 11)
 - **Related:** 0001 (libraries and phasing), 0002 (tags), 0004 (continuations), 0008 (tasks), 0009 (capabilities), 0011 (licences of dependencies)
 
 ## Context
@@ -57,8 +58,8 @@ Evaluating Steel and scheme-rs turned up standard procedures that real programs 
 9. **All of R7RS-small:** every `(scheme …)` library, proper tail calls, full `call/cc`, `dynamic-wind`, `define-record-type`, parameters, exceptions (`raise`, `guard`, `error`), string ports and bytevectors. Libraries that reach outside the program, such as `(scheme file)`, `(scheme process-context)`, `(scheme time)` and `(scheme load)`, work through capabilities (ADR 0009).
 10. **Macros:** `syntax-rules`, `syntax-case`, `datum->syntax`, `syntax->datum`, `free-identifier=?`, `bound-identifier=?`, `identifier?`, `generate-temporaries`, `with-syntax`, `quasisyntax`, `syntax-violation`, and syntax parameters (SRFI 139). Scheme code can read a syntax object's source location.
 11. **Libraries:** `define-library` and R6RS `library`, which expand to the same module form.
-    - **The standard libraries are `define-library` source files embedded in the binary,** which the built-in loader serves (ADR 0009 #3). Each imports one internal library of Rust primitives, re-exports what it needs, and defines in Scheme whatever is easier there. They go through the same machinery as a user's libraries, and until cached artifacts exist they are expanded when first imported.
-    - **A program with no `import` form sees `(scheme base)`,** so scripts, tests and the REPL stay short. A program that has an `import` sees only what it imports, as R7RS requires.
+    - **The standard libraries are `define-library` source files embedded in the binary,** which the built-in loader serves (ADR 0009 #3). Each imports one internal library of Rust primitives, `(vali primitive)`, re-exports what it needs, and defines in Scheme whatever is easier there. Only Vali's own libraries may import it, those served from the sources Vali carries: a program, a library a host's loader serves, and an `eval` environment get a compile error, so internal procedures such as `%raise` or `%call/cc` cannot be used to step around what a program's imports grant (ADR 0009). They go through the same machinery as a user's libraries, and until cached artifacts exist they are expanded when first imported.
+    - **A program with no `import` form sees `(scheme base)`,** so scripts, tests and the REPL stay short. A program that has an `import` sees only what it imports, as R7RS requires. Either way an identifier bound by nothing it sees is a compile error; only the REPL binds unbound names, as its own variables.
 12. **Reader extensions:** keywords (SRFI 88, with `keyword?`), `[ ]` as parentheses, block and datum comments, datum labels.
 13. **Hash tables: SRFI 125, with SRFI 128 comparators.** SRFI 125 keeps SRFI 69's names as deprecated procedures, so most SRFI 69 code runs unchanged.
 14. **Control: SRFI 226** (*Control Features*): prompts and delimited continuations, continuation marks, and parameters defined on them (ADR 0004).

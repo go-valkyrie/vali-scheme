@@ -44,6 +44,8 @@ pub struct Cx<S: Strategy> {
     /// The cells of native functions modules link to, by library identity
     /// and name, each holding its procedure.
     pub(crate) native_cells: HashMap<(Box<str>, Box<str>), OwnCell>,
+    /// Whether the primitives are installed (`Cx::install_primitives`).
+    pub(crate) primitives_installed: bool,
     /// Loaded libraries, by identity, which imports link to.
     pub(crate) libraries: HashMap<Box<str>, crate::code::ModuleId>,
     /// Interned symbols.
@@ -161,6 +163,7 @@ impl<S: Strategy> Cx<S> {
             globals: HashMap::new(),
             primitives: HashMap::new(),
             native_cells: HashMap::new(),
+            primitives_installed: false,
             libraries: HashMap::new(),
             symbols: HashMap::new(),
             keywords: HashMap::new(),

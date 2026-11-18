@@ -213,6 +213,40 @@ pub fn compile_program(
     build(&program, graph, identity, sources)
 }
 
+/// As [`compile_program`], for Vali's own tests: the program may import
+/// `(vali primitive)`, and does implicitly if it has no `import` form.
+#[doc(hidden)]
+pub fn compile_internal_program(
+    source: &str,
+    identity: &Identity,
+    loader: &impl Loader,
+) -> Result<Program, CompileError> {
+    let mut sources = vali_syntax::Sources::new();
+    let mut program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+        .map_err(|e| e.located(&sources))?;
+    program.internal = true;
+    if program.implicit {
+        // Only the internal names: (scheme base) exports the others.
+        let internal = vali_runtime::primitive_names()
+            .into_iter()
+            .chain(phase::SYNTAX_PROCEDURES.iter().copied())
+            .chain(eval::EVAL_PROCEDURES.iter().copied())
+            .filter(|n| n.starts_with('%'))
+            .map(str::to_owned)
+            .collect();
+        program.imports.push(library::ImportSet::Only(
+            Box::new(library::ImportSet::Library(LibraryName::new([
+                "vali",
+                "primitive",
+            ]))),
+            internal,
+        ));
+    }
+    let graph =
+        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
+    build(&program, graph, identity, sources)
+}
+
 /// As [`compile_program`], with an asynchronous loader: the import graph
 /// is fetched first, awaiting the loader, then compiled.
 pub async fn compile_program_async(
@@ -292,7 +326,7 @@ fn expand_all(
         for name in names {
             expander.name_next(name);
         }
-        let module = expander.library(library.identity.as_str(), &library.form)?;
+        let module = expander.library(library.identity.as_str(), &library.form, library.own)?;
         libraries.push((library.identity.clone(), module));
     }
     let body = expander.program(
@@ -300,6 +334,7 @@ fn expand_all(
         &program.imports,
         program.implicit,
         &program.body,
+        program.internal,
     )?;
     Ok((libraries, body, natives, names_eval))
 }

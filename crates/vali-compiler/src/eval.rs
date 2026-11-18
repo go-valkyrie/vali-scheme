@@ -208,6 +208,7 @@ fn prepare<S: Strategy>(
         imports: sets.clone(),
         implicit: false,
         body: body.clone(),
+        internal: false,
     };
     let fetcher = Fetcher(evaluator.loader.as_deref());
     let graph = loader::fetch(
@@ -241,7 +242,7 @@ fn prepare<S: Strategy>(
             expander.name_next(name);
         }
         let module = expander
-            .library(library_identity, &library.form)
+            .library(library_identity, &library.form, library.own)
             .map_err(compile_error)?;
         if cx.library(library_identity).is_none() {
             let id = cx.load(module)?;
@@ -257,7 +258,7 @@ fn prepare<S: Strategy>(
         module
     } else {
         expander
-            .program(identity.as_str(), &sets, false, &body)
+            .program(identity.as_str(), &sets, false, &body, false)
             .map_err(compile_error)?
     };
     let expander = &mut evaluator.expander;

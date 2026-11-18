@@ -328,6 +328,10 @@ pub(crate) struct Library {
     pub(crate) form: LibraryForm,
     /// The native library, if it is one.
     pub(crate) native: Option<Arc<vali_runtime::NativeLibrary>>,
+    /// Whether it is one of Vali's own, served from the sources Vali
+    /// carries, never by a host's loader: only these may import `(vali
+    /// primitive)`.
+    pub(crate) own: bool,
 }
 
 /// A program, read: the libraries it defines itself, as read, its
@@ -340,6 +344,9 @@ pub(crate) struct Program {
     /// with no `import` form.
     pub(crate) implicit: bool,
     pub(crate) body: Vec<Datum>,
+    /// Whether it may import `(vali primitive)`, as only Vali's own tests'
+    /// programs may.
+    pub(crate) internal: bool,
 }
 
 /// Reads a program's parts: leading library forms, then leading imports.
@@ -363,6 +370,7 @@ pub(crate) fn program(datums: &[Datum]) -> Result<Program> {
         imports,
         implicit,
         body: body.to_vec(),
+        internal: false,
     })
 }
 
@@ -753,11 +761,12 @@ async fn walk(
         }
         // Standard libraries come first, so no loader can replace them,
         // except those a host serves to grant what they need.
-        let (library_identity, form, native) = match local.get(&name) {
+        let (library_identity, form, native, own) = match local.get(&name) {
             Some(form) => (
                 Identity::new(&format!("{identity}#{name}")),
                 (*form).clone(),
                 None,
+                false,
             ),
             None => {
                 let fetched = if is_host_served(&name) || standard(&name).is_none() {
@@ -768,6 +777,7 @@ async fn walk(
                 } else {
                     None
                 };
+                let own = fetched.is_none();
                 let source = fetched.or_else(|| standard(&name));
                 let source = source.ok_or_else(|| {
                     let by = importer
@@ -780,7 +790,7 @@ async fn walk(
                     continue;
                 }
                 let form = read_library(&name, &source, loader, &names, sources).await?;
-                (source.identity, form, source.native)
+                (source.identity, form, source.native, own)
             }
         };
         for set in form.imports.iter().rev() {
@@ -794,6 +804,7 @@ async fn walk(
             identity: library_identity,
             form,
             native,
+            own,
         });
     }
     let mut graph = order(found, by_name)?;

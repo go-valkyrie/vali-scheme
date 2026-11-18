@@ -23,8 +23,9 @@ impl Loader for NoLibraries {
 /// `write` prints it. A collection runs before it is printed, so whatever
 /// only the result's handle keeps, cycles included, must survive it.
 fn run_under<S: Strategy>(source: &str) -> Result<String, Error> {
-    let program = vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries)
-        .unwrap_or_else(|e| panic!("{source}\n{e}"));
+    let program =
+        vali_compiler::compile_internal_program(source, &Identity::new("test"), &NoLibraries)
+            .unwrap_or_else(|e| panic!("{source}\n{e}"));
     let mut cx = Cx::<S>::new(&HeapConfig::default());
     cx.install_primitives()?;
     let id = vali_compiler::load(&mut cx, program)?;
@@ -283,10 +284,10 @@ fn errors() {
     assert!(compile_error("(lambda (x) (define y 1) (define y 2) y)").contains("y is bound twice"));
     assert!(compile_error("(+ if 1)").contains("syntactic keyword"));
 
-    let Err(Error::Scheme(e)) = run("(undefined-procedure 1)") else {
-        panic!("expected an unbound variable");
-    };
-    assert_eq!(e.message, "unbound variable: undefined-procedure");
+    assert!(
+        compile_error("(undefined-procedure 1)")
+            .contains("undefined-procedure is not bound: is it imported?")
+    );
     let Err(Error::Scheme(e)) = run("(define (f x) (car x)) (f 5)") else {
         panic!("expected a type error");
     };
@@ -402,14 +403,15 @@ fn macros_can_define_names_their_uses_supply() {
         ),
     ]);
     // A name the macro made up stays the macro's.
-    let Err(Error::Scheme(e)) = run(
+    let error = compile(
         "(define-syntax def-hidden (syntax-rules () ((_) (define hidden 1))))
          (def-hidden)
          hidden",
-    ) else {
-        panic!("expected hidden to be unbound");
-    };
-    assert_eq!(e.message, "unbound variable: hidden");
+        "test",
+    )
+    .unwrap_err()
+    .message;
+    assert!(error.contains("hidden is not bound"), "{error}");
 }
 
 #[test]
@@ -2381,7 +2383,10 @@ fn vectors_strings_and_chars_from_r7rs() {
             "(list (string->list \"hello\" 1 3) (string-copy \"hello\" 2))",
             "((#\\e #\\l) \"llo\")",
         ),
-        ("(string-map char-upcase \"abc\")", "\"ABC\""),
+        (
+            "(import (scheme base) (scheme char)) (string-map char-upcase \"abc\")",
+            "\"ABC\"",
+        ),
         (
             "(let ((acc '())) (string-for-each (lambda (a b) (set! acc (cons (list a b) acc))) \"ab\" \"xyz\") acc)",
             "((#\\b #\\y) (#\\a #\\x))",
@@ -2617,9 +2622,9 @@ fn counting_reclaims_memory() {
 fn frames_leave_nothing_counted() {
     fn live_after<S: Strategy<Heap = CountingHeap>>(source: &str) -> usize {
         let program =
-            vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+            vali_compiler::compile_internal_program(source, &Identity::new("test"), &NoLibraries)
+                .unwrap();
         let mut cx = Cx::<S>::new(&HeapConfig::default());
-        cx.install_primitives().unwrap();
         let id = vali_compiler::load(&mut cx, program).unwrap();
         // Some of these fail on purpose; what they leave is what counts.
         drop(cx.run(id));

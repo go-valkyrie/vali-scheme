@@ -183,10 +183,9 @@ struct Unit {
     imports: Vec<usize>,
     /// Its compiled module, once there is one.
     module: Option<Module>,
-    /// Whether an unbound identifier is an error. It is in a library and
-    /// in a program with imports; a program with none refers to the
-    /// isolate's globals by name, as a script does.
-    strict: bool,
+    /// Whether it is one of Vali's own libraries, or a program of Vali's
+    /// own tests, which may import `(vali primitive)`.
+    own: bool,
     /// Whether it is a REPL's input, compiled in the interaction
     /// environment: its top-level definitions are REPL globals, and an
     /// unbound identifier names one.
@@ -234,6 +233,8 @@ pub(crate) struct Expander {
     /// The native libraries the program imports, which the phase-1
     /// isolate registers, so their expansion-safe functions run there.
     natives: Vec<(String, std::sync::Arc<vali_runtime::NativeLibrary>)>,
+    /// Whether the next unit is one of Vali's own (`Unit::own`).
+    next_own: bool,
     /// The interaction environment's scope sets, once it is used: where
     /// its imports are bound, and where its own definitions are, inside
     /// those. Every REPL input uses the same ones, so what one defines the
@@ -288,6 +289,7 @@ impl Expander {
             compiled: Compiled::default(),
             floors: Vec::new(),
             natives: Vec::new(),
+            next_own: false,
             includes: crate::loader::Includes::new(),
             sources: vali_syntax::Sources::new(),
             repl: None,
@@ -403,10 +405,17 @@ impl Expander {
     }
 
     /// Expands and compiles a library, which becomes the next unit.
-    pub(crate) fn library(&mut self, identity: &str, form: &LibraryForm) -> Result<Module> {
+    /// `own` says whether it is one of Vali's own libraries.
+    pub(crate) fn library(
+        &mut self,
+        identity: &str,
+        form: &LibraryForm,
+        own: bool,
+    ) -> Result<Module> {
         if self.natives.iter().any(|(i, _)| i == identity) {
             return self.native_library(identity, form);
         }
+        self.next_own = own;
         let scope = self.scope(ScopeKind::Library)?;
         let top = self.context.intern(&[scope]).map_err(too_many)?;
         self.unit(
@@ -459,7 +468,7 @@ impl Expander {
             interface,
             imports: Vec::new(),
             module: Some(module.clone()),
-            strict: true,
+            own: false,
             repl: false,
         });
         Ok(module)
@@ -476,7 +485,9 @@ impl Expander {
         imports: &[ImportSet],
         implicit: bool,
         body: &[vali_syntax::Datum],
+        internal: bool,
     ) -> Result<Module> {
+        self.next_own = internal;
         let span = body.first().map_or(
             Span {
                 source: SourceId(0),
@@ -585,7 +596,7 @@ impl Expander {
             interface: HashMap::new(),
             imports: imported,
             module: None,
-            strict: imported_at == top,
+            own: std::mem::take(&mut self.next_own),
             repl,
         });
         self.top = top;
@@ -731,6 +742,20 @@ impl Expander {
     /// Binds what `set` imports at `top`. Importing one name twice is
     /// fine if both mean the same.
     fn import(&mut self, set: &ImportSet, top: ScopeSetId, span: Span) -> Result<()> {
+        // The internal procedures are for Vali's own libraries, which build
+        // the standard ones on them; anything else reaching them could
+        // bypass what its imports grant (ADR 0009).
+        if *set.library() == LibraryName::new(["vali", "primitive"])
+            && !self.units.last().is_some_and(|u| u.own)
+        {
+            return Err(error(
+                format!(
+                    "{} is internal to Vali: import the standard library that provides what you need",
+                    set.library()
+                ),
+                span,
+            ));
+        }
         for (name, binding) in self.import_bindings(set, span)? {
             match self.table.bind(
                 &self.context,
@@ -1568,16 +1593,10 @@ impl Expander {
                 Some(Binding::Primitive(name)) => Ok(Expr::Free(name)),
                 Some(Binding::Global(name)) => Ok(Expr::ReplGlobal(name)),
                 None if self.in_repl() => Ok(Expr::ReplGlobal(repl_global(name))),
-                None if self.units.last().is_some_and(|u| u.strict) => Err(error(
+                None => Err(error(
                     format!("{name} is not bound: is it imported?"),
                     stx.span(),
                 )),
-                // A program with no imports still reaches every primitive
-                // by name, until programs are strict too.
-                None if vali_runtime::primitive_names().contains(&name) => {
-                    Ok(Expr::Free(name.to_owned()))
-                }
-                None => Ok(Expr::ReplGlobal(name.to_owned())),
                 Some(Binding::Core(_) | Binding::Macro(_)) => Err(error(
                     format!("{name}: a syntactic keyword is not an expression"),
                     stx.span(),

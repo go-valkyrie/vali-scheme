@@ -51,8 +51,8 @@ fn check(cases: &[(&str, &str)]) {
     }
 }
 
-/// The base every test library imports until (scheme base) exists.
-const BASE: &str = "(vali core) (vali primitive)";
+/// What every test library imports.
+const BASE: &str = "(scheme base)";
 
 #[test]
 fn a_program_imports_its_own_library() {
@@ -233,20 +233,20 @@ fn a_loader_serves_libraries() {
         (
             "(math square)",
             "(define-library (math square)
-               (import (vali core) (vali primitive))
+               (import (except (scheme base) square))
                (export square)
                (begin (define (square x) (* x x))))",
         ),
         (
             "(math sum-squares)",
             "(define-library (math sum-squares)
-               (import (vali core) (vali primitive) (math square))
+               (import (except (scheme base) square) (math square))
                (export sum-squares)
                (begin (define (sum-squares a b) (+ (square a) (square b)))))",
         ),
     ]);
     let result = run_with(
-        "(import (vali core) (math sum-squares)) (sum-squares 3 4)",
+        "(import (scheme base) (math sum-squares)) (sum-squares 3 4)",
         &loader,
     );
     assert_eq!(result.unwrap(), "25");
@@ -255,6 +255,31 @@ fn a_loader_serves_libraries() {
         error,
         "library (math cube) not found, imported by the program"
     );
+}
+
+/// Only Vali's own libraries may import `(vali primitive)`: not a program,
+/// a library a host serves, or an `eval` environment, and a host cannot
+/// pass a library off as Vali's own by naming its identity so.
+#[test]
+fn only_valis_own_libraries_reach_the_primitives() {
+    let internal = "(vali primitive) is internal to Vali";
+    let error = run("(import (vali primitive)) (%raise 1)").unwrap_err();
+    assert!(error.contains(internal), "{error}");
+    let loader = Map(vec![(
+        "(sneaky)",
+        "(define-library (sneaky)
+           (import (scheme base) (only (vali primitive) %raise))
+           (export %raise))",
+    )]);
+    let error = run_with("(import (sneaky)) (%raise 1)", &loader).unwrap_err();
+    assert!(error.contains(internal), "{error}");
+    let error = run("(import (scheme base) (scheme eval))
+                     (eval '(%raise 1) (environment '(only (vali primitive) %raise)))")
+    .unwrap_err();
+    assert!(error.contains(internal), "{error}");
+    // A program with no imports sees (scheme base), and nothing else.
+    let error = run("(%raise 1)").unwrap_err();
+    assert!(error.contains("%raise is not bound"), "{error}");
 }
 
 /// Serves libraries asynchronously, waiting once per load.
