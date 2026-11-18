@@ -8,6 +8,7 @@
 - **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
 - **Amended:** 2026-11-18, the interface section records the library's ABI version, and offers no bodies for inlining: inlining across libraries happens at link time (item 5, ADRs 0017 and 0018)
 - **Amended:** 2026-11-18, as-built notes: fresh expansion-time instances per unit and phase, and numbering and scope contexts per unit (items 2 and 4)
+- **Amended:** 2026-11-18, as built: library artifacts, their sections, how syntax is stored, and the validity they check so far (items 5 to 8)
 - **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces), 0017 (link-time optimisation), 0018 (library ABI versions)
 
 ## Context
@@ -54,6 +55,8 @@ R6RS lets an import say at which phase it is needed (`(import (for (lib) expand)
 
 6. **Visit sections load lazily.** The expander reads one only when it meets one of that library's macros. A warm run reads only invoke sections. Artifacts never hold native code: JIT-compiled code is not cached between runs, and native code reaches disk only through `vali build` (ADRs 0006 and 0013).
 7. **Syntax objects keep stable scope identities when stored.** Syntax objects in visit sections and static information are serialised with stable scope identities, which are remapped to fresh scopes on load.
+
+   **As built (items 5 to 8):** a library's artifact has five required sections: `build` (the compiler and format versions that wrote it), `library` (its identity, imports and interface), `syntax` (its syntax export), `invoke` (its module as distribution code) and `depends` (each import's identity and a hash of that import's `library` and `syntax` sections). Visit code is in `syntax`, with each transformer written in Scheme as distribution code; it is read whole, not lazily. The syntax export is stored as an importer would see it: remapped into a fresh context, so only the scopes it reaches are written, numbered in the order they are met, with the text of every source its spans point into. Loading checks the build, that each import is loaded with the same hash, and every reference in the bytes; a library that is not one of Vali's own may not link the internal `%` primitives, whatever its artifact says. Fingerprints of files read during expansion, features tested, and per-binding facts (ADR 0012 #6) are not recorded yet: these artifacts are Vali's own, rebuilt with it. Writing an artifact again from one loaded gives the same bytes. Setting `VALI_ROUND_TRIP` writes, drops and reloads every library as it is compiled, so the test suite can run on what artifacts hold.
 
 ### Cache validity
 

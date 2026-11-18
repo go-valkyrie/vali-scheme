@@ -95,6 +95,55 @@ pub struct Program {
     /// The body's IR, for Vali's own tests.
     #[doc(hidden)]
     pub ir: Option<vali_dist::Module>,
+    /// Each library's artifact, in the order they were compiled, when
+    /// [`compile_program_with`] was asked for them.
+    #[doc(hidden)]
+    pub artifacts: Vec<(Identity, Vec<u8>)>,
+}
+
+/// Library artifacts to use in place of compiling libraries, by identity,
+/// and whether to write the artifacts of those compiled (ADR 0001 #5).
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct Artifacts {
+    pub read: std::collections::HashMap<String, Vec<u8>>,
+    pub write: bool,
+}
+
+/// As [`compile_internal_program`], loading each library that `artifacts`
+/// has an artifact for from it rather than compiling it, and writing each
+/// library's artifact if asked. For Vali's own tests and build.
+#[doc(hidden)]
+pub fn compile_program_with(
+    source: &str,
+    identity: &Identity,
+    loader: &impl Loader,
+    artifacts: &Artifacts,
+) -> Result<Program, CompileError> {
+    let mut sources = vali_syntax::Sources::new();
+    let mut program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+        .map_err(|e| e.located(&sources))?;
+    program.internal = true;
+    if program.implicit {
+        // Only the internal names: (scheme base) exports the others.
+        let internal = vali_runtime::primitive_names()
+            .into_iter()
+            .chain(phase::SYNTAX_PROCEDURES.iter().copied())
+            .chain(eval::EVAL_PROCEDURES.iter().copied())
+            .filter(|n| n.starts_with('%'))
+            .map(str::to_owned)
+            .collect();
+        program.imports.push(library::ImportSet::Only(
+            Box::new(library::ImportSet::Library(LibraryName::new([
+                "vali",
+                "primitive",
+            ]))),
+            internal,
+        ));
+    }
+    let graph =
+        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
+    build(&program, graph, identity, sources, artifacts)
 }
 
 /// The expander that compiled a program that imports `(scheme eval)`,
@@ -212,7 +261,7 @@ pub fn compile_program(
         .map_err(|e| e.located(&sources))?;
     let graph =
         loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources)
+    build(&program, graph, identity, sources, &Artifacts::default())
 }
 
 /// As [`compile_program`], for Vali's own tests: the program may import
@@ -223,30 +272,7 @@ pub fn compile_internal_program(
     identity: &Identity,
     loader: &impl Loader,
 ) -> Result<Program, CompileError> {
-    let mut sources = vali_syntax::Sources::new();
-    let mut program = loader::program(&read(source, identity.as_str(), &mut sources)?)
-        .map_err(|e| e.located(&sources))?;
-    program.internal = true;
-    if program.implicit {
-        // Only the internal names: (scheme base) exports the others.
-        let internal = vali_runtime::primitive_names()
-            .into_iter()
-            .chain(phase::SYNTAX_PROCEDURES.iter().copied())
-            .chain(eval::EVAL_PROCEDURES.iter().copied())
-            .filter(|n| n.starts_with('%'))
-            .map(str::to_owned)
-            .collect();
-        program.imports.push(library::ImportSet::Only(
-            Box::new(library::ImportSet::Library(LibraryName::new([
-                "vali",
-                "primitive",
-            ]))),
-            internal,
-        ));
-    }
-    let graph =
-        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources)
+    compile_program_with(source, identity, loader, &Artifacts::default())
 }
 
 /// As [`compile_program`], with an asynchronous loader: the import graph
@@ -262,21 +288,38 @@ pub async fn compile_program_async(
     let graph = loader::fetch_async(&program, identity, loader, &mut sources)
         .await
         .map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources)
+    build(&program, graph, identity, sources, &Artifacts::default())
 }
 
-/// Expands and compiles each library of the graph, then the program.
+/// Expands and compiles each library of the graph, or loads it from its
+/// artifact, then the program.
 fn build(
     program: &loader::Program,
     graph: loader::Graph,
     identity: &Identity,
     sources: vali_syntax::Sources,
+    artifacts: &Artifacts,
 ) -> Result<Program, CompileError> {
     let mut expander = expand::Expander::new()?;
     expander.sources = sources;
-    match expand_all(&mut expander, program, graph, identity) {
+    match expand_all(&mut expander, program, graph, identity, &artifacts.read) {
         Ok((libraries, body, natives, names_eval)) => {
             let ir = expander.last_ir.take();
+            let mut written = Vec::new();
+            if artifacts.write {
+                for (identity, _) in &libraries {
+                    if natives.iter().any(|(i, _)| i == identity) {
+                        continue;
+                    }
+                    let unit = expander
+                        .unit_of(identity.as_str())
+                        .expect("every library is a unit");
+                    let bytes = expander
+                        .library_artifact(unit)
+                        .map_err(|e| e.located(&expander.sources))?;
+                    written.push((identity.clone(), bytes));
+                }
+            }
             let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
                 .then(|| SyntaxData(expander.syntax_data()));
             let evaluator = names_eval.then(|| Evaluator(Box::new(eval::Evaluator::new(expander))));
@@ -287,6 +330,7 @@ fn build(
                 natives,
                 evaluator,
                 ir,
+                artifacts: written,
             })
         }
         Err(e) => Err(e.located(&expander.sources)),
@@ -308,6 +352,7 @@ fn expand_all(
     program: &loader::Program,
     graph: loader::Graph,
     identity: &Identity,
+    artifacts: &std::collections::HashMap<String, Vec<u8>>,
 ) -> Result<Expanded, CompileError> {
     expander.set_includes(graph.includes);
     expander.add_available(graph.available);
@@ -331,7 +376,11 @@ fn expand_all(
         for name in names {
             expander.name_next(name);
         }
-        let module = expander.library(library.identity.as_str(), &library.form, library.own)?;
+        let identity = library.identity.as_str();
+        let module = match artifacts.get(identity) {
+            Some(bytes) => expander.load_library(identity, bytes, library.own)?,
+            None => expander.library(identity, &library.form, library.own)?,
+        };
         libraries.push((library.identity.clone(), module));
     }
     let body = expander.program(

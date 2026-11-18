@@ -1033,3 +1033,87 @@ fn max_template_var(t: &Template) -> usize {
     }
     most
 }
+
+/// What a library's `library` section holds: who it is, what it imports,
+/// and what it exports.
+pub(super) struct LibraryRecord {
+    pub(super) identity: String,
+    pub(super) key: String,
+    pub(super) imports: Vec<usize>,
+    pub(super) interface: HashMap<String, Binding>,
+}
+
+/// Encodes a library's record, naming units by their identities.
+pub(super) fn encode_library(record: &LibraryRecord, identities: &[String]) -> Result<Vec<u8>> {
+    let mut e = Encoder {
+        w: Writer::new(),
+        sources: &Sources::new(),
+        identities,
+        units: HashMap::new(),
+        source_refs: HashMap::new(),
+        origins: HashMap::new(),
+    };
+    e.w.str(&record.identity);
+    e.w.str(&record.key);
+    e.w.usize(record.imports.len());
+    for &unit in &record.imports {
+        e.unit(unit)?;
+    }
+    let mut names: Vec<&String> = record.interface.keys().collect();
+    names.sort();
+    e.w.usize(names.len());
+    for name in names {
+        e.w.str(name);
+        e.binding(&record.interface[name])?;
+    }
+    Ok(e.w.finish())
+}
+
+/// Decodes a library's record, resolving the units it names.
+pub(super) fn decode_library(
+    bytes: &[u8],
+    resolve: &dyn Fn(&str) -> Option<usize>,
+) -> std::result::Result<LibraryRecord, CompileError> {
+    let mut sources = Sources::new();
+    let mut d = Decoder {
+        r: Reader::new(bytes),
+        context: ScopeContext::new(),
+        scopes: Vec::new(),
+        sets: Vec::new(),
+        sources: &mut sources,
+        source_ids: Vec::new(),
+        resolve,
+        units: Vec::new(),
+        origins: Vec::new(),
+    };
+    let record = (|| {
+        let identity = d.r.str()?.to_owned();
+        let key = d.r.str()?.to_owned();
+        let n = d.r.count(1)?;
+        let mut imports = Vec::with_capacity(n);
+        for _ in 0..n {
+            imports.push(d.unit()?);
+        }
+        let n = d.r.count(2)?;
+        let mut interface = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let name = d.r.str()?.to_owned();
+            let binding = d.binding()?;
+            if interface.insert(name.clone(), binding).is_some() {
+                return Err(d.r.error(format!("{name} is exported twice")));
+            }
+        }
+        d.r.end()?;
+        Ok(LibraryRecord {
+            identity,
+            key,
+            imports,
+            interface,
+        })
+    })();
+    record.map_err(|e: DecodeError| CompileError {
+        message: format!("a library record: {e}"),
+        span: None,
+        location: None,
+    })
+}

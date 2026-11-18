@@ -480,6 +480,31 @@ struct Unit {
     /// its identity and a hash of its text, so two programs loaded into
     /// one isolate under one name keep their syntax apart.
     key: String,
+    /// Its module as distribution code, once there is one. None for a
+    /// native library.
+    ir: Option<Arc<vali_dist::Module>>,
+    /// A hash of what its importers observe, its `library` and `syntax`
+    /// sections, once something asked.
+    export_hash: Option<u64>,
+}
+
+/// The sections a library's artifact has, all required.
+const LIBRARY_SECTIONS: &[&str] = &["build", "library", "syntax", "invoke", "depends"];
+
+/// What compiled an artifact: one Vali reads only its own (ADR 0001 #8).
+fn build_stamp() -> String {
+    format!(
+        "vali-compiler {} format {}",
+        env!("CARGO_PKG_VERSION"),
+        vali_dist::FORMAT_VERSION
+    )
+}
+
+/// The FNV-1a hash of `bytes`.
+fn bytes_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// The isolate global a REPL's top-level `name` is. REPL globals have
@@ -739,7 +764,7 @@ impl Expander {
         self.next_own = own;
         let scope = self.scope(ScopeKind::Library)?;
         let top = self.context.intern(&[scope]).map_err(too_many)?;
-        self.unit(
+        let module = self.unit(
             identity,
             &form.imports,
             top,
@@ -748,7 +773,16 @@ impl Expander {
             &form.exports,
             form.span,
             false,
-        )
+        )?;
+        if !round_trip() {
+            return Ok(module);
+        }
+        // Written, dropped and loaded again, so what follows runs on what
+        // the artifact holds.
+        let unit = self.units.len() - 1;
+        let bytes = self.library_artifact(unit)?;
+        self.units.pop();
+        self.load_library(identity, &bytes, own)
     }
 
     /// The unit for a native library (ADR 0016 #8): a module whose
@@ -793,6 +827,8 @@ impl Expander {
             repl: false,
             syntax: None,
             key: identity.to_owned(),
+            ir: None,
+            export_hash: None,
         });
         Ok(module)
     }
@@ -809,30 +845,7 @@ impl Expander {
             // The REPL's next input, with nothing in between.
             return Ok(());
         }
-        let placeholder = ContextState {
-            context: ScopeContext::new(),
-            table: BindingTable::new(),
-            core_scope: self.core_scope,
-            core: self.core,
-            macros: HashMap::new(),
-            compiled: Default::default(),
-            imported: HashSet::new(),
-            next_macro: 0,
-        };
-        let state = self.swap_state(placeholder);
-        match self.owner {
-            Some(ContextOwner::Unit(unit)) => {
-                let state = if round_trip() {
-                    let bytes = self.encode_syntax(&state)?;
-                    self.decode_syntax(&bytes)?
-                } else {
-                    state
-                };
-                self.units[unit].syntax = Some(Arc::new(state));
-            }
-            Some(ContextOwner::Repl) => self.repl_state = Some(state),
-            None => {}
-        }
+        self.finish_context()?;
         let seed = imports.iter().find_map(|set| {
             let unit = *self.by_name.get(set.library())?;
             self.units[unit].syntax.as_ref().map(|s| (unit, s))
@@ -860,6 +873,198 @@ impl Expander {
             ContextOwner::Unit(self.units.len())
         });
         Ok(())
+    }
+
+    /// Ends the live context's ownership: a unit's state becomes its
+    /// syntax export, the REPL's is set aside for its next input.
+    fn finish_context(&mut self) -> Result<()> {
+        let Some(owner) = self.owner.take() else {
+            return Ok(());
+        };
+        let placeholder = ContextState {
+            context: ScopeContext::new(),
+            table: BindingTable::new(),
+            core_scope: self.core_scope,
+            core: self.core,
+            macros: HashMap::new(),
+            compiled: Default::default(),
+            imported: HashSet::new(),
+            next_macro: 0,
+        };
+        let state = self.swap_state(placeholder);
+        match owner {
+            ContextOwner::Unit(unit) => self.units[unit].syntax = Some(Arc::new(state)),
+            ContextOwner::Repl => self.repl_state = Some(state),
+        }
+        Ok(())
+    }
+
+    /// The artifact of `unit`, a library this build compiled or loaded:
+    /// its record, syntax export, module as distribution code, and what
+    /// it relied on of its imports (ADRs 0001 #5 and 0012 #5).
+    pub(crate) fn library_artifact(&mut self, unit: usize) -> Result<Vec<u8>> {
+        if matches!(self.owner, Some(ContextOwner::Unit(u)) if u == unit) {
+            self.finish_context()?;
+        }
+        let fail = |message: String| CompileError {
+            message,
+            span: None,
+            location: None,
+        };
+        let identity = self.units[unit].identity.clone();
+        let (Some(syntax), Some(ir)) =
+            (self.units[unit].syntax.clone(), self.units[unit].ir.clone())
+        else {
+            return Err(fail(format!("{identity} has no artifact")));
+        };
+        let library = self.library_record(unit)?;
+        let syntax = self.encode_syntax(&syntax)?;
+        let invoke = vali_dist::encode(&ir).map_err(|e| fail(format!("{identity}: {e}")))?;
+        let mut depends = vali_dist::Writer::new();
+        let imports = self.units[unit].imports.clone();
+        depends.usize(imports.len());
+        for dependency in imports {
+            depends.str(&self.units[dependency].identity.clone());
+            let hash = self.export_hash(dependency)?;
+            depends.uint(hash);
+        }
+        let mut artifact = vali_dist::Artifact::default();
+        artifact.insert("build", true, build_stamp().into_bytes());
+        artifact.insert("library", true, library);
+        artifact.insert("syntax", true, syntax);
+        artifact.insert("invoke", true, invoke);
+        artifact.insert("depends", true, depends.finish());
+        Ok(artifact.encode())
+    }
+
+    /// The bytes of `unit`'s `library` section.
+    fn library_record(&self, unit: usize) -> Result<Vec<u8>> {
+        let u = &self.units[unit];
+        let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
+        let record = artifact::LibraryRecord {
+            identity: u.identity.clone(),
+            key: u.key.clone(),
+            imports: u.imports.clone(),
+            interface: u.interface.clone(),
+        };
+        artifact::encode_library(&record, &identities).map_err(|message| CompileError {
+            message: format!("{}: {message}", u.identity),
+            span: None,
+            location: None,
+        })
+    }
+
+    /// A hash of what importers of `unit` observe: its `library` and
+    /// `syntax` sections, as this build would write them.
+    fn export_hash(&mut self, unit: usize) -> Result<u64> {
+        if let Some(hash) = self.units[unit].export_hash {
+            return Ok(hash);
+        }
+        let mut bytes = self.library_record(unit)?;
+        if let Some(syntax) = self.units[unit].syntax.clone() {
+            bytes.extend(self.encode_syntax(&syntax)?);
+        }
+        let hash = bytes_hash(&bytes);
+        self.units[unit].export_hash = Some(hash);
+        Ok(hash)
+    }
+
+    /// Loads the library `identity` from its artifact, as compiling it
+    /// would have: every library it imports must be loaded, each as it
+    /// was when the artifact was written. `own` says whether it is one of
+    /// Vali's own libraries, whatever the artifact says; a library that is
+    /// not may not link the internal primitives, whose names start with
+    /// `%`. Returns its module.
+    pub(crate) fn load_library(
+        &mut self,
+        identity: &str,
+        bytes: &[u8],
+        own: bool,
+    ) -> Result<Module> {
+        let fail = |message: String| CompileError {
+            message: format!("{identity}: {message}"),
+            span: None,
+            location: None,
+        };
+        let artifact = vali_dist::Artifact::decode(bytes, LIBRARY_SECTIONS)
+            .map_err(|e| fail(e.to_string()))?;
+        let section = |name: &str| {
+            artifact
+                .section(name)
+                .ok_or_else(|| fail(format!("the artifact has no {name} section")))
+        };
+        if section("build")? != build_stamp().as_bytes() {
+            return Err(fail("the artifact is from another build of Vali".into()));
+        }
+        let mut depends = vali_dist::Reader::new(section("depends")?);
+        let read = (|| {
+            let n = depends.count(2)?;
+            let mut needed = Vec::with_capacity(n);
+            for _ in 0..n {
+                let dependency = depends.str()?.to_owned();
+                needed.push((dependency, depends.uint()?));
+            }
+            depends.end()?;
+            Ok::<_, vali_dist::DecodeError>(needed)
+        })()
+        .map_err(|e| fail(format!("its dependencies: {e}")))?;
+        for (dependency, hash) in read {
+            let unit = self
+                .unit_of(&dependency)
+                .ok_or_else(|| fail(format!("it needs {dependency}, which is not loaded")))?;
+            if self.export_hash(unit)? != hash {
+                return Err(fail(format!(
+                    "{dependency} has changed since it was compiled"
+                )));
+            }
+        }
+        let ir = vali_dist::decode(section("invoke")?).map_err(|e| fail(e.to_string()))?;
+        if !own
+            && let Some(global) = ir.globals.iter().find(|g| {
+                matches!(g.link, vali_dist::GlobalLink::Primitive) && g.name.starts_with('%')
+                    || matches!(g.link, vali_dist::GlobalLink::Native(_))
+            })
+        {
+            return Err(fail(format!(
+                "it links {}, which only Vali's own libraries may",
+                global.name
+            )));
+        }
+        let module = converted(&ir)?;
+        // The unit goes in first: what it exports names it.
+        let index = self.units.len();
+        self.units.push(Unit {
+            identity: identity.to_owned(),
+            interface: HashMap::new(),
+            imports: Vec::new(),
+            module: Some(module.clone()),
+            own,
+            repl: false,
+            syntax: None,
+            key: identity.to_owned(),
+            ir: Some(Arc::new(ir)),
+            export_hash: None,
+        });
+        let filled = (|| {
+            let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
+            let resolve = |identity: &str| identities.iter().position(|i| i == identity);
+            let record = artifact::decode_library(section("library")?, &resolve)?;
+            if record.identity != identity {
+                return Err(fail(format!("the artifact is {}'s", record.identity)));
+            }
+            let syntax = artifact::decode(section("syntax")?, &resolve, &mut self.sources)?;
+            let unit = &mut self.units[index];
+            unit.key = record.key;
+            unit.imports = record.imports;
+            unit.interface = record.interface;
+            unit.syntax = Some(Arc::new(syntax));
+            Ok(())
+        })();
+        if let Err(e) = filled {
+            self.units.pop();
+            return Err(e);
+        }
+        Ok(module)
     }
 
     /// Makes `state` the live context, returning the one it replaces.
@@ -921,13 +1126,6 @@ impl Expander {
             span: None,
             location: None,
         })
-    }
-
-    /// A syntax export from its bytes, naming units of this build.
-    fn decode_syntax(&mut self, bytes: &[u8]) -> Result<ContextState> {
-        let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
-        let resolve = |identity: &str| identities.iter().position(|i| i == identity);
-        artifact::decode(bytes, &resolve, &mut self.sources)
     }
 
     /// Notes `m`, a macro the current unit defines, and returns its name.
@@ -1081,6 +1279,8 @@ impl Expander {
             } else {
                 identity.to_owned()
             },
+            ir: None,
+            export_hash: None,
         });
         self.top = top;
         for set in imports {
@@ -1110,15 +1310,17 @@ impl Expander {
             }
         }
         let module = self.module(lambda, identity)?;
+        let ir = self.last_ir.clone().map(Arc::new);
         let unit = &mut self.units[index];
         unit.interface = interface;
         unit.module = Some(module.clone());
+        unit.ir = ir;
         Ok(module)
     }
 
     /// Compiles the `lambda` `body` as a module's body, exporting every
-    /// variable the module defines under its own name.
-    /// Everything compiled goes through the IR (ADR 0017): the tree is
+    /// variable the module defines under its own name. Everything
+    /// compiled goes through the IR (ADR 0017): the tree is
     /// lowered to it, then converted to run-format bytecode.
     fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
         let ir = self.lowered(body, name)?;
