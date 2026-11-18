@@ -24,7 +24,7 @@ Each boundary below exists for a reason recorded in an ADR:
 | `vali-runtime` | Values, memory strategies, objects, frames and continuations, the trampoline, isolates and tasks, the VM, primitives, capability objects. The JIT is its `jit` feature | `vali-abi`, `vali-num`, `vali-syntax`, `vali-bytecode` | M1 |
 | `vali-compiler` | The expander and the compiler's front half: core forms, conversion to the IR and optimisation of each library through `vali-opt` (ADR 0017), the contract pass, producing distribution code. One crate because the expander must compile and run transformers. Today it lowers the expander's tree to the IR, which `vali-bytecode` converts to run format; the optimiser's passes come later | `vali-runtime`, `vali-dist` and others | M1 |
 | `vali-stdlib` | Vali's standard libraries compiled ahead of time: its build script compiles them with `vali-compiler` and embeds their artifacts, which `install` hands to the compiler, so starting up loads them instead of expanding them. A crate of its own because the compiler cannot depend on what its own build produces | `vali-compiler`, also as a build dependency | M1 |
-| `vali` | The embedding API that hosts depend on. The compiler sits behind its default `eval` feature | `vali-runtime`, `vali-compiler` | M1 |
+| `vali` | The embedding API that hosts depend on: re-exports only. The compiler sits behind its default `eval` feature, the prebuilt standard libraries behind its default `prebuilt` feature | `vali-runtime`, `vali-macros`, `vali-num`, `vali-syntax`; `vali-compiler` and `vali-stdlib` by feature | M1 |
 | `vali-cli` | The `vali` binary: REPL, scripts, `vali build`, `vali lsp` | `vali`, `vali-build` | M1 |
 | `vali-bench` | The benchmark tool: runs `benchmarks/`, exact counts with the runtime's `counters` feature, medians of repeated timed runs, and comparisons between runs. Not published | `vali-compiler`, `vali-runtime`, `vali-stdlib` | M1 |
 | `vali-macros` | `#[bridge]`. Procedural macros must be a crate of their own | none | M2 |
@@ -34,20 +34,23 @@ Each boundary below exists for a reason recorded in an ADR:
 
 ## Rust namespace
 
-Hosts depend on the `vali` crate, which re-exports what they need:
+Hosts depend on the `vali` crate, which re-exports what they need. Paths marked "not yet" are planned and not built:
 
 | Path | Contents |
 |---|---|
-| `vali::{Isolate, Cx}` | `Isolate<S: Strategy = Default>`: a heap and its library instances, used by one thread at a time, entered through `call` and `with`; `Cx`, the context a host or bridge holds while inside it (ADRs 0003 and 0008) |
+| `vali::{Isolate, Cx}` | `Isolate<S: Strategy = DefaultStrategy>`: a heap and its library instances, used by one thread at a time, entered through `call` and `with`; `Cx`, the context a host or bridge holds while inside it, with the isolate's current task (ADRs 0003 and 0008) |
 | `vali::{Value, Handle}` | Raw values, for the runtime's own code, and handles: `Send`, `'static` roots used through their isolate's context (ADR 0003) |
 | `vali::num`, also re-exported at the top level | `Number`, `Integer`, `Rational`, `Complex` (ADR 0007) |
-| `vali::bridge` | `#[bridge]`, `FromScheme`, `IntoScheme` |
-| `vali::load` | `Loader`, `AsyncLoader`, `LibraryName`, `Identity` (ADR 0009) |
-| `vali::cap` | Capabilities: file, network, environment, clock, randomness |
-| `vali::policy` | Import policies and resource limits |
-| `vali::diag` | `Diagnostic`, `Span`, `SourceId` (ADR 0014) |
+| `vali::{bridge, object}` (macros), `vali::bridge` (module) | `#[bridge]` and `#[object]`, which work through `vali` alone; the module holds `NativeLibrary`, `FromScheme`, `IntoScheme`, `RustObject` and `Context`, the strategy-erased context bridges see (ADR 0016) |
+| `vali::load` (`eval`) | `Loader`, `AsyncLoader`, `LibraryName`, `Identity`, `Source` (ADR 0009) |
+| `vali::compile` and `vali::Repl` (`eval`) | `compile_program`, `load` and the REPL |
+| `vali::stdlib` (`prebuilt`) | `install`, which makes the compiler load the standard libraries from their embedded artifacts |
+| `vali::ports` | The console and the port types bridges take and return |
+| `vali::cap` (not yet) | Capabilities: file, network, environment, clock, randomness |
+| `vali::policy` (not yet) | Import policies and resource limits |
+| `vali::diag` | `Span`, `SourceId`, `Sources` (ADR 0014); `Diagnostic` not yet |
 | `vali::strategy` | The `Strategy` trait and the provided strategies |
-| `vali::serde` (Cargo feature) | Data-format conversion, with the number policy (ADR 0007) |
+| `vali::serde` (Cargo feature, not yet) | Data-format conversion, with the number policy (ADR 0007) |
 
 ## Scheme library namespace
 
