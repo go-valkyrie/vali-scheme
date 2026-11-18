@@ -14,12 +14,12 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 
-use vali_compiler::Repl;
-use vali_runtime::{DeferredHeadered, Error, HeapConfig};
+use vali::strategy::DeferredHeadered;
+use vali::{Error, HeapConfig, Repl};
 
 fn main() -> ExitCode {
     if std::env::var_os("VALI_NO_PREBUILT").is_none() {
-        vali_stdlib::install();
+        vali::stdlib::install();
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {

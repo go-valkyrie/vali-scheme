@@ -1,0 +1,32 @@
+[package]
+name = "vali"
+description = "Vali, an embeddable Scheme: the API hosts depend on"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["eval", "prebuilt"]
+# The expander and compiler: compiling programs, loaders, `eval` and the
+# REPL. Without it a host can only run what is already compiled.
+eval = ["dep:vali-compiler"]
+# Vali's standard libraries compiled ahead of time and embedded, so
+# starting up loads them instead of expanding them.
+prebuilt = ["eval", "dep:vali-stdlib"]
+# Exact counts of what an isolate does (`Cx::counters`), for benchmarks.
+counters = ["vali-runtime/counters"]
+# Native debuggers and profilers walk interpreted frames (ADR 0004 #6).
+native-frames = ["vali-runtime/native-frames"]
+
+[dependencies]
+vali-compiler = { workspace = true, optional = true }
+vali-macros.workspace = true
+vali-num.workspace = true
+vali-runtime.workspace = true
+vali-stdlib = { workspace = true, optional = true }
+vali-syntax.workspace = true
+
+[lints]
+workspace = true

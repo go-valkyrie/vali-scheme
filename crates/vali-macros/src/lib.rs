@@ -1,5 +1,7 @@
 //! Attribute macros that expose Rust types and methods to Vali Scheme
-//! (ADR 0016 #5). Use them through `vali_runtime`, which re-exports them.
+//! (ADR 0016 #5). Use them through `vali` or `vali_runtime`, which
+//! re-export them; the code they generate names whichever of the two the
+//! crate using them depends on, `vali_runtime` first.
 //!
 //! - `#[object]` on a struct or enum makes it a `RustObject`, named in
 //!   kebab case (`StringPort` is `string-port`) unless `name = "..."` says.
@@ -57,6 +59,32 @@ pub fn bridge(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// The path of the runtime in the crate the macro is used in: the runtime
+/// the `vali` facade re-exports, if the crate depends on `vali` under
+/// whatever name, or else `vali_runtime`. A crate depending on neither
+/// gets `::vali_runtime`, and the compiler's error names it.
+fn runtime() -> Tokens {
+    use proc_macro_crate::{FoundCrate, crate_name};
+    let named = |name: &str| {
+        let ident = syn::Ident::new(name, Span::call_site());
+        quote!(::#ident)
+    };
+    // A package's integration tests and examples find it by `Name`;
+    // `Itself` is its library alone.
+    match crate_name("vali") {
+        Ok(FoundCrate::Itself) => quote!(crate::__runtime),
+        Ok(FoundCrate::Name(name)) => {
+            let vali = named(&name);
+            quote!(#vali::__runtime)
+        }
+        Err(_) => match crate_name("vali-runtime") {
+            Ok(FoundCrate::Itself) => quote!(crate),
+            Ok(FoundCrate::Name(name)) => named(&name),
+            Err(_) => named("vali_runtime"),
+        },
+    }
+}
+
 /// `name` in kebab case: `StringPort` and `string_port` are both
 /// `string-port`.
 fn kebab(name: &str) -> String {
@@ -87,6 +115,7 @@ fn string_value(expr: &Expr) -> syn::Result<String> {
 }
 
 fn expand_object(attr: Tokens, item: Tokens) -> syn::Result<Tokens> {
+    let rt = runtime();
     let item: Item = syn::parse2(item)?;
     let (ident, generics) = match &item {
         Item::Struct(s) => (&s.ident, &s.generics),
@@ -113,7 +142,7 @@ fn expand_object(attr: Tokens, item: Tokens) -> syn::Result<Tokens> {
     }
     Ok(quote! {
         #item
-        impl ::vali_runtime::RustObject for #ident {
+        impl #rt::RustObject for #ident {
             const NAME: &'static str = #name;
         }
     })
@@ -208,6 +237,7 @@ fn options(attrs: &mut Vec<syn::Attribute>) -> syn::Result<Options> {
 }
 
 fn expand_bridge(attr: Tokens, item: Tokens) -> syn::Result<Tokens> {
+    let rt = runtime();
     let mut block: ItemImpl = syn::parse2(item)?;
     if let Some((_, path, _)) = &block.trait_ {
         return Err(Error::new(
@@ -243,7 +273,7 @@ fn expand_bridge(attr: Tokens, item: Tokens) -> syn::Result<Tokens> {
         impl #impl_generics #self_ty #where_clause {
             /// Adds this block's bridged functions and methods to `library`.
             #[allow(unused_mut, unused_unsafe, clippy::all)]
-            pub fn #register(library: ::vali_runtime::NativeLibrary) -> ::vali_runtime::NativeLibrary {
+            pub fn #register(library: #rt::NativeLibrary) -> #rt::NativeLibrary {
                 // SAFETY: each function returns what its result converts
                 // to, through IntoScheme, and keeps no raw value.
                 unsafe { library #(#additions)* }
@@ -254,6 +284,7 @@ fn expand_bridge(attr: Tokens, item: Tokens) -> syn::Result<Tokens> {
 
 /// The builder call that adds `f`.
 fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
+    let rt = runtime();
     let ident = &f.sig.ident;
     let name = options.name.unwrap_or_else(|| kebab(&ident.to_string()));
     let mut kinds = Vec::new();
@@ -282,7 +313,7 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
                 classify(&t.ty)
             }
         };
-        let required = quote!(::vali_runtime::bridge::ParamKind::Required);
+        let required = quote!(#rt::bridge::ParamKind::Required);
         match param {
             Param::Text => {
                 kinds.push(required);
@@ -307,7 +338,7 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
                 });
             }
             Param::Owned(ty) => {
-                kinds.push(quote!(<#ty as ::vali_runtime::bridge::Param>::KIND));
+                kinds.push(quote!(<#ty as #rt::bridge::Param>::KIND));
                 takes
                     .push(quote! { let #a = unsafe { __p::take::<#ty>(cx, args, &mut __next) }?; });
                 uses.push(quote!(#a));
@@ -327,17 +358,17 @@ fn function(f: &syn::ImplItemFn, options: Options) -> syn::Result<Tokens> {
     Ok(quote! {
         .raw(
             #name,
-            ::vali_runtime::bridge::__private::arity(&[#(#kinds),*]),
-            |cx: &mut dyn ::vali_runtime::bridge::Context, args: &[::vali_runtime::Value]| {
-                use ::vali_runtime::bridge::__private as __p;
+            #rt::bridge::__private::arity(&[#(#kinds),*]),
+            |cx: &mut dyn #rt::bridge::Context, args: &[#rt::Value]| {
+                use #rt::bridge::__private as __p;
                 let mut __next = 0usize;
-                let mut __held: ::std::vec::Vec<::vali_runtime::Value> = ::std::vec::Vec::new();
+                let mut __held: ::std::vec::Vec<#rt::Value> = ::std::vec::Vec::new();
                 // SAFETY: the arguments are the values the bridge was called
                 // with, and each borrow is released below, after the call
                 // that uses it. Converting the arguments runs inside the
                 // guard too, so a panic converting a later one cannot leave
                 // an earlier one borrowed.
-                let __outcome = __p::guarded(|| -> ::core::result::Result<#output, ::vali_runtime::Error> {
+                let __outcome = __p::guarded(|| -> ::core::result::Result<#output, #rt::Error> {
                     #(#takes)*
                     Ok(Self::#ident(#(#uses),*))
                 });

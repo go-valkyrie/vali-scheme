@@ -23,7 +23,7 @@ use crate::strategy::Strategy;
 
 /// An isolate: a heap and the libraries loaded into it, used by one
 /// thread at a time.
-pub struct Isolate<S: Strategy> {
+pub struct Isolate<S: Strategy = crate::DefaultStrategy> {
     cx: Cx<S>,
 }
 

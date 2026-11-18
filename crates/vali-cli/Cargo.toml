@@ -10,11 +10,11 @@ repository.workspace = true
 [[bin]]
 name = "vali"
 path = "src/main.rs"
+# The `vali` library documents itself under the same name.
+doc = false
 
 [dependencies]
-vali-compiler.workspace = true
-vali-runtime.workspace = true
-vali-stdlib.workspace = true
+vali.workspace = true
 
 [lints]
 workspace = true
