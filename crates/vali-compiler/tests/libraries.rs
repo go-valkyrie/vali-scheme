@@ -516,3 +516,70 @@ fn macros_work_across_library_contexts() {
         "(2 (3) ((4) (4)))",
     )]);
 }
+
+/// Compiles `source`, with the libraries `loader` serves, as the program
+/// `main`, and loads and runs it in `cx`.
+fn load_main(
+    cx: &mut Cx<NoCollection>,
+    source: &str,
+    loader: &impl Loader,
+) -> Result<vali_runtime::ModuleId, String> {
+    let program = compile_program(source, &Identity::new("main"), loader).map_err(|e| e.message)?;
+    let id = vali_compiler::load(cx, program).map_err(|e| e.to_string())?;
+    cx.run(id).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// Two programs loaded into one isolate, under one name, keep their syntax
+/// apart: loading the second leaves what the first's syntax objects mean.
+#[test]
+fn programs_in_one_isolate_keep_their_syntax_apart() {
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    let none = Map(Vec::new());
+    let first = load_main(
+        &mut cx,
+        "(define (get) (list (syntax->datum #'(from first)) (free-identifier=? #'car #'car)))",
+        &none,
+    )
+    .unwrap();
+    let get = cx.variable(first, "get").unwrap();
+    load_main(
+        &mut cx,
+        "(define (get) (syntax->datum #'(from second)))",
+        &none,
+    )
+    .unwrap();
+    let result = cx.call(&get, &[]).unwrap();
+    assert_eq!(cx.write_string(&result).unwrap(), "((from first) #t)");
+}
+
+/// A library already loaded in an isolate is reused only if it is the one
+/// a program was compiled against; another under the same name is an
+/// error, not a silent link to the old one.
+#[test]
+fn a_changed_library_is_not_linked_silently() {
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    let version = |n: u32| {
+        Map(vec![(
+            "(versioned)",
+            Box::leak(
+                format!(
+                    "(define-library (versioned)
+                       (import (scheme base))
+                       (export version)
+                       (begin (define (version) {n})))"
+                )
+                .into_boxed_str(),
+            ),
+        )])
+    };
+    let program = "(import (scheme base) (versioned)) (version)";
+    load_main(&mut cx, program, &version(1)).unwrap();
+    // The same library again is fine.
+    load_main(&mut cx, program, &version(1)).unwrap();
+    let error = load_main(&mut cx, program, &version(2)).unwrap_err();
+    assert!(
+        error.contains("already loaded, compiled differently"),
+        "{error}"
+    );
+}

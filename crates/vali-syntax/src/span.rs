@@ -59,6 +59,29 @@ impl Sources {
         Sources::default()
     }
 
+    /// Adds every source of `other` that this does not already hold, the
+    /// same identity with the same text, and returns where each of
+    /// `other`'s ids is now.
+    pub fn absorb(&mut self, other: &Sources) -> std::collections::HashMap<SourceId, SourceId> {
+        let id = |i: usize| SourceId(u32::try_from(i + 1).expect("fewer than 2^32 sources"));
+        let mut map = std::collections::HashMap::new();
+        for (i, source) in other.sources.iter().enumerate() {
+            let at = match self
+                .sources
+                .iter()
+                .position(|s| s.identity == source.identity && s.text == source.text)
+            {
+                Some(at) => at,
+                None => {
+                    self.sources.push(std::sync::Arc::clone(source));
+                    self.sources.len() - 1
+                }
+            };
+            map.insert(id(i), id(at));
+        }
+        map
+    }
+
     /// Adds the text of the source `identity`, returning its id.
     pub fn add(&mut self, identity: &str, text: &str) -> SourceId {
         let line_starts = std::iter::once(0)

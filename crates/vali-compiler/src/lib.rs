@@ -363,6 +363,33 @@ pub fn load_with<S: vali_runtime::Strategy>(
     load_inner(cx, program, Some(loader))
 }
 
+/// Merges a program's syntax data for run time into the isolate's, so the
+/// syntax objects of programs loaded before keep their meaning.
+pub(crate) fn merge_syntax_data<S: vali_runtime::Strategy>(
+    cx: &mut vali_runtime::Cx<S>,
+    shared: phase::Shared,
+) -> Result<(), vali_runtime::Error> {
+    let existing = cx.set_expander_data(None).and_then(|data| {
+        (data as Box<dyn std::any::Any>)
+            .downcast::<phase::Shared>()
+            .ok()
+    });
+    let merged = match existing {
+        Some(mut into) => {
+            let merged = expand::merge_syntax(&mut into, shared);
+            let failed = merged.err();
+            cx.set_expander_data(Some(into));
+            return match failed {
+                Some(e) => Err(vali_runtime::Error::scheme(e.to_string())),
+                None => Ok(()),
+            };
+        }
+        None => shared,
+    };
+    cx.set_expander_data(Some(Box::new(merged)));
+    Ok(())
+}
+
 fn load_inner<S: vali_runtime::Strategy>(
     cx: &mut vali_runtime::Cx<S>,
     mut program: Program,
@@ -374,13 +401,22 @@ fn load_inner<S: vali_runtime::Strategy>(
         cx.set_evaluator(Some(evaluator));
     }
     if let Some(SyntaxData(shared)) = program.syntax {
-        cx.set_expander_data(Some(Box::new(shared)));
+        merge_syntax_data(cx, shared)?;
     }
     for (identity, library) in program.natives {
         cx.register_native_library(identity.as_str(), library);
     }
     for (identity, module) in program.libraries {
-        if cx.library(identity.as_str()).is_some() {
+        // A library the isolate has must be the one this was compiled
+        // against: linking to another of the same name would be wrong
+        // silently.
+        if let Some(id) = cx.library(identity.as_str()) {
+            if *cx.module(id) != module {
+                return Err(vali_runtime::Error::scheme(format!(
+                    "library {identity} is already loaded, compiled differently: \
+                     this program was compiled against another version of it"
+                )));
+            }
             continue;
         }
         let id = cx.load(module)?;

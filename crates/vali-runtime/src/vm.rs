@@ -383,6 +383,11 @@ impl<S: Strategy> Cx<S> {
         self.libraries.get(identity).copied()
     }
 
+    /// The bytecode of the loaded module `id`.
+    pub fn module(&self, id: ModuleId) -> &vali_bytecode::Module {
+        &self.instances[id.0].loaded.module
+    }
+
     /// The cell the library `library` exports as `name`.
     fn exported(&self, library: &str, name: &str) -> Result<Cell, Error> {
         let Some(&ModuleId(id)) = self.libraries.get(library) else {

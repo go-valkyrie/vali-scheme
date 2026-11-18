@@ -6,7 +6,7 @@
 - **Amended:** 2026-11-17, `syntax-rules` stays built into the expander (item 14)
 - **Amended:** 2026-11-17, the binding table keeps each symbol's entries by the newest scope in their sets, so resolving stays linear in the program (item 2)
 - **Amended:** 2026-11-18, calls to standard procedures become the IR's primitive operations (item 16, ADR 0017)
-- **Amended:** 2026-11-18, as built: a scope context per unit, syntax exports remapped into importers, and bindings named apart from any context (item 5)
+- **Amended:** 2026-11-18, as built: a scope context per unit, syntax exports remapped into importers, and bindings named apart from any context (item 5); run-time syntax data merged per isolate (item 10)
 - **Related:** 0001 (phasing, determinism, stable scope identities), 0007 (`syntax-case` and the syntax procedures), 0012 (distribution format), 0013 (standalone executables, `eval`), 0014 (spans and macro origins), 0017 (primitive operations)
 
 ## Context
@@ -51,6 +51,8 @@ Syntax objects are values that macros manipulate. Most exist only at expansion t
 
 9. **Syntax objects are fully supported at run time.** Phase-0 code can create, take apart and compare syntax objects, and pass them to `eval`, with the same meaning as at expansion time.
 10. **Only libraries that need it carry binding data at run time.** A library whose phase-0 code creates syntax objects (with `syntax`, `quasisyntax` or `quote-syntax` at phase 0) stores, with its run-time code, the scopes and binding-table entries those syntax objects can reach. A library that creates none stores nothing. This applies to invoke sections and to standalone executables alike (ADR 0013).
+
+    **As built:** a compiled program carries the syntax data its run-time syntax objects need: its unit's scopes, bindings and compiled syntax, which include those of what it imports. Loading it merges that into the isolate's, remapping its scopes and sources as an import does, so syntax objects of programs loaded before keep their meaning; `eval` merges the same way. Compiled syntax is known by a key code names: a library's identity, or for a program, an `eval` or a REPL input, its identity and a hash of its text, so programs loaded under one name keep theirs apart.
 11. **Each library instance creates its expansion context for run-time syntax lazily,** the first time its run-time code needs fresh scopes or must resolve an identifier.
 
 ### The expander

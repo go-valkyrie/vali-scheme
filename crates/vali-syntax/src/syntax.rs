@@ -176,8 +176,12 @@ impl Syntax {
             content: Arc::new(content),
             scopes,
             pending,
-            span: self.span,
-            origin: self.origin.clone(),
+            span: remap.span(self.span),
+            origin: if remap.moves_sources() {
+                self.origin.as_ref().map(|o| remap_origin(remap, o))
+            } else {
+                self.origin.clone()
+            },
         })
     }
 
@@ -536,6 +540,26 @@ pub fn free_identifier_eq<B: PartialEq>(
         }
         _ => false,
     }
+}
+
+/// `origin`'s chain, with its spans moved as `remap` says.
+fn remap_origin(remap: &Remap, origin: &Arc<Origin>) -> Arc<Origin> {
+    // Iteratively: a chain can be as long as macro steps nest.
+    let mut chain = Vec::new();
+    let mut at = Some(origin);
+    while let Some(o) = at {
+        chain.push(o);
+        at = o.parent.as_ref();
+    }
+    let mut parent = None;
+    for o in chain.into_iter().rev() {
+        parent = Some(Arc::new(Origin {
+            macro_name: o.macro_name.clone(),
+            use_site: remap.span(o.use_site),
+            parent,
+        }));
+    }
+    parent.expect("a chain of at least one")
 }
 
 #[cfg(test)]

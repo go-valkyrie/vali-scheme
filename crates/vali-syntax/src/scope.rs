@@ -307,6 +307,9 @@ mod tests {
 pub struct Remap {
     scopes: HashMap<Scope, Scope>,
     sets: HashMap<ScopeSetId, ScopeSetId>,
+    /// Where spans' sources are in the target, when they move too: syntax
+    /// merged with its sources into another table (`Sources::absorb`).
+    sources: HashMap<crate::SourceId, crate::SourceId>,
 }
 
 impl Remap {
@@ -354,6 +357,24 @@ impl Remap {
         let mapped = to.intern(&scopes)?;
         self.sets.insert(set, mapped);
         Ok(mapped)
+    }
+
+    /// Moves spans to the sources `map` says, as syntax is remapped.
+    pub fn move_sources(&mut self, map: HashMap<crate::SourceId, crate::SourceId>) {
+        self.sources = map;
+    }
+
+    /// `span`, in the sources syntax is remapped into.
+    pub fn span(&self, span: crate::Span) -> crate::Span {
+        match self.sources.get(&span.source) {
+            Some(&source) => crate::Span { source, ..span },
+            None => span,
+        }
+    }
+
+    /// Whether spans move to other sources.
+    pub fn moves_sources(&self) -> bool {
+        !self.sources.is_empty()
     }
 
     /// Whether every scope of `set` has been met: only then can an

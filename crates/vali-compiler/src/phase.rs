@@ -41,6 +41,8 @@ pub(crate) struct Compiled {
 /// runs.
 #[derive(Clone)]
 pub(crate) struct Shared {
+    /// The scope of the core forms in `context`.
+    pub(crate) core_scope: vali_syntax::Scope,
     pub(crate) context: ScopeContext,
     pub(crate) table: BindingTable<String, Binding>,
     /// Each unit's compiled syntax, by the unit's identity.

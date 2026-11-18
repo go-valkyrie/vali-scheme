@@ -196,6 +196,69 @@ fn remap_compiled(
     })
 }
 
+/// Binds in `table`, in `to`, every binding of `from_table`, in `from`,
+/// whose scopes `remap` has all met: no other could match an identifier
+/// remapped so far. Taken in a fixed order, so the sets made are numbered
+/// the same every time (ADR 0001 #4).
+fn remap_bindings(
+    from_table: &BindingTable<String, Binding>,
+    from: &ScopeContext,
+    remap: &mut Remap,
+    table: &mut BindingTable<String, Binding>,
+    to: &mut ScopeContext,
+) -> std::result::Result<(), TooManyScopes> {
+    let mut entries: Vec<_> = from_table
+        .entries()
+        .filter(|(_, _, _, binding)| {
+            !matches!(binding, Binding::Local(_) | Binding::PatternVar(..))
+        })
+        .collect();
+    entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    for (symbol, scopes, phases, binding) in entries {
+        if !remap.has_met_all(from, scopes) {
+            continue;
+        }
+        let scopes = remap.set(from, to, scopes)?;
+        // Bound already, the same way, through another import.
+        let _ = table.bind(to, symbol.clone(), scopes, phases.clone(), binding.clone());
+    }
+    Ok(())
+}
+
+/// Merges `from`, a program's syntax data for run time, into `into`, the
+/// isolate's, so syntax objects of programs loaded before keep their
+/// meaning: its scopes, compiled syntax and sources are remapped into
+/// `into`'s. Compiled syntax under a key `into` holds already is the same
+/// unit's, and is kept (`Unit::key`).
+pub(crate) fn merge_syntax(
+    into: &mut Shared,
+    from: Shared,
+) -> std::result::Result<(), TooManyScopes> {
+    let mut remap = Remap::new();
+    remap.identify(from.core_scope, into.core_scope);
+    remap.move_sources(into.sources.absorb(&from.sources));
+    let mut keys: Vec<&String> = from.compiled.keys().collect();
+    keys.sort();
+    for key in keys {
+        if !into.compiled.contains_key(key) {
+            let copy = remap_compiled(
+                &from.compiled[key],
+                &mut remap,
+                &from.context,
+                &mut into.context,
+            )?;
+            into.compiled.insert(key.clone(), copy);
+        }
+    }
+    remap_bindings(
+        &from.table,
+        &from.context,
+        &mut remap,
+        &mut into.table,
+        &mut into.context,
+    )
+}
+
 /// The scope context a unit expands in, and what is bound there: its own
 /// definitions, and what its imports brought, remapped into it (ADR 0015
 /// #5). A finished unit's state is its syntax export.
@@ -329,6 +392,13 @@ fn string(s: &str, span: Span) -> Expr {
     })
 }
 
+/// FNV-1a: a fixed, deterministic hash (ADR 0001 #4).
+fn text_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 fn too_many(e: TooManyScopes) -> CompileError {
     CompileError {
         message: e.to_string(),
@@ -357,6 +427,11 @@ struct Unit {
     /// macros, compiled syntax and bindings there, which an importer
     /// remaps into its own context. None for a native library.
     syntax: Option<Arc<ContextState>>,
+    /// What its compiled syntax is known by, which its code names: a
+    /// library's identity, or for a program, an `eval` or a REPL input,
+    /// its identity and a hash of its text, so two programs loaded into
+    /// one isolate under one name keep their syntax apart.
+    key: String,
 }
 
 /// The isolate global a REPL's top-level `name` is. REPL globals have
@@ -420,6 +495,9 @@ pub(crate) struct Expander {
     natives: Vec<(String, std::sync::Arc<vali_runtime::NativeLibrary>)>,
     /// Whether the next unit is one of Vali's own (`Unit::own`).
     next_own: bool,
+    /// Whether the next unit's key includes a hash of its text
+    /// (`Unit::key`).
+    next_hashed: bool,
     /// The interaction environment's scope sets, once it is used: where
     /// its imports are bound, and where its own definitions are, inside
     /// those. Every REPL input uses the same ones, so what one defines the
@@ -471,6 +549,7 @@ impl Expander {
             floors: Vec::new(),
             natives: Vec::new(),
             next_own: false,
+            next_hashed: false,
             includes: crate::loader::Includes::new(),
             available: crate::loader::Available::new(),
             sources: vali_syntax::Sources::new(),
@@ -662,6 +741,7 @@ impl Expander {
             own: false,
             repl: false,
             syntax: None,
+            key: identity.to_owned(),
         });
         Ok(module)
     }
@@ -773,31 +853,14 @@ impl Expander {
                 self.compiled.insert(name.clone(), copy);
             }
         }
-        let mut entries: Vec<_> = export
-            .table
-            .entries()
-            .filter(|(_, _, _, binding)| {
-                !matches!(binding, Binding::Local(_) | Binding::PatternVar(..))
-            })
-            .collect();
-        entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        for (symbol, scopes, phases, binding) in entries {
-            if !remap.has_met_all(from, scopes) {
-                continue;
-            }
-            let scopes = remap
-                .set(from, &mut self.context, scopes)
-                .map_err(too_many)?;
-            // Bound already, the same way, through another import.
-            let _ = self.table.bind(
-                &self.context,
-                symbol.clone(),
-                scopes,
-                phases.clone(),
-                binding.clone(),
-            );
-        }
-        Ok(())
+        remap_bindings(
+            &export.table,
+            from,
+            &mut remap,
+            &mut self.table,
+            &mut self.context,
+        )
+        .map_err(too_many)
     }
 
     /// Notes `m`, a macro the current unit defines, and returns its name.
@@ -826,6 +889,7 @@ impl Expander {
     ) -> Result<Module> {
         self.start_context(false, imports)?;
         self.next_own = internal;
+        self.next_hashed = true;
         let span = body.first().map_or(
             Span {
                 source: SourceId(0),
@@ -854,6 +918,7 @@ impl Expander {
         body: &[vali_syntax::Datum],
     ) -> Result<Module> {
         self.start_context(true, imports)?;
+        self.next_hashed = true;
         let span = body.first().map_or(
             Span {
                 source: SourceId(0),
@@ -944,6 +1009,11 @@ impl Expander {
             own: std::mem::take(&mut self.next_own),
             repl,
             syntax: None,
+            key: if std::mem::take(&mut self.next_hashed) {
+                format!("{identity}@{:016x}", text_hash(&format!("{body:?}")))
+            } else {
+                identity.to_owned()
+            },
         });
         self.top = top;
         for set in imports {
@@ -1419,6 +1489,7 @@ impl Expander {
         let name = self.macros[&m].name.clone();
         let failed = |e: vali_runtime::Error| error(format!("{name}: {e}"), form.span());
         let shared = Shared {
+            core_scope: self.core_scope,
             context: std::mem::replace(&mut self.context, ScopeContext::new()),
             table: std::mem::take(&mut self.table),
             compiled: std::mem::take(&mut self.compiled),
@@ -2172,14 +2243,10 @@ impl Expander {
     /// The current unit's table of compiled syntax, numbered from zero,
     /// and its name, which code passes with each number, as a constant.
     fn unit_table(&mut self, span: Span) -> (Expr, &mut Compiled) {
-        let identity = &self
-            .units
-            .last()
-            .expect("a unit is being expanded")
-            .identity;
+        let key = &self.units.last().expect("a unit is being expanded").key;
         (
-            string(identity, span),
-            self.compiled.entry(identity.clone()).or_default(),
+            string(key, span),
+            self.compiled.entry(key.clone()).or_default(),
         )
     }
 
@@ -2187,6 +2254,7 @@ impl Expander {
     /// at run time (ADR 0015 #10).
     pub(crate) fn syntax_data(&self) -> Shared {
         Shared {
+            core_scope: self.core_scope,
             context: self.context.clone(),
             table: self.table.clone(),
             compiled: self.compiled.clone(),

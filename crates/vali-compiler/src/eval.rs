@@ -264,7 +264,7 @@ fn prepare<S: Strategy>(
     };
     let expander = &mut evaluator.expander;
     if crate::uses_syntax(&body) {
-        cx.set_expander_data(Some(Box::new(expander.syntax_data())));
+        crate::merge_syntax_data(cx, expander.syntax_data())?;
     }
     let id = cx.load(body)?;
     thunks.push(cx.module_body(id)?);
