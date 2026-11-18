@@ -469,6 +469,85 @@ fn the_validator_keeps_slot_0() {
     assert!(rejected(&call).contains("slot 0"));
 }
 
+/// Every instruction that writes a slot is rejected when that slot is 0.
+#[test]
+fn the_validator_rejects_each_write_to_slot_0() {
+    let writes = [
+        I::Mov { dst: 0, src: 1 },
+        I::MakeBox { dst: 0, src: 1 },
+        I::Unbox { dst: 0, src: 1 },
+        I::Not { dst: 0, src: 1 },
+        I::IsNull { dst: 0, src: 1 },
+        I::IsPair { dst: 0, src: 1 },
+        I::Car { dst: 0, pair: 1 },
+        I::Cdr { dst: 0, pair: 1 },
+        I::VectorLength { dst: 0, vector: 1 },
+        I::LoadInt { dst: 0, value: 1 },
+        I::LoadConstant {
+            dst: 0,
+            constant: 0,
+        },
+        I::GetVariable {
+            dst: 0,
+            variable: 0,
+        },
+        I::Closure {
+            dst: 0,
+            function: 0,
+            // The function holding the instruction has one free variable.
+            free: vec![1],
+        },
+        I::Free { dst: 0, index: 0 },
+        I::Add { dst: 0, a: 1, b: 1 },
+        I::Sub { dst: 0, a: 1, b: 1 },
+        I::Mul { dst: 0, a: 1, b: 1 },
+        I::Lt { dst: 0, a: 1, b: 1 },
+        I::Le { dst: 0, a: 1, b: 1 },
+        I::NumEq { dst: 0, a: 1, b: 1 },
+        I::Eq { dst: 0, a: 1, b: 1 },
+        I::Cons {
+            dst: 0,
+            car: 1,
+            cdr: 1,
+        },
+        I::MakeVector {
+            dst: 0,
+            len: 1,
+            fill: 1,
+        },
+        I::VectorRef {
+            dst: 0,
+            vector: 1,
+            index: 1,
+        },
+        I::AddImm {
+            dst: 0,
+            a: 1,
+            imm: 1,
+        },
+        I::SubImm {
+            dst: 0,
+            a: 1,
+            imm: 1,
+        },
+    ];
+    for write in writes {
+        let mut m = ModuleBuilder::new("slot0");
+        m.constant(Constant::Integer(1));
+        m.variable("x");
+        let mut f = FunctionBuilder::new(None, Arity::exactly(0), 2, 1);
+        f.emit(write.clone()).emit(I::Return { src: 1 });
+        m.function(f.finish().unwrap());
+        let mut body = FunctionBuilder::new(None, Arity::exactly(0), 1, 0);
+        body.emit(I::Return { src: 0 });
+        let body = m.function(body.finish().unwrap());
+        let module = m.finish(body);
+        let error = validate(&module).expect_err(&format!("{write:?} was accepted"));
+        let message = error.to_string();
+        assert!(message.contains("slot 0"), "{write:?}: {message}");
+    }
+}
+
 #[test]
 fn the_validator_rejects_bad_control_flow() {
     let mut runs_off = module_with(2, |_, f| {

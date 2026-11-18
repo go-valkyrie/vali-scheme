@@ -356,6 +356,27 @@ fn written_slot(instruction: &Instruction) -> Option<u16> {
         | Instruction::VectorRef { dst, .. }
         | Instruction::AddImm { dst, .. }
         | Instruction::SubImm { dst, .. } => Some(dst),
-        _ => None,
+        // `Call` and `CallDirect` write `base + 3`, which is never slot 0,
+        // and their headers are checked separately above.
+        Instruction::SetVariable { .. }
+        | Instruction::SetBox { .. }
+        | Instruction::Jump { .. }
+        | Instruction::If { .. }
+        | Instruction::IfEq { .. }
+        | Instruction::IfLt { .. }
+        | Instruction::IfLe { .. }
+        | Instruction::IfNumEq { .. }
+        | Instruction::IfLtImm { .. }
+        | Instruction::IfNull { .. }
+        | Instruction::IfPair { .. }
+        | Instruction::Call { .. }
+        | Instruction::TailCall { .. }
+        | Instruction::CallDirect { .. }
+        | Instruction::TailCallDirect { .. }
+        | Instruction::Return { .. }
+        | Instruction::SetCar { .. }
+        | Instruction::SetCdr { .. }
+        | Instruction::VectorSet { .. }
+        | Instruction::SetFree { .. } => None,
     }
 }
