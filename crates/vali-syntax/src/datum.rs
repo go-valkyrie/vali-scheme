@@ -50,6 +50,49 @@ pub enum DatumKind {
     LabelRef(u64),
 }
 
+/// Drops the datums inside a datum one at a time, from a list of its own,
+/// so that dropping a deeply nested datum cannot overflow the stack.
+impl Drop for Datum {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        take_children(&mut self.kind, &mut pending);
+        while let Some(mut datum) = pending.pop() {
+            // `datum` is left without children, so dropping it at the end
+            // of this iteration recurses no further.
+            take_children(&mut datum.kind, &mut pending);
+        }
+    }
+}
+
+/// Moves the datums directly inside `kind` to `out`.
+fn take_children(kind: &mut DatumKind, out: &mut Vec<Datum>) {
+    match kind {
+        DatumKind::List { items, tail } => {
+            out.append(items);
+            out.extend(tail.take().map(|tail| *tail));
+        }
+        DatumKind::Vector(items) => out.append(items),
+        DatumKind::Labelled(_, inner) => {
+            let inner = std::mem::replace(&mut **inner, Datum::leaf());
+            out.push(inner);
+        }
+        _ => {}
+    }
+}
+
+impl Datum {
+    /// A datum with nothing inside, to leave in place of one taken out.
+    fn leaf() -> Datum {
+        Datum {
+            kind: DatumKind::Boolean(false),
+            span: Span {
+                source: crate::SourceId(0),
+                range: text_size::TextRange::default(),
+            },
+        }
+    }
+}
+
 /// A [`DatumBuilder`] that builds plain [`Datum`]s.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlainBuilder;

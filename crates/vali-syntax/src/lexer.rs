@@ -96,39 +96,80 @@ pub struct Lexed {
 ///
 /// If `source` is 4 GiB or longer, since ranges are 32-bit.
 pub fn lex(source: &str) -> Lexed {
-    let len = TextSize::try_from(source.len()).expect("sources are limited to 4 GiB");
-    let mut out = Lexed::default();
-    let mut push = |kind, start: usize, end: usize, error: Option<LexErrorKind>| {
-        let range = TextRange::new(offset(start), offset(end));
-        out.tokens.push(Token { kind, range });
-        if let Some(kind) = error {
-            out.errors.push(LexError { kind, range });
-        }
+    let mut tokens = Tokens::new(source);
+    let mut out = Lexed {
+        tokens: tokens.by_ref().collect(),
+        errors: Vec::new(),
     };
-
-    let body_start = shebang_len(source);
-    if body_start > 0 {
-        push(SyntaxKind::Shebang, 0, body_start, None);
-    }
-
-    let mut lexer = Raw::lexer(&source[body_start..]);
-    while let Some(result) = lexer.next() {
-        let span = lexer.span();
-        let (start, end) = (body_start + span.start, body_start + span.end);
-        let text = &source[start..end];
-        let classified = result.and_then(|raw| classify(raw, text));
-        match classified {
-            Ok(kind) => push(kind, start, end, None),
-            Err(error) => push(SyntaxKind::Error, start, end, Some(error)),
-        }
-    }
+    out.errors = tokens.errors;
     debug_assert_eq!(
         out.tokens
             .last()
             .map_or(TextSize::from(0), |t| t.range.end()),
-        len
+        offset(source.len())
     );
     out
+}
+
+/// The tokens of a source, lexed only as they are asked for, so that a
+/// reader wanting one datum lexes no further than its end.
+pub(crate) struct Tokens<'s> {
+    source: &'s str,
+    /// Where the Logos lexer's input starts: after any shebang line.
+    body_start: usize,
+    /// The shebang token, until it has been produced.
+    shebang: Option<Token>,
+    lexer: logos::Lexer<'s, Raw>,
+    /// One entry for each [`SyntaxKind::Error`] token produced so far.
+    pub(crate) errors: Vec<LexError>,
+}
+
+impl<'s> Tokens<'s> {
+    /// The tokens of `source`.
+    ///
+    /// # Panics
+    ///
+    /// If `source` is 4 GiB or longer, since ranges are 32-bit.
+    pub(crate) fn new(source: &'s str) -> Self {
+        TextSize::try_from(source.len()).expect("sources are limited to 4 GiB");
+        let body_start = shebang_len(source);
+        let shebang = (body_start > 0).then(|| Token {
+            kind: SyntaxKind::Shebang,
+            range: TextRange::new(offset(0), offset(body_start)),
+        });
+        Tokens {
+            source,
+            body_start,
+            shebang,
+            lexer: Raw::lexer(&source[body_start..]),
+            errors: Vec::new(),
+        }
+    }
+}
+
+impl Iterator for Tokens<'_> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Token> {
+        if let Some(shebang) = self.shebang.take() {
+            return Some(shebang);
+        }
+        let result = self.lexer.next()?;
+        let span = self.lexer.span();
+        let (start, end) = (self.body_start + span.start, self.body_start + span.end);
+        let range = TextRange::new(offset(start), offset(end));
+        let text = &self.source[start..end];
+        match result.and_then(|raw| classify(raw, text)) {
+            Ok(kind) => Some(Token { kind, range }),
+            Err(kind) => {
+                self.errors.push(LexError { kind, range });
+                Some(Token {
+                    kind: SyntaxKind::Error,
+                    range,
+                })
+            }
+        }
+    }
 }
 
 fn offset(n: usize) -> TextSize {

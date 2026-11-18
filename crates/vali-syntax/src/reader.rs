@@ -2,6 +2,7 @@
 //! datums, doing the reader's semantic work on the way.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ops::Range;
 
 use text_size::{TextRange, TextSize};
@@ -9,7 +10,8 @@ use unicode_normalization::UnicodeNormalization;
 use vali_num::{Number, Radix};
 
 use crate::datum::{CHARACTER_NAMES, Datum, PlainBuilder};
-use crate::parser::{EventSink, ParseError, ParseErrorKind, parse};
+use crate::lexer::Tokens;
+use crate::parser::{EventSink, ParseError, ParseErrorKind, parse, parse_first};
 use crate::tree::{SyntaxNode, TreeSink};
 use crate::{LexErrorKind, SourceId, Span, SyntaxKind, Token, lex};
 
@@ -70,6 +72,10 @@ pub enum ReadErrorKind {
     UndefinedLabel,
     /// A label defined twice in the same datum.
     DuplicateLabel,
+    /// A label whose datum is nothing but a reference to a label still
+    /// being defined, as in `#0=#0#` or `#0=#1=#0#`: it stands for no
+    /// datum at all.
+    LabelOfItself,
 }
 
 impl std::fmt::Display for ReadErrorKind {
@@ -86,6 +92,9 @@ impl std::fmt::Display for ReadErrorKind {
             ReadErrorKind::UndefinedLabel => f.write_str("datum label is not defined here"),
             ReadErrorKind::DuplicateLabel => {
                 f.write_str("datum label is already defined in this datum")
+            }
+            ReadErrorKind::LabelOfItself => {
+                f.write_str("datum label stands for nothing but a label still being defined")
             }
         }
     }
@@ -137,6 +146,57 @@ pub fn read_with<B: DatumBuilder>(source: &str, id: SourceId, builder: &mut B) -
     }));
     errors.sort_by_key(|e| e.range.start());
     Read { datums, errors }
+}
+
+/// The first datum read from a source, as a port's `read` wants it.
+#[derive(Clone, Debug)]
+pub struct ReadFirst<D> {
+    /// The first datum, or `None` if the source holds none or it has
+    /// errors.
+    pub datum: Option<D>,
+    /// Every problem found in the first datum and the trivia before it, in
+    /// source order. Nothing after the datum is read.
+    pub errors: Vec<ReadError>,
+    /// Where reading stopped: the end of the datum, or of the source if it
+    /// holds no datum.
+    pub end: TextSize,
+    /// Whether `#!fold-case` is in effect after the datum, for the next
+    /// read from the same port.
+    pub fold_case: bool,
+}
+
+/// Reads the first datum in `source` with `builder`, looking no further
+/// than its end, so that reading a port datum by datum takes linear time.
+/// `fold_case` says whether `#!fold-case` is already in effect.
+pub fn read_first_with<B: DatumBuilder>(
+    source: &str,
+    id: SourceId,
+    fold_case: bool,
+    builder: &mut B,
+) -> ReadFirst<B::Datum> {
+    let mut tokens = Tokens::new(source);
+    let mut sink = DatumSink::new(id, builder);
+    sink.fold_case = fold_case;
+    let end = parse_first(source, &mut tokens, &mut sink);
+    let fold_case = sink.fold_case;
+    let (mut datums, mut errors) = sink.finish();
+    errors.extend(tokens.errors.iter().map(|e| ReadError {
+        kind: ReadErrorKind::Lex(e.kind),
+        range: e.range,
+    }));
+    errors.sort_by_key(|e| e.range.start());
+    ReadFirst {
+        datum: datums.pop().filter(|_| errors.is_empty()),
+        errors,
+        end,
+        fold_case,
+    }
+}
+
+/// Reads the first datum in `source` into a plain [`Datum`], as
+/// [`read_first_with`] does.
+pub fn read_first(source: &str, id: SourceId, fold_case: bool) -> ReadFirst<Datum> {
+    read_first_with(source, id, fold_case, &mut PlainBuilder)
 }
 
 /// A lossless syntax tree and the syntax errors in it.
@@ -226,7 +286,9 @@ pub struct DatumSink<'b, B: DatumBuilder> {
     errors: Vec<ReadError>,
     fold_case: bool,
     /// Labels defined so far in the current top-level datum.
-    labels: Vec<u64>,
+    labels: HashSet<u64>,
+    /// The labels whose datums are still being read.
+    open_labels: HashSet<u64>,
 }
 
 impl<B: DatumBuilder> std::fmt::Debug for DatumSink<'_, B> {
@@ -249,7 +311,8 @@ impl<'b, B: DatumBuilder> DatumSink<'b, B> {
             output: Vec::new(),
             errors: Vec::new(),
             fold_case: false,
-            labels: Vec::new(),
+            labels: HashSet::new(),
+            open_labels: HashSet::new(),
         }
     }
 
@@ -298,6 +361,7 @@ impl<'b, B: DatumBuilder> DatumSink<'b, B> {
     fn atom(&mut self, kind: SyntaxKind, text: &str, range: TextRange) {
         if self.at_top_level() {
             self.labels.clear();
+            self.open_labels.clear();
         }
         if self.top().kind == SyntaxKind::Bytevector {
             return self.byte(kind, text, range);
@@ -339,6 +403,12 @@ impl<'b, B: DatumBuilder> DatumSink<'b, B> {
                 self.builder.keyword(&name, span)
             }
             SyntaxKind::LabelRef => match label_number(text) {
+                Some(label)
+                    if self.top().kind == SyntaxKind::Labelled
+                        && self.open_labels.contains(&label) =>
+                {
+                    return self.fail(ReadErrorKind::LabelOfItself, range);
+                }
                 Some(label) if self.labels.contains(&label) => self.builder.label_ref(label, span),
                 Some(_) => return self.fail(ReadErrorKind::UndefinedLabel, range),
                 None => return self.fail(ReadErrorKind::LabelTooLarge, range),
@@ -378,6 +448,7 @@ impl<B: DatumBuilder> EventSink for DatumSink<'_, B> {
         // Labels are scoped to the top-level datum they appear in.
         if kind != SyntaxKind::CommentedDatum && self.at_top_level() {
             self.labels.clear();
+            self.open_labels.clear();
         }
         self.stack.push(Frame::new(kind));
     }
@@ -411,7 +482,8 @@ impl<B: DatumBuilder> EventSink for DatumSink<'_, B> {
                     self.fail(ReadErrorKind::DuplicateLabel, token.range)
                 }
                 Some(label) => {
-                    self.labels.push(label);
+                    self.labels.insert(label);
+                    self.open_labels.insert(label);
                     self.top().label = Some(label);
                 }
                 None => self.fail(ReadErrorKind::LabelTooLarge, token.range),
@@ -423,6 +495,9 @@ impl<B: DatumBuilder> EventSink for DatumSink<'_, B> {
 
     fn finish_node(&mut self) {
         let frame = self.stack.pop().expect("nodes are balanced");
+        if let Some(label) = frame.label {
+            self.open_labels.remove(&label);
+        }
         if frame.kind == SyntaxKind::Root {
             return;
         }

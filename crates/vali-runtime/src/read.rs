@@ -168,33 +168,99 @@ impl<S: Strategy> DatumBuilder for HeapBuilder<'_, S> {
     }
 }
 
-/// Builds `datum` with `builder`, as the reader would have.
+/// What [`build`] has left to do.
+enum Work<'d> {
+    /// Build this datum.
+    Visit(&'d Datum),
+    /// Build a list from the last `items` values built, and the tail after
+    /// them if `dotted`.
+    List {
+        items: usize,
+        dotted: bool,
+        span: Span,
+    },
+    /// Build a vector from the last `items` values built.
+    Vector { items: usize, span: Span },
+    /// Label the last value built.
+    Label { label: u64, span: Span },
+}
+
+/// Builds `datum` with `builder`, as the reader would have: each datum
+/// after everything inside it, in source order. It keeps its work on a
+/// stack of its own, so deep nesting cannot overflow the native stack.
 fn build<B: DatumBuilder>(builder: &mut B, datum: &Datum) -> B::Datum {
-    let span = datum.span;
-    match &datum.kind {
-        DatumKind::Number(n) => builder.number(n.clone(), span),
-        DatumKind::Boolean(b) => builder.boolean(*b, span),
-        DatumKind::Character(c) => builder.character(*c, span),
-        DatumKind::String(s) => builder.string(s.clone(), span),
-        DatumKind::Symbol(name) => builder.symbol(name, span),
-        DatumKind::Keyword(name) => builder.keyword(name, span),
-        DatumKind::List { items, tail } => {
-            let items = items.iter().map(|d| build(builder, d)).collect();
-            let tail = tail.as_deref().map(|d| build(builder, d));
-            builder.list(items, tail, span)
-        }
-        DatumKind::Vector(items) => {
-            let items = items.iter().map(|d| build(builder, d)).collect();
-            builder.vector(items, span)
-        }
-        DatumKind::Bytevector(bytes) => builder.bytevector(bytes.clone(), span),
-        DatumKind::Labelled(label, inner) => {
-            let value = build(builder, inner);
-            builder.label_def(*label, value, span)
-        }
-        DatumKind::LabelRef(label) => builder.label_ref(*label, span),
-        _ => unreachable!("every datum kind is handled"),
+    let mut work = vec![Work::Visit(datum)];
+    let mut built: Vec<B::Datum> = Vec::new();
+    while let Some(next) = work.pop() {
+        let datum = match next {
+            Work::Visit(datum) => datum,
+            Work::List {
+                items,
+                dotted,
+                span,
+            } => {
+                let tail = if dotted { built.pop() } else { None };
+                let items = built.split_off(built.len() - items);
+                let list = builder.list(items, tail, span);
+                built.push(list);
+                continue;
+            }
+            Work::Vector { items, span } => {
+                let items = built.split_off(built.len() - items);
+                let vector = builder.vector(items, span);
+                built.push(vector);
+                continue;
+            }
+            Work::Label { label, span } => {
+                let value = built.pop().expect("the labelled datum was built");
+                let labelled = builder.label_def(label, value, span);
+                built.push(labelled);
+                continue;
+            }
+        };
+        let span = datum.span;
+        let value = match &datum.kind {
+            DatumKind::Number(n) => builder.number(n.clone(), span),
+            DatumKind::Boolean(b) => builder.boolean(*b, span),
+            DatumKind::Character(c) => builder.character(*c, span),
+            DatumKind::String(s) => builder.string(s.clone(), span),
+            DatumKind::Symbol(name) => builder.symbol(name, span),
+            DatumKind::Keyword(name) => builder.keyword(name, span),
+            DatumKind::Bytevector(bytes) => builder.bytevector(bytes.clone(), span),
+            DatumKind::LabelRef(label) => builder.label_ref(*label, span),
+            // The work stack is last in, first out: the finishing step goes
+            // on first, then the parts in reverse.
+            DatumKind::List { items, tail } => {
+                work.push(Work::List {
+                    items: items.len(),
+                    dotted: tail.is_some(),
+                    span,
+                });
+                work.extend(tail.as_deref().map(Work::Visit));
+                work.extend(items.iter().rev().map(Work::Visit));
+                continue;
+            }
+            DatumKind::Vector(items) => {
+                work.push(Work::Vector {
+                    items: items.len(),
+                    span,
+                });
+                work.extend(items.iter().rev().map(Work::Visit));
+                continue;
+            }
+            DatumKind::Labelled(label, inner) => {
+                work.push(Work::Label {
+                    label: *label,
+                    span,
+                });
+                work.push(Work::Visit(inner));
+                continue;
+            }
+            _ => unreachable!("every datum kind is handled"),
+        };
+        built.push(value);
     }
+    built.pop().expect("the datum was built")
 }
 
 impl<S: Strategy> Cx<S> {

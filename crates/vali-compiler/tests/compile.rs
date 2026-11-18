@@ -1298,6 +1298,45 @@ fn reading_and_writing() {
 }
 
 #[test]
+fn reading_a_port_takes_linear_time() {
+    // Each `read` takes one datum and looks no further; reading the rest of
+    // the port every time made this quadratic.
+    let program = |n: usize| {
+        format!(
+            "(import (scheme base) (scheme read) (scheme write))
+             (define p
+               (let ((out (open-output-string)))
+                 (do ((i 0 (+ i 1))) ((= i {n}))
+                   (write (list i \"s\" 'sym 1.5) out))
+                 (open-input-string (get-output-string out))))
+             (let loop ((k 0)) (if (eof-object? (read p)) k (loop (+ k 1))))"
+        )
+    };
+    let time = |n: usize| {
+        let source = program(n);
+        (0..3)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let count = run_under::<DeferredHeadered>(&source).unwrap();
+                assert_eq!(count, n.to_string());
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let base = time(0);
+    let n = 10_000;
+    let small = time(n).saturating_sub(base);
+    let large = time(4 * n).saturating_sub(base);
+    // Linear growth is four times; quadratic would be sixteen.
+    assert!(
+        large < small * 8,
+        "reading {n} datums took {small:?}, {} took {large:?}",
+        4 * n
+    );
+}
+
+#[test]
 fn keywords() {
     let prelude = "(import (scheme base) (scheme read) (srfi 88))";
     let cases = [

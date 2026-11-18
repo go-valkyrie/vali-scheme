@@ -13,6 +13,8 @@
 
 use std::sync::{Arc, OnceLock};
 
+use vali_syntax::{Datum, SourceId};
+
 use crate::RustObject;
 use crate::bridge::{Bytes, Context, Eof, IntoScheme, NativeLibrary};
 use crate::cx::Cx;
@@ -27,6 +29,9 @@ pub struct Port {
     input: bool,
     open: bool,
     data: Data,
+    /// Whether `read` has passed a `#!fold-case` directive, and no
+    /// `#!no-fold-case` since: it folds what it reads next (R7RS 2.1).
+    fold_case: bool,
 }
 
 #[derive(Debug)]
@@ -78,6 +83,7 @@ impl Port {
         Port {
             input: true,
             open: true,
+            fold_case: false,
             data: Data::Text {
                 text: text.into(),
                 at: 0,
@@ -90,6 +96,7 @@ impl Port {
         Port {
             input: false,
             open: true,
+            fold_case: false,
             data: Data::Text {
                 text: String::new(),
                 at: 0,
@@ -102,6 +109,7 @@ impl Port {
         Port {
             input: true,
             open: true,
+            fold_case: false,
             data: Data::Binary { bytes, at: 0 },
         }
     }
@@ -111,6 +119,7 @@ impl Port {
         Port {
             input: false,
             open: true,
+            fold_case: false,
             data: Data::Binary {
                 bytes: Vec::new(),
                 at: 0,
@@ -231,6 +240,21 @@ impl Port {
         let text = rest[..end].to_owned();
         *at += end;
         Ok(Read::Value(text))
+    }
+
+    /// The next datum, read no further than its end, so that reading a
+    /// port datum by datum takes linear time. After an error nothing is
+    /// consumed.
+    fn read_datum(&mut self) -> Outcome<Read<Datum>> {
+        let fold_case = self.fold_case;
+        let (rest, at) = self.text_in()?;
+        let read = vali_syntax::read_first(rest, SourceId(0), fold_case);
+        if let Some(e) = read.errors.first() {
+            return Err(e.kind.to_string());
+        }
+        *at += usize::from(read.end);
+        self.fold_case = read.fold_case;
+        Ok(read.datum.map_or(Read::Eof, Read::Value))
     }
 
     fn char_ready(&mut self) -> Outcome<bool> {
@@ -501,38 +525,13 @@ pub(crate) fn write_to<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Va
 /// `(%read port)`: the next datum from a textual input port, or the
 /// end-of-file object.
 pub(crate) fn read<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let rest = cx
-        .with_port("read", args[0], |p| {
-            p.text_in().map(|(rest, _)| rest.to_owned())
-        })?
+    let read = cx
+        .with_port("read", args[0], Port::read_datum)?
         .map_err(|e| Error::scheme(format!("read: {e}")))?;
-    let parsed = vali_syntax::read(&rest, vali_syntax::SourceId(0));
-    let Some(datum) = parsed.datums.first() else {
-        if let Some(e) = parsed.errors.first() {
-            return Err(Error::scheme(format!("read: {}", e.kind)));
-        }
-        cx.with_port("read", args[0], |p| {
-            if let Ok((rest, at)) = p.text_in() {
-                *at += rest.len();
-            }
-        })?;
-        return Ok(Value::EOF);
-    };
-    let end = usize::from(datum.span.range.end());
-    if let Some(e) = parsed
-        .errors
-        .iter()
-        .find(|e| usize::from(e.range.start()) < end)
-    {
-        return Err(Error::scheme(format!("read: {}", e.kind)));
+    match read {
+        Read::Value(datum) => cx.datum_raw(&datum),
+        Read::Eof => Ok(Value::EOF),
     }
-    let datum = datum.clone();
-    cx.with_port("read", args[0], |p| {
-        if let Ok((_, at)) = p.text_in() {
-            *at += end;
-        }
-    })?;
-    cx.datum_raw(&datum)
 }
 
 /// `(eof-object)`.

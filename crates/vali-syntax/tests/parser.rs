@@ -2,7 +2,7 @@
 
 use vali_syntax::{
     DatumKind, ParseErrorKind, ReadErrorKind, SourceId, SyntaxElement, SyntaxKind, SyntaxNode,
-    TextRange, parse_tree, read,
+    TextRange, parse_tree, read, read_first,
 };
 
 const SOURCE: SourceId = SourceId(1);
@@ -203,6 +203,111 @@ fn labels() {
 }
 
 #[test]
+fn a_label_cannot_stand_for_nothing_but_itself() {
+    for source in ["#0=#0#", "#0=#1=#0#", "(#0=#0#)", "#0=#;x #0#"] {
+        let (datums, errors) = read_with_errors(source);
+        assert!(datums.is_empty(), "{source}");
+        assert_eq!(errors, [(ReadErrorKind::LabelOfItself, "#0#")], "{source}");
+    }
+    // A reference inside the labelled datum, or to a finished label, is
+    // fine.
+    assert_eq!(reads("#0='#0#"), ["#0=(quote #0#)"]);
+    assert_eq!(reads("(#0=a #1=#0#)"), ["(#0=a #1=#0#)"]);
+}
+
+#[test]
+fn many_labels_take_linear_time() {
+    // Each label is looked up when it is defined and when it is used; a
+    // scan of the labels so far would make this quadratic.
+    let n = 200_000;
+    let mut source = String::from("(");
+    for i in 0..n {
+        source.push_str(&format!("#{i}=a #{i}# "));
+    }
+    source.push(')');
+    let read = read(&source, SOURCE);
+    assert!(read.errors.is_empty());
+}
+
+#[test]
+fn reading_the_first_datum_stops_at_its_end() {
+    let first = read_first("  a #| never closed", SOURCE, false);
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert_eq!(first.datum.map(|d| d.to_string()).as_deref(), Some("a"));
+    assert_eq!(first.end, 3.into());
+
+    let first = read_first("(a b) ) c", SOURCE, false);
+    assert!(first.errors.is_empty());
+    assert_eq!(first.end, 5.into());
+
+    // Only trivia: no datum, and all of it read.
+    let first = read_first(" ; c\n #;x ", SOURCE, false);
+    assert!(first.datum.is_none() && first.errors.is_empty());
+    assert_eq!(first.end, 10.into());
+
+    // An error in the first datum: no datum.
+    let first = read_first("(a . ) b", SOURCE, false);
+    assert!(first.datum.is_none());
+    assert_eq!(
+        first.errors.iter().map(|e| e.kind).collect::<Vec<_>>(),
+        [parse(ParseErrorKind::DotWithoutTail)]
+    );
+    let first = read_first(") b", SOURCE, false);
+    assert!(first.datum.is_none());
+    assert_eq!(first.end, 1.into());
+}
+
+#[test]
+fn fold_case_carries_from_one_read_to_the_next() {
+    let source = "#!fold-case ABC DEF #!no-fold-case GHI";
+    let mut at = 0;
+    let mut fold_case = false;
+    let mut names = Vec::new();
+    loop {
+        let first = read_first(&source[at..], SOURCE, fold_case);
+        at += usize::from(first.end);
+        fold_case = first.fold_case;
+        match first.datum {
+            Some(datum) => names.push(datum.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(names, ["abc", "def", "GHI"]);
+    assert!(!fold_case);
+}
+
+#[test]
+fn reading_datum_by_datum_takes_linear_time() {
+    fn read_all(n: usize) -> std::time::Duration {
+        let source = "(a 1 \"s\" #(2.5)) ".repeat(n);
+        let start = std::time::Instant::now();
+        let mut at = 0;
+        let mut count = 0;
+        loop {
+            let first = read_first(&source[at..], SOURCE, false);
+            if first.datum.is_none() {
+                break;
+            }
+            count += 1;
+            at += usize::from(first.end);
+        }
+        assert_eq!(count, n);
+        start.elapsed()
+    }
+    let n = 5_000;
+    read_all(n);
+    let small = (0..3).map(|_| read_all(n)).min().unwrap();
+    let large = (0..3).map(|_| read_all(4 * n)).min().unwrap();
+    // Linear growth is four times; reading the rest of the source on every
+    // read would be sixteen.
+    assert!(
+        large < small * 8,
+        "{n} datums took {small:?}, {} took {large:?}",
+        4 * n
+    );
+}
+
+#[test]
 fn bytevector_elements_must_be_bytes() {
     for bad in ["256", "-1", "1.0", "x", "(1)"] {
         let source = format!("#u8({bad})");
@@ -363,4 +468,50 @@ fn both_sinks_survive_generated_inputs() {
         assert_eq!(parse_tree(&source).root.text().to_string(), source);
         let _ = read(&source, SOURCE);
     }
+}
+
+/// How deep the nesting tests go: far beyond what a recursive parser could
+/// take on a test thread's 2 MiB stack.
+const DEEP: usize = 1_000_000;
+
+#[test]
+fn deep_nesting_reads_without_overflowing() {
+    for (open, close) in [("(", ")"), ("[", "]"), ("#(", ")"), ("'", ""), ("#0=", "")] {
+        let source = format!("{}a{}", open.repeat(DEEP), close.repeat(DEEP));
+        let read = vali_syntax::read(&source, SOURCE);
+        let expect_errors = open == "#0=";
+        assert_eq!(read.errors.is_empty(), !expect_errors, "{open}");
+        assert_eq!(read.datums.len(), usize::from(!expect_errors), "{open}");
+        let tree = parse_tree(&source);
+        assert!(tree.errors.is_empty(), "{open}");
+        assert_eq!(tree.root.text_range().len(), (source.len() as u32).into());
+        // Building the tree is iterative, but Rowan drops green nodes
+        // recursively, so a tree this deep is leaked rather than dropped.
+        std::mem::forget(tree);
+    }
+}
+
+#[test]
+fn deep_nesting_with_errors_reads_without_overflowing() {
+    // Never closed: one error for each bracket.
+    let read = vali_syntax::read(&"(".repeat(DEEP), SOURCE);
+    assert_eq!(read.errors.len(), DEEP);
+    assert!(read.datums.is_empty());
+    // A prefix with nothing after it, a million times over.
+    let read = vali_syntax::read(&"'".repeat(DEEP), SOURCE);
+    assert!(!read.errors.is_empty());
+    // Commented-out datums commenting out each other.
+    let source = format!("{}a", "#;".repeat(DEEP));
+    let read = vali_syntax::read(&source, SOURCE);
+    // The innermost takes `a`; every other one misses its datum.
+    assert_eq!(read.errors.len(), DEEP - 1);
+}
+
+#[test]
+fn mismatched_closers_take_linear_time() {
+    // Each `]` is checked against the open brackets; a scan of them all
+    // would make this quadratic.
+    let source = format!("{}{}", "(".repeat(DEEP / 10), "]".repeat(DEEP / 10));
+    let read = vali_syntax::read(&source, SOURCE);
+    assert!(read.datums.is_empty());
 }

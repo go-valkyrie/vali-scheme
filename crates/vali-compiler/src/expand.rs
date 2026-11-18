@@ -349,7 +349,8 @@ impl Expander {
         let scopes = items[0].scopes();
         let mut forms = Vec::new();
         for item in &items[1..] {
-            let DatumKind::String(path) = item.to_datum().kind else {
+            let datum = item.to_datum();
+            let DatumKind::String(path) = &datum.kind else {
                 return Err(error(
                     format!("{keyword}: expected file names as strings"),
                     item.span(),
@@ -367,7 +368,7 @@ impl Expander {
                     ));
                 }
             };
-            for datum in crate::loader::read_included(&text, ci, &path, &mut self.sources)? {
+            for datum in crate::loader::read_included(&text, ci, path, &mut self.sources)? {
                 forms.push(Syntax::from_datum(&datum, scopes));
             }
         }

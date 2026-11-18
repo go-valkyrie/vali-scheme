@@ -44,8 +44,8 @@ pub use lexer::{LexError, LexErrorKind, Lexed, Token, lex};
 pub use origin::Origin;
 pub use parser::{EventSink, ParseError, ParseErrorKind, parse};
 pub use reader::{
-    DatumBuilder, DatumSink, ParsedTree, Read, ReadError, ReadErrorKind, parse_tree, read,
-    read_with,
+    DatumBuilder, DatumSink, ParsedTree, Read, ReadError, ReadErrorKind, ReadFirst, parse_tree,
+    read, read_first, read_first_with, read_with,
 };
 pub use scope::{Remap, Scope, ScopeContext, ScopeKind, ScopeSetId, TooManyScopes};
 pub use span::{Location, SourceId, Sources, Span};
