@@ -90,10 +90,12 @@ opcodes! {
     VectorSet = 42, "vector-set";
     VectorLength = 43, "vector-length";
     SetFree = 44, "set-free";
+    Wide = 45, "wide";
 }
 
-/// A frame slot (a register).
-pub type Slot = u8;
+/// A frame slot (a register). Slots up to 255 fit an instruction's 8-bit
+/// fields; larger ones need a `wide` prefix (`docs/bytecode.md`).
+pub type Slot = u16;
 
 /// One instruction, decoded. Field names say what each operand is; slots
 /// are frame slots, and `offset`s count words from the next instruction.
@@ -118,7 +120,7 @@ pub enum Instruction {
         free: Vec<Slot>,
     },
     /// `dst ←` free variable `index` of the running closure.
-    Free { dst: Slot, index: u8 },
+    Free { dst: Slot, index: u16 },
     /// `dst ←` a new box holding `src`.
     MakeBox { dst: Slot, src: Slot },
     /// `dst ←` the contents of the box in `src`.
@@ -146,10 +148,10 @@ pub enum Instruction {
     /// Call. Slots `base` to `base + 2` hold the callee's frame header,
     /// `base + 3` the procedure, and the `argc` slots after it the
     /// arguments. The result arrives in `base + 3`.
-    Call { base: Slot, argc: u8 },
+    Call { base: Slot, argc: u16 },
     /// Tail call the procedure in `proc` with the `argc` arguments after it,
     /// reusing this frame.
-    TailCall { proc: Slot, argc: u8 },
+    TailCall { proc: Slot, argc: u16 },
     /// Return `src`.
     Return { src: Slot },
     /// `dst ← a + b`.
@@ -205,7 +207,11 @@ pub enum Instruction {
     /// Free variable `index` of the closure in `closure` now holds `src`:
     /// how `letrec` closes the loops between closures that refer to each
     /// other.
-    SetFree { closure: Slot, index: u8, src: Slot },
+    SetFree {
+        closure: Slot,
+        index: u16,
+        src: Slot,
+    },
 }
 
 /// The range of a [`Instruction::Jump`] offset.
@@ -218,6 +224,9 @@ pub enum DecodeError {
     UnknownOpcode(u8),
     /// The instruction runs past the end of the code.
     Truncated,
+    /// A `wide` prefix that is not needed, or that sets bits a field does
+    /// not have: every instruction has one encoding.
+    NotCanonical,
 }
 
 impl fmt::Display for DecodeError {
@@ -225,18 +234,48 @@ impl fmt::Display for DecodeError {
         match self {
             DecodeError::UnknownOpcode(n) => write!(f, "unknown opcode {n}"),
             DecodeError::Truncated => f.write_str("instruction runs past the end of the code"),
+            DecodeError::NotCanonical => f.write_str("a wide prefix the instruction does not need"),
         }
     }
 }
 
 impl std::error::Error for DecodeError {}
 
-fn abc(op: Opcode, a: u8, b: u8, c: u8) -> u32 {
+fn word_abc(op: Opcode, a: u8, b: u8, c: u8) -> u32 {
     op as u32 | (a as u32) << 8 | (b as u32) << 16 | (c as u32) << 24
 }
 
-fn ad(op: Opcode, a: u8, d: u16) -> u32 {
-    op as u32 | (a as u32) << 8 | (d as u32) << 16
+/// Whether fields this large need a `wide` prefix.
+fn needs_wide(a: u16, b: u16, c: u16) -> bool {
+    a > 0xFF || b > 0xFF || c > 0xFF
+}
+
+/// Pushes the `wide` prefix holding the high bytes of `a`, `b` and `c`.
+fn push_wide(code: &mut Vec<u32>, a: u16, b: u16, c: u16) {
+    code.push(word_abc(
+        Opcode::Wide,
+        (a >> 8) as u8,
+        (b >> 8) as u8,
+        (c >> 8) as u8,
+    ));
+}
+
+/// Pushes an instruction in the `a b c` layout, after a `wide` prefix if a
+/// field needs more than 8 bits.
+fn abc(code: &mut Vec<u32>, op: Opcode, a: u16, b: u16, c: u16) {
+    if needs_wide(a, b, c) {
+        push_wide(code, a, b, c);
+    }
+    code.push(word_abc(op, a as u8, b as u8, c as u8));
+}
+
+/// Pushes an instruction in the `a d` layout, after a `wide` prefix if `a`
+/// needs more than 8 bits.
+fn ad(code: &mut Vec<u32>, op: Opcode, a: u16, d: u16) {
+    if a > 0xFF {
+        push_wide(code, a, 0, 0);
+    }
+    code.push(op as u32 | ((a as u8) as u32) << 8 | (d as u32) << 16);
 }
 
 fn e(op: Opcode, x: u32) -> u32 {
@@ -350,30 +389,37 @@ impl Instruction {
             | I::Unbox { dst, src }
             | I::Not { dst, src }
             | I::IsNull { dst, src }
-            | I::IsPair { dst, src } => code.push(abc(op, dst, src, 0)),
-            I::Car { dst, pair } | I::Cdr { dst, pair } => code.push(abc(op, dst, pair, 0)),
-            I::VectorLength { dst, vector } => code.push(abc(op, dst, vector, 0)),
-            I::Free { dst, index } => code.push(abc(op, dst, index, 0)),
-            I::SetBox { cell, src } => code.push(abc(op, cell, src, 0)),
+            | I::IsPair { dst, src } => abc(code, op, dst, src, 0),
+            I::Car { dst, pair } | I::Cdr { dst, pair } => abc(code, op, dst, pair, 0),
+            I::VectorLength { dst, vector } => abc(code, op, dst, vector, 0),
+            I::Free { dst, index } => abc(code, op, dst, index, 0),
+            I::SetBox { cell, src } => abc(code, op, cell, src, 0),
             I::SetCar { pair, value } | I::SetCdr { pair, value } => {
-                code.push(abc(op, pair, value, 0))
+                abc(code, op, pair, value, 0);
             }
-            I::LoadConstant { dst, constant } => code.push(ad(op, dst, constant)),
-            I::LoadInt { dst, value } => code.push(ad(op, dst, value as u16)),
-            I::GetVariable { dst, variable } => code.push(ad(op, dst, variable)),
-            I::SetVariable { src, variable } => code.push(ad(op, src, variable)),
+            I::LoadConstant { dst, constant } => ad(code, op, dst, constant),
+            I::LoadInt { dst, value } => ad(code, op, dst, value as u16),
+            I::GetVariable { dst, variable } => ad(code, op, dst, variable),
+            I::SetVariable { src, variable } => ad(code, op, src, variable),
             I::Closure {
                 dst,
                 function,
                 ref free,
             } => {
-                let count = u8::try_from(free.len()).expect("at most 255 free variables");
-                code.push(abc(op, dst, count, 0));
+                let count = u16::try_from(free.len()).expect("at most 65,535 free variables");
+                // Wide, each slot takes two bytes; otherwise one.
+                let wide = needs_wide(dst, count, 0) || free.iter().any(|&s| s > 0xFF);
+                if wide {
+                    push_wide(code, dst, count, 0);
+                }
+                code.push(word_abc(op, dst as u8, count as u8, 0));
                 code.push(function);
-                for chunk in free.chunks(4) {
+                let per_word = if wide { 2 } else { 4 };
+                let bits = 32 / per_word;
+                for chunk in free.chunks(per_word) {
                     let mut word = 0u32;
                     for (i, &slot) in chunk.iter().enumerate() {
-                        word |= (slot as u32) << (8 * i);
+                        word |= (slot as u32) << (bits * i);
                     }
                     code.push(word);
                 }
@@ -383,60 +429,85 @@ impl Instruction {
                 code.push(e(op, offset as u32));
             }
             I::If { test, offset } => {
-                code.push(abc(op, test, 0, 0));
+                abc(code, op, test, 0, 0);
                 code.push(offset as u32);
             }
             I::IfNull { a, offset } | I::IfPair { a, offset } => {
-                code.push(abc(op, a, 0, 0));
+                abc(code, op, a, 0, 0);
                 code.push(offset as u32);
             }
             I::IfEq { a, b, offset }
             | I::IfLt { a, b, offset }
             | I::IfLe { a, b, offset }
             | I::IfNumEq { a, b, offset } => {
-                code.push(abc(op, a, b, 0));
+                abc(code, op, a, b, 0);
                 code.push(offset as u32);
             }
             I::IfLtImm { a, imm, offset } => {
-                code.push(abc(op, a, imm as u8, 0));
+                abc(code, op, a, u16::from(imm as u8), 0);
                 code.push(offset as u32);
             }
-            I::Call { base, argc } => code.push(abc(op, base, argc, 0)),
-            I::TailCall { proc, argc } => code.push(abc(op, proc, argc, 0)),
-            I::Return { src } => code.push(abc(op, src, 0, 0)),
+            I::Call { base, argc } => abc(code, op, base, argc, 0),
+            I::TailCall { proc, argc } => abc(code, op, proc, argc, 0),
+            I::Return { src } => abc(code, op, src, 0, 0),
             I::Add { dst, a, b }
             | I::Sub { dst, a, b }
             | I::Mul { dst, a, b }
             | I::Lt { dst, a, b }
             | I::Le { dst, a, b }
             | I::NumEq { dst, a, b }
-            | I::Eq { dst, a, b } => code.push(abc(op, dst, a, b)),
+            | I::Eq { dst, a, b } => abc(code, op, dst, a, b),
             I::AddImm { dst, a, imm } | I::SubImm { dst, a, imm } => {
-                code.push(abc(op, dst, a, imm as u8))
+                abc(code, op, dst, a, u16::from(imm as u8));
             }
-            I::Cons { dst, car, cdr } => code.push(abc(op, dst, car, cdr)),
-            I::MakeVector { dst, len, fill } => code.push(abc(op, dst, len, fill)),
-            I::VectorRef { dst, vector, index } => code.push(abc(op, dst, vector, index)),
+            I::Cons { dst, car, cdr } => abc(code, op, dst, car, cdr),
+            I::MakeVector { dst, len, fill } => abc(code, op, dst, len, fill),
+            I::VectorRef { dst, vector, index } => abc(code, op, dst, vector, index),
             I::VectorSet {
                 vector,
                 index,
                 value,
-            } => code.push(abc(op, vector, index, value)),
+            } => abc(code, op, vector, index, value),
             I::SetFree {
                 closure,
                 index,
                 src,
-            } => code.push(abc(op, closure, index, src)),
+            } => abc(code, op, closure, index, src),
         }
     }
 
     /// Decodes the instruction starting at `code[pc]`, returning it and how
     /// many words it takes.
-    pub fn decode(code: &[u32], pc: usize) -> Result<(Instruction, usize), DecodeError> {
+    pub fn decode(code: &[u32], start: usize) -> Result<(Instruction, usize), DecodeError> {
+        let first = *code.get(start).ok_or(DecodeError::Truncated)?;
+        if first as u8 != Opcode::Wide as u8 {
+            return Self::decode_one(code, start, None);
+        }
+        // Wide: the next instruction's fields, with these high bytes. It
+        // must need them, so each instruction has one encoding.
+        let (instruction, len) = Self::decode_one(code, start + 1, Some(fields(first)))?;
+        let mut again = Vec::new();
+        instruction.encode(&mut again);
+        if code.get(start..start + 1 + len) != Some(&again[..]) {
+            return Err(DecodeError::NotCanonical);
+        }
+        Ok((instruction, 1 + len))
+    }
+
+    /// Decodes the instruction at `code[pc]`, its fields widened by the
+    /// high bytes of a `wide` prefix if it had one.
+    fn decode_one(
+        code: &[u32],
+        pc: usize,
+        high: Option<(u8, u8, u8)>,
+    ) -> Result<(Instruction, usize), DecodeError> {
         use Instruction as I;
         let word = *code.get(pc).ok_or(DecodeError::Truncated)?;
         let op = Opcode::from_u8(word as u8).ok_or(DecodeError::UnknownOpcode(word as u8))?;
+        let (ha, hb, hc) = high.unwrap_or((0, 0, 0));
         let (a, b, c) = fields(word);
+        let widen = |high: u8, low: u8| u16::from(high) << 8 | u16::from(low);
+        let (a, b, c) = (widen(ha, a), widen(hb, b), widen(hc, c));
         let d = field_d(word);
         let next = |n: usize| code.get(pc + n).copied().ok_or(DecodeError::Truncated);
         let branch = || next(1).map(|w| w as i32);
@@ -461,12 +532,18 @@ impl Instruction {
             Opcode::Closure => {
                 let function = next(1)?;
                 let count = b as usize;
+                let per_word = if high.is_some() { 2 } else { 4 };
+                let bits = 32 / per_word;
+                if count.div_ceil(per_word) > code.len().saturating_sub(pc + 2) {
+                    return Err(DecodeError::Truncated);
+                }
                 let mut free = Vec::with_capacity(count);
                 for i in 0..count {
-                    let word = next(2 + i / 4)?;
-                    free.push((word >> (8 * (i % 4))) as u8);
+                    let word = next(2 + i / per_word)?;
+                    let mask = (1u32 << bits) - 1;
+                    free.push(((word >> (bits * (i % per_word))) & mask) as u16);
                 }
-                let len = 2 + count.div_ceil(4);
+                let len = 2 + count.div_ceil(per_word);
                 return Ok((
                     I::Closure {
                         dst: a,
@@ -509,7 +586,7 @@ impl Instruction {
             },
             Opcode::IfLtImm => I::IfLtImm {
                 a,
-                imm: b as i8,
+                imm: b as u8 as i8,
                 offset: branch()?,
             },
             Opcode::IfNull => I::IfNull {
@@ -529,12 +606,12 @@ impl Instruction {
             Opcode::AddImm => I::AddImm {
                 dst: a,
                 a: b,
-                imm: c as i8,
+                imm: c as u8 as i8,
             },
             Opcode::SubImm => I::SubImm {
                 dst: a,
                 a: b,
-                imm: c as i8,
+                imm: c as u8 as i8,
             },
             Opcode::Lt => I::Lt { dst: a, a: b, b: c },
             Opcode::Le => I::Le { dst: a, a: b, b: c },
@@ -573,6 +650,7 @@ impl Instruction {
                 index: b,
                 src: c,
             },
+            Opcode::Wide => return Err(DecodeError::NotCanonical),
         };
         let len = if instruction.offset().is_some() && op != Opcode::Jump {
             2

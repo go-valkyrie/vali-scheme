@@ -2470,7 +2470,9 @@ impl Expander {
                 _ => {}
             }
         }
-        if items.len() - 1 > usize::from(u8::MAX) - 4 {
+        // A call's window, its procedure and arguments must fit in a
+        // frame (`wide` forms address up to 65,535 slots).
+        if items.len() - 1 > usize::from(u16::MAX) - 8 {
             return Err(error("too many arguments in one call", span));
         }
         let f = self.expr(head)?;

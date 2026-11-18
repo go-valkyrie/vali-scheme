@@ -47,7 +47,7 @@ pub struct FunctionBuilder {
     name: Option<Box<str>>,
     arity: Arity,
     slots: u16,
-    free: u8,
+    free: u16,
     code: Vec<u32>,
     labels: Vec<Option<usize>>,
     fixups: Vec<Fixup>,
@@ -57,7 +57,7 @@ pub struct FunctionBuilder {
 impl FunctionBuilder {
     /// A function named `name`, taking `arity`, with a frame of `slots`
     /// slots and `free` free variables.
-    pub fn new(name: Option<&str>, arity: Arity, slots: u16, free: u8) -> FunctionBuilder {
+    pub fn new(name: Option<&str>, arity: Arity, slots: u16, free: u16) -> FunctionBuilder {
         FunctionBuilder {
             name: name.map(Into::into),
             arity,
@@ -115,8 +115,12 @@ impl FunctionBuilder {
     /// `target` when the function is finished. `instruction`'s own offset
     /// is ignored.
     pub fn branch(&mut self, instruction: Instruction, target: Label) -> &mut Self {
-        let at = self.code.len();
+        let mut at = self.code.len();
         instruction.encode(&mut self.code);
+        // The offset is the instruction's, after any `wide` prefix.
+        if self.code[at] as u8 == crate::Opcode::Wide as u8 {
+            at += 1;
+        }
         self.fixups.push(Fixup {
             at,
             end: self.code.len(),

@@ -2105,6 +2105,16 @@ impl<S: Strategy> Cx<S> {
                     let Some(op) = Opcode::from_u8(word as u8) else {
                         unreachable!("validated code has only known opcodes");
                     };
+                    // One instruction, its fields given. The match is
+                    // written once and expanded twice: for instructions as
+                    // they come, and, from the arm for a `wide` prefix, for
+                    // the instruction after it with its fields widened. So
+                    // a wide prefix costs nothing until there is one.
+                    macro_rules! execute {
+                        ($mode:tt, $op:expr, $a:expr, $b:expr, $c:expr, $word:expr, $wide:expr) => {{
+                            let (op, a, b, c, word, wide): (Opcode, usize, usize, usize, u32, bool) =
+                                ($op, $a, $b, $c, $word, $wide);
+                            let _ = wide;
                     match op {
                         Opcode::Mov => {
                             self.store(fp, a, slot(fp, b));
@@ -2148,10 +2158,14 @@ impl<S: Strategy> Cx<S> {
                         Opcode::Closure => {
                             let function = *code.add(pc + 1) as usize;
                             let count = b;
+                            // Slots a byte each, or two bytes when wide.
+                            let per_word = if wide { 2 } else { 4 };
+                            let bits = 32 / per_word;
+                            let mask = (1u32 << bits) - 1;
                             let free: Vec<Value> = (0..count)
                                 .map(|i| {
-                                    let w = *code.add(pc + 2 + i / 4);
-                                    slot(fp, usize::from((w >> (8 * (i % 4))) as u8))
+                                    let w = *code.add(pc + 2 + i / per_word);
+                                    slot(fp, ((w >> (bits * (i % per_word))) & mask) as usize)
                                 })
                                 .collect();
                             let current = attempt!(self.procedure_code(slot(fp, 0)));
@@ -2162,8 +2176,9 @@ impl<S: Strategy> Cx<S> {
                             let target = &loaded.functions[function] as *const Code<S>;
                             let closure = attempt!(self.closure_raw(target, &free));
                             self.store(fp, a, closure);
-                            pc += 2 + count.div_ceil(4);
+                            pc += 2 + count.div_ceil(per_word);
                         }
+                        Opcode::Wide => wide_arm!($mode, a, b, c),
                         Opcode::Free => {
                             let closure = slot(fp, 0);
                             self.store(
@@ -2419,6 +2434,31 @@ impl<S: Strategy> Cx<S> {
                             pc += 1;
                         }
                     }
+                        }};
+                    }
+                    // The `wide` arm: the prefix's fields are the high bytes
+                    // of the next instruction's.
+                    macro_rules! wide_arm {
+                        (normal, $a:expr, $b:expr, $c:expr) => {{
+                            pc += 1;
+                            let inner = *code.add(pc);
+                            let (x, y, z) = fields(inner);
+                            let Some(op) = Opcode::from_u8(inner as u8) else {
+                                unreachable!("validated code has only known opcodes");
+                            };
+                            execute!(
+                                wide,
+                                op,
+                                $a << 8 | usize::from(x),
+                                $b << 8 | usize::from(y),
+                                $c << 8 | usize::from(z),
+                                inner,
+                                true
+                            )
+                        }};
+                        (wide, $a:expr, $b:expr, $c:expr) => {{ unreachable!("validated code never has two prefixes in a row") }};
+                    }
+                    execute!(normal, op, a, b, c, word, false)
                 };
             }
         }

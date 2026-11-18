@@ -27,6 +27,7 @@ use vali_dist as ir;
 
 use crate::{
     Arity, Constant, Function, FunctionBuilder, Instruction as I, Label, Module, ModuleBuilder,
+    Slot,
 };
 
 /// Why a module could not be converted.
@@ -51,7 +52,7 @@ impl std::error::Error for ConvertError {}
 type Result<T> = std::result::Result<T, String>;
 
 /// The highest slot a frame can address.
-const TOP: usize = 255;
+const TOP: usize = u16::MAX as usize - 1;
 
 /// Converts `module`, which is first validated.
 pub fn convert(module: &ir::Module) -> std::result::Result<Module, ConvertError> {
@@ -295,7 +296,7 @@ struct Analysis {
     /// The `let`s whose comparison an `if` right after them branches on.
     fused: Vec<bool>,
     /// Each function parameter's fixed slot.
-    fixed: Vec<Option<u8>>,
+    fixed: Vec<Option<Slot>>,
     /// The variables whose last use is as an operand of a call or tail
     /// call: they are computed into its window.
     call_operand: Vec<bool>,
@@ -416,7 +417,7 @@ fn analyse(f: &ir::Function) -> Result<Analysis> {
     }
     let mut fixed = vec![None; n];
     for (i, v) in f.params.iter().enumerate() {
-        let slot = u8::try_from(i + 1).map_err(|_| "too many parameters".to_owned())?;
+        let slot = u16::try_from(i + 1).map_err(|_| "too many parameters".to_owned())?;
         fixed[v.0 as usize] = Some(slot);
         def[v.0 as usize] = 0;
     }
@@ -463,16 +464,23 @@ fn analyse(f: &ir::Function) -> Result<Analysis> {
 }
 
 /// Assigns slots by linear scan, preferring each variable's hint.
-fn allocate(a: &Analysis, hints: &HashMap<usize, u8>) -> Result<Vec<Option<u8>>> {
+fn allocate(a: &Analysis, hints: &HashMap<usize, Slot>) -> Result<Vec<Option<Slot>>> {
     let n = a.def.len();
     let mut slots = vec![None; n];
-    // When each slot becomes free again; slot 0 is the closure's.
-    let mut busy = [0u32; TOP + 1];
-    busy[0] = u32::MAX;
+    // When each slot becomes free again; slot 0 is the closure's. It grows
+    // as slots are first used, so a small function stays small to scan.
+    let mut busy: Vec<u32> = vec![u32::MAX];
+    let grow = |busy: &mut Vec<u32>, slot: usize| {
+        if busy.len() <= slot {
+            busy.resize(slot + 1, 0);
+        }
+    };
     for (v, fixed) in a.fixed.iter().enumerate() {
         if let Some(slot) = *fixed {
             slots[v] = Some(slot);
-            busy[usize::from(slot)] = busy[usize::from(slot)].max(a.end[v].max(1));
+            let slot = usize::from(slot);
+            grow(&mut busy, slot);
+            busy[slot] = busy[slot].max(a.end[v].max(1));
         }
     }
     let mut order: Vec<usize> = (0..n)
@@ -481,15 +489,16 @@ fn allocate(a: &Analysis, hints: &HashMap<usize, u8>) -> Result<Vec<Option<u8>>>
     order.sort_by_key(|&v| (a.def[v], v));
     for v in order {
         let start = a.def[v];
-        let free = |slot: usize| slot > 0 && busy[slot] <= start;
+        let free = |slot: usize| slot > 0 && busy.get(slot).is_none_or(|&b| b <= start);
         let slot = match hints.get(&v) {
             Some(&h) if free(usize::from(h)) => usize::from(h),
             _ => (1..=TOP)
                 .find(|&s| free(s))
-                .ok_or_else(|| "a function needs more than 256 slots".to_owned())?,
+                .ok_or_else(|| format!("a function needs more than {} slots", TOP + 1))?,
         };
+        grow(&mut busy, slot);
         busy[slot] = a.end[v];
-        slots[v] = Some(slot as u8);
+        slots[v] = Some(slot as u16);
     }
     Ok(slots)
 }
@@ -497,7 +506,7 @@ fn allocate(a: &Analysis, hints: &HashMap<usize, u8>) -> Result<Vec<Option<u8>>>
 /// Each call's window: above every slot in use while its operands are
 /// computed, except those operands' own, and for a call that returns,
 /// above every slot live across it.
-fn bases(a: &Analysis, slots: &[Option<u8>]) -> HashMap<usize, usize> {
+fn bases(a: &Analysis, slots: &[Option<Slot>]) -> HashMap<usize, usize> {
     let (_, across) = pressure(a, slots, |_| true);
     let (others, _) = pressure(a, slots, |v| !a.call_operand[v]);
     a.region
@@ -517,7 +526,7 @@ fn bases(a: &Analysis, slots: &[Option<u8>]) -> HashMap<usize, usize> {
 /// `counted` keeps count.
 fn pressure(
     a: &Analysis,
-    slots: &[Option<u8>],
+    slots: &[Option<Slot>],
     counted: impl Fn(usize) -> bool,
 ) -> (Vec<i32>, Vec<i32>) {
     let len = a.events.len();
@@ -529,9 +538,15 @@ fn pressure(
             ending[(a.end[v] as usize).min(len)].push(v);
         }
     }
-    let mut count = [0u32; TOP + 1];
-    let max = |count: &[u32; TOP + 1]| {
-        (0..=TOP)
+    let top = slots
+        .iter()
+        .flatten()
+        .map(|&s| usize::from(s))
+        .max()
+        .unwrap_or(0);
+    let mut count = vec![0u32; top + 1];
+    let max = |count: &[u32]| {
+        (0..count.len())
             .rev()
             .find(|&s| count[s] > 0)
             .map_or(0, |s| s as i32)
@@ -573,7 +588,7 @@ fn pressure(
 /// each call's operands that end there, and its result, into its window
 /// as the last pass placed it, and a tail call's into slots 1 and up,
 /// until the hints settle.
-type Allocation = (Analysis, Vec<Option<u8>>, Vec<i32>, HashMap<usize, usize>);
+type Allocation = (Analysis, Vec<Option<Slot>>, Vec<i32>, HashMap<usize, usize>);
 
 fn allocation(f: &ir::Function) -> Result<Allocation> {
     let a = analyse(f)?;
@@ -592,7 +607,11 @@ fn allocation(f: &ir::Function) -> Result<Allocation> {
     Ok((a, slots, cover, bases))
 }
 
-fn call_hints(f: &ir::Function, a: &Analysis, bases: &HashMap<usize, usize>) -> HashMap<usize, u8> {
+fn call_hints(
+    f: &ir::Function,
+    a: &Analysis,
+    bases: &HashMap<usize, usize>,
+) -> HashMap<usize, Slot> {
     let mut hints = HashMap::new();
     for (p, event) in a.events.iter().enumerate() {
         let Event::Term(id) = event else {
@@ -606,7 +625,7 @@ fn call_hints(f: &ir::Function, a: &Analysis, bases: &HashMap<usize, usize>) -> 
             } => {
                 let base = bases[&p] + 3;
                 let v = var.0 as usize;
-                if let Ok(result) = u8::try_from(base) {
+                if let Ok(result) = u16::try_from(base) {
                     hints.insert(v, result);
                 }
                 (
@@ -623,7 +642,7 @@ fn call_hints(f: &ir::Function, a: &Analysis, bases: &HashMap<usize, usize>) -> 
             if let ir::Operand::Var(v) = x
                 && a.call_operand[v.0 as usize]
                 && a.end[v.0 as usize] as usize == p
-                && let Ok(slot) = u8::try_from(base + i)
+                && let Ok(slot) = u16::try_from(base + i)
             {
                 hints.entry(v.0 as usize).or_insert(slot);
             }
@@ -639,10 +658,10 @@ fn convert_function(tables: &Tables<'_>, f: &ir::Function) -> Result<Function> {
         optional: f.arity.optional,
         rest: f.arity.rest,
     };
-    let free = u8::try_from(f.free.len()).map_err(|_| "too many free variables".to_owned())?;
+    let free = u16::try_from(f.free.len()).map_err(|_| "too many free variables".to_owned())?;
     let mut free_index = vec![None; f.vars as usize];
     for (i, v) in f.free.iter().enumerate() {
-        free_index[v.0 as usize] = Some(i as u8);
+        free_index[v.0 as usize] = Some(i as u16);
     }
     let mut e = Emitter {
         tables,
@@ -676,8 +695,8 @@ struct Emitter<'a> {
     tables: &'a Tables<'a>,
     f: &'a ir::Function,
     a: &'a Analysis,
-    slots: &'a [Option<u8>],
-    free_index: Vec<Option<u8>>,
+    slots: &'a [Option<Slot>],
+    free_index: Vec<Option<Slot>>,
     cover: &'a [i32],
     /// Each call's window, by position.
     bases: &'a HashMap<usize, usize>,
@@ -691,20 +710,20 @@ struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
-    fn touch(&mut self, slot: usize) -> Result<u8> {
+    fn touch(&mut self, slot: usize) -> Result<Slot> {
         if slot > TOP {
             return Err("a function needs more than 256 slots".into());
         }
         self.top = self.top.max(slot);
-        Ok(slot as u8)
+        Ok(slot as u16)
     }
 
-    fn slot(&self, v: ir::Var) -> Option<u8> {
+    fn slot(&self, v: ir::Var) -> Option<Slot> {
         self.slots[v.0 as usize]
     }
 
     /// Loads constant `c` into `dst`.
-    fn load(&mut self, dst: u8, c: ir::ConstantId) {
+    fn load(&mut self, dst: Slot, c: ir::ConstantId) {
         match &self.tables.module.constants[c.0 as usize] {
             ir::Constant::Integer(n) if i16::try_from(*n).is_ok() => {
                 self.b.emit(I::LoadInt {
@@ -720,7 +739,7 @@ impl Emitter<'_> {
     }
 
     /// Puts `x`, which has no slot of its own, into `dst`.
-    fn materialise(&mut self, dst: u8, x: ir::Operand) -> Result<()> {
+    fn materialise(&mut self, dst: Slot, x: ir::Operand) -> Result<()> {
         match x {
             ir::Operand::Const(c) => self.load(dst, c),
             ir::Operand::Var(v) => match self.free_index[v.0 as usize] {
@@ -740,7 +759,7 @@ impl Emitter<'_> {
     }
 
     /// A slot holding `x`: its own, or a scratch slot it is loaded into.
-    fn read(&mut self, x: ir::Operand) -> Result<u8> {
+    fn read(&mut self, x: ir::Operand) -> Result<Slot> {
         if let ir::Operand::Var(v) = x
             && let Some(slot) = self.slot(v)
         {
@@ -765,8 +784,8 @@ impl Emitter<'_> {
 
     /// Puts each operand into its target slot: those in slots by parallel
     /// moves, then the others.
-    fn place(&mut self, targets: &[(u8, ir::Operand)]) -> Result<()> {
-        let mut moves: Vec<(u8, u8)> = Vec::new();
+    fn place(&mut self, targets: &[(Slot, ir::Operand)]) -> Result<()> {
+        let mut moves: Vec<(Slot, Slot)> = Vec::new();
         for &(dst, x) in targets {
             if let ir::Operand::Var(v) = x
                 && let Some(src) = self.slot(v)
@@ -890,7 +909,8 @@ impl Emitter<'_> {
                 position,
             } => {
                 self.position(*position);
-                let argc = u8::try_from(args.len()).map_err(|_| "too many arguments".to_owned())?;
+                let argc =
+                    u16::try_from(args.len()).map_err(|_| "too many arguments".to_owned())?;
                 let proc = self.touch(self.bases[&p])?;
                 let mut targets = vec![(proc, *callee)];
                 for (i, &x) in args.iter().enumerate() {
@@ -986,7 +1006,8 @@ impl Emitter<'_> {
             ir::Value::Primitive { op, args } => self.primitive(dst, *op, args, used)?,
             ir::Value::Call { callee, args } => {
                 let base = self.touch(self.bases[&p])?;
-                let argc = u8::try_from(args.len()).map_err(|_| "too many arguments".to_owned())?;
+                let argc =
+                    u16::try_from(args.len()).map_err(|_| "too many arguments".to_owned())?;
                 let mut targets = vec![(self.touch(usize::from(base) + 3)?, *callee)];
                 for (i, &x) in args.iter().enumerate() {
                     targets.push((self.touch(usize::from(base) + 4 + i)?, x));
@@ -1038,7 +1059,8 @@ impl Emitter<'_> {
                 index,
                 value,
             } => {
-                let index = u8::try_from(*index).map_err(|_| "a free variable index above 255")?;
+                let index =
+                    u16::try_from(*index).map_err(|_| "a free variable index above 65,535")?;
                 let closure = self.read(*closure)?;
                 let src = self.read(*value)?;
                 self.b.emit(I::SetFree {
@@ -1053,7 +1075,7 @@ impl Emitter<'_> {
     }
 
     /// Gives the result of an operation done for its effect, if it is used.
-    fn unspecified(&mut self, dst: u8, used: bool) {
+    fn unspecified(&mut self, dst: Slot, used: bool) {
         if used {
             let constant = self.tables.unspecified;
             self.b.emit(I::LoadConstant { dst, constant });
@@ -1062,7 +1084,7 @@ impl Emitter<'_> {
 
     fn primitive(
         &mut self,
-        dst: u8,
+        dst: Slot,
         op: ir::Primitive,
         args: &[ir::Operand],
         used: bool,

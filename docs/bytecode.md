@@ -51,7 +51,9 @@ Instructions are little-endian 32-bit words. The first word holds the opcode in 
 - **Offsets** count words from the start of the next instruction.
 - **`closure`** takes a second word, the function's index, then one word for every four free variables, each a slot number in one byte, low byte first.
 
-Slots are 8-bit, so version 1 frames have at most 256 slots. Wide forms for larger frames will come in a later version.
+- **`wide`** (opcode 45) is a prefix, not an instruction: its `a`, `b` and `c` fields are the high bytes of the next instruction's, which make slots, argument counts and free-variable indices 16 bits. A wide `closure` lists each slot in two bytes, two to a word. The prefix appears only when a field needs it, and never on an immediate, a `d` field or another prefix: every instruction has one encoding, and the decoder refuses any other. A branch's offset counts from the end of the instruction, prefix included; branches target the prefix.
+
+Slots up to 255 fit an instruction's fields; with `wide`, frames have up to 65,535 slots and calls up to 65,535 arguments. Format version 3 added `wide`.
 
 ## Instructions
 

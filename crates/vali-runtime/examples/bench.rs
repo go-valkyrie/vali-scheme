@@ -91,14 +91,15 @@ fn tak(m: &mut ModuleBuilder) -> Vec<(&'static str, u32)> {
         return_z,
     );
     // Each call's result lands below the next call's base, so it survives.
-    let calls: [(u8, [u8; 3], u8); 3] = [(4, [1, 2, 3], 1), (8, [2, 3, 1], 2), (12, [3, 1, 2], 3)];
+    let calls: [(u16, [u16; 3], u16); 3] =
+        [(4, [1, 2, 3], 1), (8, [2, 3, 1], 2), (12, [3, 1, 2], 3)];
     for (base, args, decremented) in calls {
         f.emit(I::GetVariable {
             dst: base + 3,
             variable: tak,
         });
         for (i, &arg) in args.iter().enumerate() {
-            let dst = base + 4 + i as u8;
+            let dst = base + 4 + i as u16;
             if arg == decremented && i == 0 {
                 f.emit(I::SubImm {
                     dst,

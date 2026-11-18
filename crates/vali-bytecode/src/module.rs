@@ -6,7 +6,7 @@ use crate::instruction::{DecodeError, Instruction};
 
 /// The run format's version. Any mismatch means rebuilding from source or
 /// from the distribution artifact (ADR 0005 #9).
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// How many arguments a function takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -97,7 +97,7 @@ pub struct Function {
     /// How many slots its frame has, slot 0 (the closure) included.
     pub slots: u16,
     /// How many free variables its closures capture.
-    pub free: u8,
+    pub free: u16,
     /// Its instructions.
     pub code: Vec<u32>,
     /// Where its instructions came from, sorted by instruction: each

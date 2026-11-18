@@ -135,7 +135,57 @@ fn examples() -> Vec<I> {
             index: 200,
             src: 3,
         },
+        // Wide: a field above 255 needs the `wide` prefix.
+        I::Mov { dst: 300, src: 2 },
+        I::LoadConstant {
+            dst: 256,
+            constant: 7,
+        },
+        I::IfLt {
+            a: 2,
+            b: 65_000,
+            offset: -3,
+        },
+        I::Call {
+            base: 500,
+            argc: 300,
+        },
+        I::Closure {
+            dst: 1,
+            function: 4,
+            free: vec![1, 400, 3],
+        },
+        I::AddImm {
+            dst: 1000,
+            a: 2,
+            imm: -128,
+        },
     ]
+}
+
+#[test]
+fn wide_forms_are_used_only_when_needed() {
+    let mut code = Vec::new();
+    I::Mov { dst: 255, src: 2 }.encode(&mut code);
+    assert_eq!(code.len(), 1);
+    I::Mov { dst: 256, src: 2 }.encode(&mut code);
+    assert_eq!(code.len(), 3);
+    assert_eq!(code[1] as u8, Opcode::Wide as u8);
+    // A prefix that is not needed, or that widens an immediate, is refused.
+    let unneeded = [Opcode::Wide as u32, code[0]];
+    assert!(I::decode(&unneeded, 0).is_err());
+    let mut imm = Vec::new();
+    I::AddImm {
+        dst: 1,
+        a: 2,
+        imm: 5,
+    }
+    .encode(&mut imm);
+    let widened = [Opcode::Wide as u32 | 1 << 24, imm[0]];
+    assert!(I::decode(&widened, 0).is_err());
+    // Nor may one prefix another.
+    let doubled = [Opcode::Wide as u32 | 1 << 8, code[1], code[2]];
+    assert!(I::decode(&doubled, 0).is_err());
 }
 
 #[test]
@@ -143,7 +193,11 @@ fn every_instruction_round_trips() {
     let examples = examples();
     let covered: HashSet<Opcode> = examples.iter().map(I::opcode).collect();
     for &op in Opcode::ALL {
-        assert!(covered.contains(&op), "no example of {op:?}");
+        // `wide` is a prefix: the wide examples cover it.
+        assert!(
+            covered.contains(&op) || op == Opcode::Wide,
+            "no example of {op:?}"
+        );
         assert_eq!(Opcode::from_u8(op as u8), Some(op));
     }
     let mut code = Vec::new();

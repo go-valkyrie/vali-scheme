@@ -9,6 +9,7 @@
 - **Amended:** 2026-11-17, every assigned local is boxed, captured or not, so re-entering a continuation shares it (item 4)
 - **Amended:** 2026-11-18, instructions the IR needs: direct calls, dispatch sites with link slots, and ownership operations (item 5); constancy across libraries is used by the linker (item 4; ADR 0017)
 - **Amended:** 2026-11-18, after review: untrusted code arrives as source or distribution artifacts, and run format is validated as defence in depth (context, consequences); conversion inserts ownership operations (item 5); an as-built note on primitives and globals (item 4); what the validator and VM check, and a known gap (item 7)
+- **Amended:** 2026-11-18, as built: the wide variants are a `wide` prefix (item 2)
 - **Related:** 0001 (artifacts), 0002 (values), 0004 (frames), 0006 (versioning), 0009 (untrusted code), 0012 (distribution format), 0017 (the IR)
 
 ## Context
@@ -38,6 +39,8 @@ Options **B and D**, as follows.
 
 1. **Words.** Instructions are little-endian 32-bit words. Each instruction's first word holds an 8-bit opcode and up to 24 bits of operands in a few fixed layouts: three 8-bit fields, an 8-bit and a 16-bit field, or one 24-bit field. Wide variants and extra words carry larger operands.
 2. **Registers are frame slots** (ADR 0004), addressed by 8-bit operands in the common forms, so three fit in one word. Functions with more than 256 slots use wide variants. A function's slot count is fixed at compile time.
+
+   **As built:** the wide variants are one prefix, `wide`, holding the high bytes of the next instruction's three fields, so any instruction can address 16-bit slots, argument counts and free-variable indices. The encoder writes it only when a field needs it and the decoder refuses it anywhere else, so each instruction has one encoding. The interpreter expands its dispatch twice from one definition, once for instructions as they come and once, behind the prefix's arm, with fields widened, so code without the prefix runs as before: the benchmarks are within noise of the interpreter without it.
 3. **Calls** put the callee and its arguments in consecutive slots at the top of the caller's frame. Those slots become the bottom of the callee's frame, as in Lua, so arguments are never copied. Multiple values come back in consecutive slots with a count.
 4. **Names are resolved ahead of time.** Library-level variables are indexes into the module's variable table, and constants are indexes into its constant pool. Both tables are filled in when the artifact loads (ADR 0006). No instruction looks anything up by name.
    - **Each entry of the variable table is defined by the module or imported:** imported entries name the exporting library by identity and the variable by its exported name.

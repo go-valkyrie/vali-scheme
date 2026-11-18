@@ -118,12 +118,19 @@ pub fn module(random: &mut impl Random) -> Module {
             let (arity, free) = if i == 0 {
                 (0, 0)
             } else {
-                (random.below(3) as u8, random.below(3) as u8)
+                (random.below(3) as u8, random.below(3) as u16)
             };
             Shape {
                 arity,
                 free,
-                slots: u16::from(1 + arity) + 4 + random.below(12) as u16,
+                // One frame in four is wide enough to need `wide` forms.
+                slots: u16::from(1 + arity)
+                    + 4
+                    + if random.below(4) == 0 {
+                        250 + random.below(60) as u16
+                    } else {
+                        random.below(12) as u16
+                    },
             }
         })
         .collect();
@@ -167,7 +174,7 @@ pub fn module(random: &mut impl Random) -> Module {
 /// A function's arity, free variables and frame size.
 struct Shape {
     arity: u8,
-    free: u8,
+    free: u16,
     slots: u16,
 }
 
@@ -215,9 +222,9 @@ fn random_instructions(
         // One operand in sixteen is anything, to test the validator.
         let mut s = || {
             if random.below(16) == 0 {
-                random.below(top + 2) as u8
+                random.below(top + 2) as u16
             } else {
-                (1 + random.below(top - 1)) as u8
+                (1 + random.below(top - 1)) as u16
             }
         };
         let (a, b, c) = (s(), s(), s());
@@ -252,7 +259,7 @@ fn random_instructions(
             }
             6 => I::Free {
                 dst: a,
-                index: random.below(u64::from(shape.free) + 1) as u8,
+                index: random.below(u64::from(shape.free) + 1) as u16,
             },
             7 => I::MakeBox { dst: a, src: b },
             8 => I::Unbox { dst: a, src: b },
@@ -267,12 +274,12 @@ fn random_instructions(
             17 => I::IfNull { a, offset },
             18 => I::IfPair { a, offset },
             19 | 20 => I::Call {
-                base: (1 + random.below(top / 2)) as u8,
-                argc: random.below(4) as u8,
+                base: (1 + random.below(top / 2)) as u16,
+                argc: random.below(4) as u16,
             },
             21 => I::TailCall {
                 proc: a,
-                argc: random.below(4) as u8,
+                argc: random.below(4) as u16,
             },
             22 => I::Return { src: a },
             23 => I::Add { dst: a, a: b, b: c },
@@ -313,7 +320,7 @@ fn random_instructions(
             },
             _ => I::SetFree {
                 closure: a,
-                index: random.below(3) as u8,
+                index: random.below(3) as u16,
                 src: b,
             },
         };
@@ -321,7 +328,7 @@ fn random_instructions(
         instructions.push(instruction);
     }
     instructions.push(I::Return {
-        src: random.below(top) as u8,
+        src: random.below(top) as u16,
     });
     skips.push(0);
     // Where each instruction starts, in words, then each branch's offset

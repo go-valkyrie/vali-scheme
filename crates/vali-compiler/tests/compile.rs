@@ -2803,3 +2803,34 @@ fn control_procedures_check_their_arity() {
         );
     }
 }
+
+#[test]
+fn frames_beyond_256_slots_use_wide_forms() {
+    let n = 300;
+    let numbers: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+    let vars: Vec<String> = (1..=n).map(|i| format!("x{i}")).collect();
+    let bindings: Vec<String> = (1..=n).map(|i| format!("(x{i} (id {i}))")).collect();
+    let sum = (n * (n + 1) / 2).to_string();
+    check(&[
+        // A call with 300 arguments.
+        (&format!("(length (list {}))", numbers.join(" ")), "300"),
+        // 300 values live at once, each a call's result.
+        (
+            &format!(
+                "(define (id x) x) (let ({}) (+ {}))",
+                bindings.join(" "),
+                vars.join(" ")
+            ),
+            &sum,
+        ),
+        // A closure over 300 variables.
+        (
+            &format!(
+                "(define (id x) x) (define f (let ({}) (lambda () (+ {})))) (f)",
+                bindings.join(" "),
+                vars.join(" ")
+            ),
+            &sum,
+        ),
+    ]);
+}

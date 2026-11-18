@@ -10,9 +10,9 @@ use std::fmt;
 use crate::instruction::Instruction;
 use crate::module::{Arity, Link, Module, branch_target};
 
-/// The largest frame format version 1 can address: slot operands are 8 bits,
-/// and wide forms do not exist yet.
-pub const MAX_SLOTS: u16 = 256;
+/// The largest frame a function may have: slots up to 255 fit an
+/// instruction's fields, larger ones need a `wide` prefix.
+pub const MAX_SLOTS: u16 = u16::MAX;
 
 /// Why a module was rejected.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,13 +80,8 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
     for (index, function) in module.functions.iter().enumerate() {
         let index = index as u32;
         let fail = |pc: Option<usize>, message: String| fail(Some(index), pc, message);
+        // At most `MAX_SLOTS`, which a u16 cannot exceed.
         let slots = usize::from(function.slots);
-        if function.slots > MAX_SLOTS {
-            return fail(
-                None,
-                format!("{slots} slots; at most {MAX_SLOTS} are addressable"),
-            );
-        }
         if slots < 1 + function.arity.parameter_slots() {
             return fail(
                 None,
@@ -134,8 +129,8 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
 
         for (pc, len, instruction) in &decoded {
             let fail = |message: String| fail(Some(*pc), message);
-            let slot = |s: u8| usize::from(s) < slots;
-            let span = |first: u8, count: usize| usize::from(first) + count < slots;
+            let slot = |s: u16| usize::from(s) < slots;
+            let span = |first: u16, count: usize| usize::from(first) + count < slots;
             let ok = match instruction {
                 Instruction::Mov { dst, src }
                 | Instruction::MakeBox { dst, src }
@@ -272,7 +267,7 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
 }
 
 /// The slot `instruction` writes its result to, if it writes one.
-fn written_slot(instruction: &Instruction) -> Option<u8> {
+fn written_slot(instruction: &Instruction) -> Option<u16> {
     match *instruction {
         Instruction::Mov { dst, .. }
         | Instruction::MakeBox { dst, .. }
