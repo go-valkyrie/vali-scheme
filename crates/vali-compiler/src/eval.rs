@@ -242,9 +242,7 @@ fn prepare<S: Strategy>(
         for name in names {
             expander.name_next(name);
         }
-        let module = expander
-            .library(library_identity, &library.form, library.own)
-            .map_err(compile_error)?;
+        let module = crate::compile_library(expander, library).map_err(compile_error)?;
         if cx.library(library_identity).is_none() {
             let id = cx.load(module)?;
             cx.register_library(library_identity, id);

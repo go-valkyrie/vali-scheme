@@ -116,31 +116,52 @@ fn a_program_runs_the_same_on_artifacts() {
 
 #[test]
 fn an_artifact_is_refused_when_what_it_relied_on_changed() {
-    let loader = greet();
-    let artifacts = written(&loader);
-    // (test greet) loaded from its artifact, but (scheme base) compiled
-    // from different source: its interface differs from what greet saw.
-    let mut changed = greet();
-    changed.0.push((
-        "(scheme base)",
-        "(define-library (scheme base)
-           (import (vali core) (vali primitive))
-           (export string-append define-syntax syntax-rules begin define)
-           (begin))"
-            .to_owned(),
-    ));
-    let only_greet: Vec<_> = artifacts
-        .iter()
-        .filter(|(i, _)| i.as_str() == "lib:(test greet)")
-        .cloned()
+    let library = |helper: &str| {
+        Map(vec![
+            (
+                "(test helper)",
+                format!(
+                    "(define-library (test helper) (import (scheme base))
+                       (export {helper}) (begin (define ({helper} x) (string-append x \"!\"))))"
+                ),
+            ),
+            (
+                "(test user)",
+                "(define-library (test user) (import (scheme base) (test helper))
+                   (export shout) (begin (define (shout x) (exclaim x))))"
+                    .to_owned(),
+            ),
+        ])
+    };
+    let program = "(import (scheme base) (test user)) (shout \"hey\")";
+    let compile = |loader: &Map, artifacts: &Artifacts| {
+        compile_program_with(program, &Identity::new("main"), loader, artifacts)
+            .map_err(|e| e.message)
+    };
+    let artifacts = compile(
+        &library("exclaim"),
+        &Artifacts {
+            write: true,
+            ..Artifacts::default()
+        },
+    )
+    .unwrap()
+    .artifacts;
+    let user: Vec<_> = artifacts
+        .into_iter()
+        .filter(|(i, _)| i.as_str() == "lib:(test user)")
         .collect();
-    let error = compile(&changed, &reading(&only_greet))
+    // As it was, (test user) loads from its artifact.
+    assert_eq!(
+        run(compile(&library("exclaim"), &reading(&user)).unwrap()),
+        "\"hey!\""
+    );
+    // (test helper) changed what it exports: (test user)'s artifact relied
+    // on what it was, and is refused.
+    let error = compile(&library("yell"), &reading(&user))
         .map(|_| ())
         .unwrap_err();
-    assert!(
-        error.contains("needs vali:scheme/base") || error.contains("has changed"),
-        "{error}"
-    );
+    assert!(error.contains("lib:(test helper) has changed"), "{error}");
 }
 
 #[test]

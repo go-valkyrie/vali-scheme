@@ -232,6 +232,8 @@ fn remap_bindings(
 /// bound in `core_scope`: its macros and compiled syntax not there
 /// already, then the bindings they reach. Taken in a fixed order, so the
 /// scopes made are numbered the same every time (ADR 0001 #4).
+/// Only what `own` keeps of the macros and compiled syntax is remapped,
+/// by the macro's unit and the compiled syntax's key.
 fn remap_export(
     export: &ContextState,
     core_scope: Scope,
@@ -239,18 +241,28 @@ fn remap_export(
     macros: &mut HashMap<MacroId, Macro>,
     compiled: &mut phase::CompiledByUnit,
     table: &mut BindingTable<String, Binding>,
+    own: Option<(u32, &str)>,
 ) -> std::result::Result<(), TooManyScopes> {
     let from = &export.context;
     let mut remap = Remap::new();
     remap.identify(export.core_scope, core_scope);
-    let mut ids: Vec<MacroId> = export.macros.keys().copied().collect();
+    let mut ids: Vec<MacroId> = export
+        .macros
+        .keys()
+        .copied()
+        .filter(|id| own.is_none_or(|(unit, _)| id.unit == unit))
+        .collect();
     ids.sort();
     for id in ids {
         if let std::collections::hash_map::Entry::Vacant(entry) = macros.entry(id) {
             entry.insert(export.macros[&id].remap(&mut remap, from, context)?);
         }
     }
-    let mut names: Vec<&String> = export.compiled.keys().collect();
+    let mut names: Vec<&String> = export
+        .compiled
+        .keys()
+        .filter(|name| own.is_none_or(|(_, key)| *name == key))
+        .collect();
     names.sort();
     for name in names {
         if !compiled.contains_key(name) {
@@ -486,6 +498,13 @@ struct Unit {
     /// A hash of what its importers observe, its `library` and `syntax`
     /// sections, once something asked.
     export_hash: Option<u64>,
+    /// Whether its syntax export holds only its own macros and compiled
+    /// syntax, as one loaded from an artifact does: importing it imports
+    /// its imports' too.
+    pruned: bool,
+    /// Whether it was compiled, then written and loaded again
+    /// (`round_trip`).
+    round_tripped: bool,
 }
 
 /// The sections a library's artifact has, all required.
@@ -734,6 +753,13 @@ impl Expander {
         self.by_name.insert(name, self.units.len());
     }
 
+    /// Whether the library `identity` was loaded from its artifact in
+    /// place of being compiled.
+    pub(crate) fn loaded_from_artifact(&self, identity: &str) -> bool {
+        self.unit_of(identity)
+            .is_some_and(|unit| self.units[unit].pruned && !self.units[unit].round_tripped)
+    }
+
     /// The unit compiled with `identity`, if there is one.
     pub(crate) fn unit_of(&self, identity: &str) -> Option<usize> {
         self.units.iter().position(|u| u.identity == identity)
@@ -782,7 +808,9 @@ impl Expander {
         let unit = self.units.len() - 1;
         let bytes = self.library_artifact(unit)?;
         self.units.pop();
-        self.load_library(identity, &bytes, own)
+        let module = self.load_library(identity, &bytes, own)?;
+        self.units[unit].round_tripped = true;
+        Ok(module)
     }
 
     /// The unit for a native library (ADR 0016 #8): a module whose
@@ -829,6 +857,8 @@ impl Expander {
             key: identity.to_owned(),
             ir: None,
             export_hash: None,
+            pruned: false,
+            round_tripped: false,
         });
         Ok(module)
     }
@@ -846,6 +876,7 @@ impl Expander {
             return Ok(());
         }
         self.finish_context()?;
+        let mut seeded = None;
         let seed = imports.iter().find_map(|set| {
             let unit = *self.by_name.get(set.library())?;
             self.units[unit].syntax.as_ref().map(|s| (unit, s))
@@ -853,6 +884,7 @@ impl Expander {
         let next = if repl && self.repl_state.is_some() {
             self.repl_state.take().expect("checked")
         } else if let Some((unit, export)) = seed {
+            seeded = Some(unit);
             let mut copy = ContextState::clone(export);
             copy.imported.insert(unit);
             copy.next_macro = 0;
@@ -872,6 +904,9 @@ impl Expander {
         } else {
             ContextOwner::Unit(self.units.len())
         });
+        if let Some(unit) = seeded {
+            self.import_dependencies(unit)?;
+        }
         Ok(())
     }
 
@@ -918,7 +953,7 @@ impl Expander {
             return Err(fail(format!("{identity} has no artifact")));
         };
         let library = self.library_record(unit)?;
-        let syntax = self.encode_syntax(&syntax)?;
+        let syntax = self.encode_syntax(unit, &syntax)?;
         let invoke = vali_dist::encode(&ir).map_err(|e| fail(format!("{identity}: {e}")))?;
         let mut depends = vali_dist::Writer::new();
         let imports = self.units[unit].imports.clone();
@@ -960,9 +995,14 @@ impl Expander {
         if let Some(hash) = self.units[unit].export_hash {
             return Ok(hash);
         }
+        // Its syntax export is not made until its context is finished,
+        // which the next unit compiled would otherwise do.
+        if matches!(self.owner, Some(ContextOwner::Unit(u)) if u == unit) {
+            self.finish_context()?;
+        }
         let mut bytes = self.library_record(unit)?;
         if let Some(syntax) = self.units[unit].syntax.clone() {
-            bytes.extend(self.encode_syntax(&syntax)?);
+            bytes.extend(self.encode_syntax(unit, &syntax)?);
         }
         let hash = bytes_hash(&bytes);
         self.units[unit].export_hash = Some(hash);
@@ -1044,6 +1084,8 @@ impl Expander {
             key: identity.to_owned(),
             ir: Some(Arc::new(ir)),
             export_hash: None,
+            pruned: true,
+            round_tripped: false,
         });
         let filled = (|| {
             let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
@@ -1058,6 +1100,11 @@ impl Expander {
             unit.imports = record.imports;
             unit.interface = record.interface;
             unit.syntax = Some(Arc::new(syntax));
+            // Writing it again would give these bytes, so they are what its
+            // importers' artifacts hash, without encoding it again.
+            let mut observed = section("library")?.to_vec();
+            observed.extend_from_slice(section("syntax")?);
+            unit.export_hash = Some(bytes_hash(&observed));
             Ok(())
         })();
         if let Err(e) = filled {
@@ -1091,6 +1138,7 @@ impl Expander {
         if !self.imported_syntax.insert(unit) {
             return Ok(());
         }
+        self.import_dependencies(unit)?;
         let Some(export) = self.units[unit].syntax.clone() else {
             return Ok(());
         };
@@ -1101,14 +1149,33 @@ impl Expander {
             &mut self.macros,
             &mut self.compiled,
             &mut self.table,
+            None,
         )
         .map_err(too_many)
     }
 
-    /// The bytes of `state`, the syntax export of a unit of this build, as
-    /// an importer would see it: remapped into a context of its own first.
-    fn encode_syntax(&self, state: &ContextState) -> Result<Vec<u8>> {
+    /// Imports the syntax of what `unit` imports, if its export holds only
+    /// its own macros and compiled syntax, as one loaded from an artifact
+    /// does: the macros its own expand into are its imports'.
+    fn import_dependencies(&mut self, unit: usize) -> Result<()> {
+        if self.units[unit].pruned {
+            for dependency in self.units[unit].imports.clone() {
+                self.import_syntax(dependency)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The bytes of `unit`'s syntax export `state` as an importer would
+    /// see it: remapped into a context of its own first, with only its own
+    /// macros and compiled syntax, and the bindings they reach. Its
+    /// imports' macros come from their own exports.
+    fn encode_syntax(&self, unit: usize, state: &ContextState) -> Result<Vec<u8>> {
         let mut fresh = ContextState::fresh()?;
+        let own = (
+            u32::try_from(unit).expect("at most 2^32 units"),
+            self.units[unit].key.as_str(),
+        );
         remap_export(
             state,
             fresh.core_scope,
@@ -1116,9 +1183,9 @@ impl Expander {
             &mut fresh.macros,
             &mut fresh.compiled,
             &mut fresh.table,
+            Some(own),
         )
         .map_err(too_many)?;
-        fresh.imported.clone_from(&state.imported);
         fresh.next_macro = state.next_macro;
         let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
         artifact::encode(&fresh, &identities, &self.sources).map_err(|message| CompileError {
@@ -1281,6 +1348,8 @@ impl Expander {
             },
             ir: None,
             export_hash: None,
+            pruned: false,
+            round_tripped: false,
         });
         self.top = top;
         for set in imports {

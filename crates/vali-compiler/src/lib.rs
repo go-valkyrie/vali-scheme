@@ -21,6 +21,7 @@ mod loader;
 mod lower;
 mod pattern;
 mod phase;
+pub mod prebuilt;
 mod repl;
 
 pub use library::{LibraryName, NamePart};
@@ -99,6 +100,9 @@ pub struct Program {
     /// [`compile_program_with`] was asked for them.
     #[doc(hidden)]
     pub artifacts: Vec<(Identity, Vec<u8>)>,
+    /// The libraries loaded from artifacts rather than compiled.
+    #[doc(hidden)]
+    pub loaded: Vec<Identity>,
 }
 
 /// Library artifacts to use in place of compiling libraries, by identity,
@@ -305,6 +309,11 @@ fn build(
     match expand_all(&mut expander, program, graph, identity, &artifacts.read) {
         Ok((libraries, body, natives, names_eval)) => {
             let ir = expander.last_ir.take();
+            let loaded = libraries
+                .iter()
+                .filter(|(identity, _)| expander.loaded_from_artifact(identity.as_str()))
+                .map(|(identity, _)| identity.clone())
+                .collect();
             let mut written = Vec::new();
             if artifacts.write {
                 for (identity, _) in &libraries {
@@ -331,6 +340,7 @@ fn build(
                 evaluator,
                 ir,
                 artifacts: written,
+                loaded,
             })
         }
         Err(e) => Err(e.located(&expander.sources)),
@@ -379,7 +389,7 @@ fn expand_all(
         let identity = library.identity.as_str();
         let module = match artifacts.get(identity) {
             Some(bytes) => expander.load_library(identity, bytes, library.own)?,
-            None => expander.library(identity, &library.form, library.own)?,
+            None => compile_library(expander, library)?,
         };
         libraries.push((library.identity.clone(), module));
     }
@@ -477,4 +487,29 @@ fn load_inner<S: vali_runtime::Strategy>(
         cx.register_library(identity.as_str(), id);
     }
     cx.load(program.body)
+}
+
+/// Compiles `library`, or loads it from its prebuilt artifact if it is one
+/// of Vali's own and was not served by a host. A prebuilt artifact that
+/// does not fit, because what it was compiled against differs, is set
+/// aside and the library compiled from source.
+pub(crate) fn compile_library(
+    expander: &mut expand::Expander,
+    library: &loader::Library,
+) -> Result<Module, CompileError> {
+    let identity = library.identity.as_str();
+    if library.own
+        && let Some(bytes) = prebuilt::artifact(identity)
+        && let Ok(module) = expander.load_library(identity, bytes, true)
+    {
+        return Ok(module);
+    }
+    expander.library(identity, &library.form, library.own)
+}
+
+/// The names of Vali's own libraries written in Scheme, which
+/// `vali-stdlib` compiles ahead of time.
+#[doc(hidden)]
+pub fn standard_libraries() -> Vec<LibraryName> {
+    loader::standard_names()
 }

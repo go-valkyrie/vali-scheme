@@ -277,6 +277,14 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["srfi", "132"], include_str!("../lib/srfi/132.sld")),
 ];
 
+/// The names of Vali's own libraries written in Scheme.
+pub(crate) fn standard_names() -> Vec<LibraryName> {
+    STANDARD
+        .iter()
+        .map(|(parts, _)| LibraryName::new(parts.iter().copied()))
+        .collect()
+}
+
 /// Whether `name` is one of Vali's own libraries.
 pub(crate) fn is_standard(name: &LibraryName) -> bool {
     library::is_builtin(name)
