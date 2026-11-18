@@ -471,11 +471,12 @@ impl<S: Strategy> Cx<S> {
     /// and the continuations that hold their frames, and the continuation
     /// below the stack.
     pub(crate) fn control_values(&self) -> impl Iterator<Item = Value> + '_ {
-        self.catches
+        self.task
+            .catches
             .iter()
             .flat_map(|c| [c.handler, c.record])
-            .chain([self.below])
-            .chain(self.dynamic)
+            .chain([self.task.below])
+            .chain(self.task.dynamic)
     }
 
     /// The value of a loaded module's variable, if it has one.
@@ -518,7 +519,7 @@ impl<S: Strategy> Cx<S> {
     /// `procedure` and `args` must be values valid in this isolate, as a
     /// Rust procedure's own result must be.
     pub unsafe fn tail_call(&mut self, procedure: Value, args: Vec<Value>) {
-        self.tail_call = Some((procedure, args));
+        self.task.tail_call = Some((procedure, args));
     }
 
     /// The value bound to the global `name`, if there is one.
@@ -795,7 +796,7 @@ impl<S: Strategy> Cx<S> {
     #[cold]
     #[inline(never)]
     fn catch_returned(&mut self) {
-        if let Some(catch) = self.catches.pop()
+        if let Some(catch) = self.task.catches.pop()
             && S::PRECISE
         {
             S::release(self.heap_mut(), catch.handler);
@@ -811,7 +812,7 @@ impl<S: Strategy> Cx<S> {
             S::retain(self.heap_mut(), catch.handler);
             S::retain(self.heap_mut(), catch.record);
         }
-        self.catches.push(catch);
+        self.task.catches.push(catch);
     }
 
     /// Stores `v` in slot `i` of the frame at `fp`. Under precise counting,
@@ -957,13 +958,13 @@ impl<S: Strategy> Cx<S> {
         if args.len() > usize::from(u8::MAX) {
             return Err(Error::scheme("too many arguments"));
         }
-        if self.stack.is_empty() {
+        if self.task.stack.is_empty() {
             self.push_segment(SEGMENT_WORDS)?;
         }
         // Every host call starts in an empty dynamic environment, however
         // the last one ended.
         self.reset_dynamic();
-        let segment = &self.stack[0];
+        let segment = &self.task.stack[0];
         // The entry frame is a pseudo-frame at the top of the segment. The
         // word at its frame pointer will hold the host's stack pointer, for
         // unwinders; its slots 0 to 2 hold the callee's header, slot 3 the
@@ -1004,8 +1005,8 @@ impl<S: Strategy> Cx<S> {
     /// the continuation below, the dynamic environment, a pending tail
     /// call, and chained or shared segments.
     fn finish_run(&mut self) {
-        self.tail_call = None;
-        while let Some(catch) = self.catches.pop() {
+        self.task.tail_call = None;
+        while let Some(catch) = self.task.catches.pop() {
             if S::PRECISE {
                 S::release(self.heap_mut(), catch.handler);
                 S::release(self.heap_mut(), catch.record);
@@ -1015,10 +1016,10 @@ impl<S: Strategy> Cx<S> {
         self.reset_dynamic();
         // An error can leave segments chained; only the first is kept, and
         // only if it is whole, since the next run starts at its top.
-        while self.stack.len() > 1 {
+        while self.task.stack.len() > 1 {
             self.pop_segment();
         }
-        if !self.stack[0].is_whole() {
+        if !self.task.stack[0].is_whole() {
             self.drop_view();
         }
     }
@@ -1027,24 +1028,24 @@ impl<S: Strategy> Cx<S> {
     /// spare if it is big enough, and returns its top and limit.
     fn push_segment(&mut self, words: usize) -> Result<(*mut u64, *mut u64), Error> {
         let words = words.max(SEGMENT_WORDS);
-        let segment = match self.spare.take() {
+        let segment = match self.task.spare.take() {
             Some(spare) if spare.words() >= words => spare,
             spare => {
                 if let Some(spare) = spare {
-                    self.stack_words -= spare.words();
+                    self.task.stack_words -= spare.words();
                 }
-                if self.stack_words + words > self.max_stack_words {
+                if self.task.stack_words + words > self.max_stack_words {
                     return Err(Error::scheme(format!(
                         "stack overflow: the stack would exceed {} bytes",
                         self.max_stack_words * 8
                     )));
                 }
-                self.stack_words += words;
+                self.task.stack_words += words;
                 Segment::new(words)
             }
         };
         let ends = (segment.top(), segment.limit());
-        self.stack.push(View::whole(segment));
+        self.task.stack.push(View::whole(segment));
         Ok(ends)
     }
 
@@ -1052,21 +1053,25 @@ impl<S: Strategy> Cx<S> {
     /// reused, and returns the previous segment's limit.
     fn pop_segment(&mut self) -> *mut u64 {
         self.drop_view();
-        self.stack.last().expect("the first segment stays").limit()
+        self.task
+            .stack
+            .last()
+            .expect("the first segment stays")
+            .limit()
     }
 
     /// Drops the current segment from the stack, keeping it as the spare if
     /// it can be reused.
     fn drop_view(&mut self) {
-        let view = self.stack.pop().expect("a segment to drop");
+        let view = self.task.stack.pop().expect("a segment to drop");
         let words = view.words();
         match view.reclaim() {
             Some(segment) => {
-                if let Some(old) = self.spare.replace(segment) {
-                    self.stack_words -= old.words();
+                if let Some(old) = self.task.spare.replace(segment) {
+                    self.task.stack_words -= old.words();
                 }
             }
-            None => self.stack_words -= words,
+            None => self.task.stack_words -= words,
         }
     }
 
@@ -1090,7 +1095,7 @@ impl<S: Strategy> Cx<S> {
             let position = *f.add(2);
             let slots = self.suspended_slots(f).max(own + 4);
             let header = if position == ENTRY { 4 } else { 3 };
-            let view = self.stack.last().expect("a segment");
+            let view = self.task.stack.last().expect("a segment");
             let (mut top, mut limit) = (view.top(), view.limit());
             let mut flags = 0;
             if !fits(top.sub(header), slots, limit) {
@@ -1126,7 +1131,9 @@ impl<S: Strategy> Cx<S> {
                 self.set_below(Value::FALSE);
             } else if position & UNDERFLOW != 0 {
                 // The caller is the parent's.
-                let parent = Self::sealed(self.below).expect("a continuation").parent;
+                let parent = Self::sealed(self.task.below)
+                    .expect("a continuation")
+                    .parent;
                 self.set_below(parent);
             }
             Ok((copy, limit))
@@ -1212,10 +1219,10 @@ impl<S: Strategy> Cx<S> {
                 self.release_frames(fp, slots, std::ptr::null_mut());
             }
         }
-        while self.stack.len() > 1 {
+        while self.task.stack.len() > 1 {
             self.drop_view();
         }
-        self.stack[0].limit()
+        self.task.stack[0].limit()
     }
 
     /// How many Scheme procedures have been entered so far: the fuel used
@@ -1357,7 +1364,7 @@ impl<S: Strategy> Cx<S> {
         // A tail call only stands for a result the procedure returns: one
         // left by a procedure that failed would hold values the next
         // collection may free, for the next Rust procedure to call.
-        self.tail_call = None;
+        self.task.tail_call = None;
         let result = match &code.kind {
             // A panic in a primitive becomes an error naming it, as in a
             // bridge, so it never unwinds through the frames it ran in.
@@ -1375,7 +1382,7 @@ impl<S: Strategy> Cx<S> {
             _ => unreachable!("only Rust procedures are called here"),
         };
         if result.is_err() {
-            self.tail_call = None;
+            self.task.tail_call = None;
         }
         result
     }
@@ -1537,7 +1544,7 @@ impl<S: Strategy> Cx<S> {
                     }
                     Next::Raise(error)
                         if fp != top
-                            && self.dynamic[crate::continuations::HANDLERS]
+                            && self.task.dynamic[crate::continuations::HANDLERS]
                                 != Value::EMPTY_LIST
                             && error.reaches_handlers()
                             && self.raise_hook.is_some() =>
@@ -1595,7 +1602,7 @@ impl<S: Strategy> Cx<S> {
                         // to the host.
                         let catch = match error {
                             Error::Exit(_) | Error::OutOfFuel => None,
-                            _ => self.catches.pop(),
+                            _ => self.task.catches.pop(),
                         };
                         let Some(catch) = catch else {
                             if fp == top {
@@ -1611,10 +1618,10 @@ impl<S: Strategy> Cx<S> {
                             if fp != catch.fp {
                                 self.release_frames(fp, frame_slots, catch.fp);
                             }
-                            while self.stack.len() > catch.segments {
+                            while self.task.stack.len() > catch.segments {
                                 self.pop_segment();
                             }
-                            limit = self.stack.last().expect("a segment").limit();
+                            limit = self.task.stack.last().expect("a segment").limit();
                             fp = catch.fp;
                         } else {
                             // The frame is sealed: drop the whole live
@@ -1667,7 +1674,7 @@ impl<S: Strategy> Cx<S> {
                                     fp,
                                     base,
                                     resume,
-                                    segments: self.stack.len(),
+                                    segments: self.task.stack.len(),
                                     handler: slot(fp, base + 5),
                                     record: Value::FALSE,
                                 });
@@ -1727,7 +1734,7 @@ impl<S: Strategy> Cx<S> {
                                     resume == ENTRY || resume & (CAPTURE | UNDERFLOW) == 0
                                 );
                                 let result = attempt!(self.call_native(callee, fp, base + 4, argc));
-                                if let Some((procedure, args)) = self.tail_call.take() {
+                                if let Some((procedure, args)) = self.task.tail_call.take() {
                                     // The Rust procedure asked for a tail
                                     // call: make it in its place.
                                     if !fits(fp.sub(base + 3), args.len() + 2, limit) {
@@ -1855,14 +1862,14 @@ impl<S: Strategy> Cx<S> {
                                     fail!(Error::scheme("%catch: cannot be called from Rust"));
                                 }
                                 let segments = if position & BOUNDARY != 0 {
-                                    self.stack.len() - 1
+                                    self.task.stack.len() - 1
                                 } else {
-                                    self.stack.len()
+                                    self.task.stack.len()
                                 };
                                 // A sealed caller is held by the
                                 // continuation below the stack.
                                 let record = if position & UNDERFLOW != 0 {
-                                    self.below
+                                    self.task.below
                                 } else {
                                     Value::FALSE
                                 };
@@ -1925,7 +1932,7 @@ impl<S: Strategy> Cx<S> {
                             }
                             Kind::Native(_) | Kind::Bridge(_) => {
                                 let result = attempt!(self.call_native(callee, fp, 1, argc));
-                                if let Some((procedure, args)) = self.tail_call.take() {
+                                if let Some((procedure, args)) = self.task.tail_call.take() {
                                     if !fits(fp, args.len() + 2, limit) {
                                         fail!(Error::scheme(
                                             "too many arguments to fit in this stack segment"

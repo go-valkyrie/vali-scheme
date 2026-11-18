@@ -118,10 +118,10 @@ impl<S: Strategy> Cx<S> {
     pub(crate) fn set_below(&mut self, k: Value) {
         if S::PRECISE {
             S::retain(self.heap_mut(), k);
-            let old = self.below;
+            let old = self.task.below;
             S::release(self.heap_mut(), old);
         }
-        self.below = k;
+        self.task.below = k;
     }
 
     /// Seals the stack into a new continuation that returns to the frame
@@ -173,25 +173,29 @@ impl<S: Strategy> Cx<S> {
                 own = position_base(p);
                 f = unsafe { *f as *mut u64 };
             }
-            let kept: Vec<_> = self.stack.drain(self.stack.len() - live..).collect();
-            let last = self.stack.pop().expect("a segment holds the frames");
-            for view in self.stack.drain(..) {
-                self.stack_words -= view.words();
+            let kept: Vec<_> = self
+                .task
+                .stack
+                .drain(self.task.stack.len() - live..)
+                .collect();
+            let last = self.task.stack.pop().expect("a segment holds the frames");
+            for view in self.task.stack.drain(..) {
+                self.task.stack_words -= view.words();
                 memory.push(view.memory());
             }
             memory.push(last.memory());
-            self.stack.push(last.below(split));
-            self.stack.extend(kept);
+            self.task.stack.push(last.below(split));
+            self.task.stack.extend(kept);
             // The continuation takes over the stack's reference to what
             // lies below it.
-            parent = std::mem::replace(&mut self.below, Value::FALSE);
+            parent = std::mem::replace(&mut self.task.below, Value::FALSE);
             if !S::PRECISE {
                 S::retain(self.heap_mut(), parent);
             }
             // The waiting catches' frames are sealed now.
-            for i in 0..self.catches.len() {
-                if self.catches[i].record == Value::FALSE {
-                    self.catches[i].record = k;
+            for i in 0..self.task.catches.len() {
+                if self.task.catches[i].record == Value::FALSE {
+                    self.task.catches[i].record = k;
                     if S::PRECISE {
                         S::retain(self.heap_mut(), k);
                     }
@@ -200,12 +204,12 @@ impl<S: Strategy> Cx<S> {
         } else if position == ENTRY {
             parent = Value::FALSE;
         } else {
-            parent = self.below;
+            parent = self.task.below;
             S::retain(self.heap_mut(), parent);
         }
-        let mut catches = Vec::with_capacity(self.catches.len());
-        for i in 0..self.catches.len() {
-            let mut catch = self.catches[i];
+        let mut catches = Vec::with_capacity(self.task.catches.len());
+        for i in 0..self.task.catches.len() {
+            let mut catch = self.task.catches[i];
             if catch.record == k {
                 catch.record = Value::FALSE;
             }
@@ -240,7 +244,7 @@ impl<S: Strategy> Cx<S> {
     /// position word of a callee returning there, or `None` for the host.
     pub(crate) fn reinstate(&mut self, k: Value) -> Option<(*mut u64, u64)> {
         let sealed = Self::sealed(k).expect("a continuation");
-        while let Some(catch) = self.catches.pop() {
+        while let Some(catch) = self.task.catches.pop() {
             if S::PRECISE {
                 S::release(self.heap_mut(), catch.handler);
                 S::release(self.heap_mut(), catch.record);
@@ -255,7 +259,7 @@ impl<S: Strategy> Cx<S> {
                 S::retain(self.heap_mut(), catch.handler);
                 S::retain(self.heap_mut(), catch.record);
             }
-            self.catches.push(catch);
+            self.task.catches.push(catch);
         }
         if sealed.position == ENTRY {
             self.set_below(Value::FALSE);
@@ -277,15 +281,15 @@ impl<S: Strategy> Cx<S> {
     pub(crate) fn set_dynamic(&mut self, i: usize, v: Value) {
         if S::PRECISE {
             S::retain(self.heap_mut(), v);
-            let old = self.dynamic[i];
+            let old = self.task.dynamic[i];
             S::release(self.heap_mut(), old);
         }
-        self.dynamic[i] = v;
+        self.task.dynamic[i] = v;
     }
 
     /// Empties the dynamic state, as every host call starts and ends.
     pub(crate) fn reset_dynamic(&mut self) {
-        for i in 0..self.dynamic.len() {
+        for i in 0..self.task.dynamic.len() {
             self.set_dynamic(i, Value::EMPTY_LIST);
         }
     }
@@ -295,7 +299,7 @@ impl<S: Strategy> Cx<S> {
 /// `(%winders)`, `(%set-winders! list)` and so on.
 pub(crate) fn dynamic_table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
     fn get<S: Strategy, const I: usize>(cx: &mut Cx<S>, _: &[Value]) -> Result<Value, Error> {
-        Ok(cx.dynamic[I])
+        Ok(cx.task.dynamic[I])
     }
     fn set<S: Strategy, const I: usize>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
         cx.set_dynamic(I, args[0]);

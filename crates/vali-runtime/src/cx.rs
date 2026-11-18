@@ -17,8 +17,8 @@ use vali_abi::{Header, Layout, TypeCode, data};
 use crate::code::{Code, Instance};
 use crate::handle::{Error, Handle, RootTable};
 use crate::page::{HeapConfig, OutOfMemory};
-use crate::stack::{Segment, View};
 use crate::strategy::{Space, Strategy};
+use crate::task::Task;
 use crate::value::Value;
 
 /// The most fields an object can have, so that every field's offset from
@@ -60,19 +60,9 @@ pub struct Cx<S: Strategy> {
     /// boxed so its address survives the vector growing.
     #[allow(clippy::vec_box)]
     pub(crate) natives: Vec<Box<Code<S>>>,
-    /// The stack: a chain of segments, the current one last, created on
-    /// first use.
-    pub(crate) stack: Vec<View>,
-    /// The continuation the outermost live frame returns into, when that
-    /// frame's caller is sealed: the one whose own frames hold the caller.
-    /// `#f` otherwise.
-    pub(crate) below: Value,
-    /// A segment kept after the stack shrinks, so a call that keeps
-    /// crossing a segment boundary does not allocate each time.
-    pub(crate) spare: Option<Segment>,
-    /// Words allocated to the stack, the spare included.
-    pub(crate) stack_words: usize,
-    /// The most words the stack may take.
+    /// The task running, or to run next: its stack and dynamic state.
+    pub(crate) task: Task,
+    /// The most words a task's stack may take.
     pub(crate) max_stack_words: usize,
     /// Whether Scheme code is running, which forbids re-entering it.
     pub(crate) running: bool,
@@ -83,8 +73,6 @@ pub struct Cx<S: Strategy> {
     pub(crate) counters: crate::Counters,
     /// The most fuel the isolate may use, if limited.
     pub(crate) fuel_limit: Option<u64>,
-    /// A tail call a Rust procedure asked for, made when it returns.
-    pub(crate) tail_call: Option<(Value, Vec<Value>)>,
     /// The syntax objects that heap objects of type `Syntax` index.
     pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
     /// Data the host keeps here for its Rust procedures to reach.
@@ -96,12 +84,6 @@ pub struct Cx<S: Strategy> {
     /// What `eval` needs, if the program can evaluate code: the compiler's
     /// state, kept apart from the host's.
     pub(crate) evaluator: Option<Box<dyn std::any::Any + Send>>,
-    /// The `%catch`es whose thunks are running, innermost last.
-    pub(crate) catches: Vec<crate::vm::Catch>,
-    /// The dynamic state (scheme base) keeps: `dynamic-wind`'s winders,
-    /// the exception handlers and the parameterization, each a list. Every
-    /// host call starts with them empty (`continuations`).
-    pub(crate) dynamic: [Value; 3],
     /// The procedure an error calls where it happens, while a handler is
     /// installed: (scheme base)'s `raise`.
     pub(crate) raise_hook: Option<Handle>,
@@ -177,23 +159,17 @@ impl<S: Strategy> Cx<S> {
             symbols: HashMap::new(),
             keywords: HashMap::new(),
             natives: Vec::new(),
-            stack: Vec::new(),
-            below: Value::FALSE,
-            spare: None,
-            stack_words: 0,
+            task: Task::new(),
             max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
             fuel_used: 0,
             #[cfg(feature = "counters")]
             counters: crate::Counters::default(),
             fuel_limit: None,
-            tail_call: None,
             syntaxes: Vec::new(),
             host_data: None,
             expander_data: None,
             evaluator: None,
-            catches: Vec::new(),
-            dynamic: [Value::EMPTY_LIST; 3],
             raise_hook: None,
             error_object_type: None,
             values_type: None,

@@ -35,6 +35,7 @@ mod strategy;
 mod strings;
 mod stubs;
 mod syntax;
+mod task;
 mod trampoline;
 mod value;
 mod vm;
