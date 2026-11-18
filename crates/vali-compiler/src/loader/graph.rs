@@ -348,6 +348,7 @@ pub(super) async fn fetch_includes(
     from: &Identity,
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
+    known: &impl Fn(&LibraryName) -> bool,
     includes: &mut Includes,
     available: &mut Available,
 ) {
@@ -373,6 +374,7 @@ pub(super) async fn fetch_includes(
                             }
                             let found = is_standard(&name)
                                 || local.contains(&name)
+                                || known(&name)
                                 || matches!(loader.fetch(&name, Some(from)).await, Ok(Some(_)));
                             available.insert(name, found);
                         }
@@ -492,6 +494,7 @@ pub(super) async fn walk(
         identity,
         loader,
         &names,
+        known,
         &mut includes,
         &mut available,
     )
@@ -568,6 +571,7 @@ pub(super) async fn walk(
                 &library_identity,
                 loader,
                 &names,
+                known,
                 &mut includes,
                 &mut available,
             )
