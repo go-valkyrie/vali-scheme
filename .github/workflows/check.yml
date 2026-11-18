@@ -2,12 +2,34 @@
 # dependency licences) on every pull request and every push to main. Other
 # branches are checked through their pull requests, so a branch with one
 # is not checked twice.
+#
+# A change only to files the check never reads skips it: prose, agent
+# settings, and the fuzz targets, which fuzz.yml builds. Anything else,
+# including a new directory, runs it. The two lists must stay the same.
 name: check
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".claude/**"
+      - ".jouet/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".claude/**"
+      - ".jouet/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
 
 permissions:
   contents: read
