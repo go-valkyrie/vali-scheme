@@ -1,0 +1,17 @@
+;;; Symbolic work on lists and symbols: differentiating an expression
+;;; again and again, allocating a new tree each time.
+;;; expect: (+ (* (* 3 x x) (+ (/ 0 3) (/ 1 x) (/ 1 x))) (* (* a x x) (+ (/ 0 a) (/ 1 x) (/ 1 x))) (* (* b x) (+ (/ 0 b) (/ 1 x))) 0)
+(import (scheme base) (scheme cxr))
+(define (deriv a)
+  (cond ((not (pair? a)) (if (eq? a 'x) 1 0))
+        ((eq? (car a) '+) (cons '+ (map deriv (cdr a))))
+        ((eq? (car a) '-) (cons '- (map deriv (cdr a))))
+        ((eq? (car a) '*)
+         (list '* a (cons '+ (map (lambda (a) (list '/ (deriv a) a)) (cdr a)))))
+        ((eq? (car a) '/)
+         (list '- (list '/ (deriv (cadr a)) (caddr a))
+               (list '/ (cadr a) (list '* (caddr a) (caddr a) (deriv (caddr a))))))
+        (else (error "deriv: unknown operator" (car a)))))
+(define expression '(+ (* 3 x x) (* a x x) (* b x) 5))
+(let loop ((i 0) (result #f))
+  (if (= i 40000) result (loop (+ i 1) (deriv expression))))

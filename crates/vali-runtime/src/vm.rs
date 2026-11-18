@@ -1224,6 +1224,23 @@ impl<S: Strategy> Cx<S> {
         self.fuel_used
     }
 
+    /// What the isolate has done since it was made or last reset, with the
+    /// `counters` feature; `None` without it.
+    pub fn counters(&self) -> Option<crate::Counters> {
+        #[cfg(feature = "counters")]
+        return Some(self.counters);
+        #[cfg(not(feature = "counters"))]
+        None
+    }
+
+    /// Starts the counts again from zero.
+    pub fn reset_counters(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters = crate::Counters::default();
+        }
+    }
+
     /// Sets how many procedures the isolate may enter, counting from when
     /// it was made, or no limit. Past it, a run ends with
     /// [`Error::OutOfFuel`], which Scheme code cannot catch (ADR 0009 #21).
@@ -1287,6 +1304,11 @@ impl<S: Strategy> Cx<S> {
             }
         }
         self.fuel_used += 1;
+        #[cfg(feature = "counters")]
+        {
+            self.counters.calls += 1;
+            self.counters.largest_frame = self.counters.largest_frame.max(slots as u64);
+        }
         code.calls.fetch_add(1, Ordering::Relaxed);
         if self.fuel_limit.is_some_and(|limit| self.fuel_used > limit) {
             return Err(Error::OutOfFuel);
@@ -1308,6 +1330,10 @@ impl<S: Strategy> Cx<S> {
         first: usize,
         argc: usize,
     ) -> Result<Value, Error> {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.native_calls += 1;
+        }
         if !code.arity.accepts(argc) {
             return Err(Error::scheme(format!(
                 "{}: wrong number of arguments: got {argc}",
@@ -2071,6 +2097,10 @@ impl<S: Strategy> Cx<S> {
                                 None => attempt!(self.arith($op, x, y)),
                             }
                         }};
+                    }
+                    #[cfg(feature = "counters")]
+                    {
+                        self.counters.instructions += 1;
                     }
                     let Some(op) = Opcode::from_u8(word as u8) else {
                         unreachable!("validated code has only known opcodes");

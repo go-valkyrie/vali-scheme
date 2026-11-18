@@ -1,0 +1,21 @@
+[package]
+name = "vali-bench"
+description = "Runs Vali's benchmarks: exact counts, timings, and comparisons between runs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# Counts instead of times: the runtime's counters (`Cx::counters`).
+counters = ["vali-runtime/counters"]
+
+[dependencies]
+vali-compiler.workspace = true
+vali-runtime.workspace = true
+vali-stdlib.workspace = true
+
+[lints]
+workspace = true

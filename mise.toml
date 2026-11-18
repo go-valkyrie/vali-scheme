@@ -42,3 +42,14 @@ run = "cargo deny check"
 [tasks.check]
 description = "Everything CI runs: lint, test, documentation and dependency checks"
 depends = ["lint", "test", "docs", "deny"]
+
+[tasks.bench]
+description = "Run benchmarks/: exact counts, then the median of 9 timed runs, into target/vali-bench/latest"
+run = [
+    "cargo run --release -q -p vali-bench --features counters -- count",
+    "cargo run --release -q -p vali-bench -- time",
+]
+
+[tasks.bench-compare]
+description = "Compare two benchmark result directories: bin/mise run bench-compare OLD NEW"
+run = "cargo run --release -q -p vali-bench -- compare"

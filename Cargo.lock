@@ -497,6 +497,15 @@ name = "vali-abi"
 version = "0.0.0"
 
 [[package]]
+name = "vali-bench"
+version = "0.0.0"
+dependencies = [
+ "vali-compiler",
+ "vali-runtime",
+ "vali-stdlib",
+]
+
+[[package]]
 name = "vali-bytecode"
 version = "0.0.0"
 dependencies = [

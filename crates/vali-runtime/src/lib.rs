@@ -12,6 +12,7 @@
 pub mod bridge;
 mod code;
 mod continuations;
+mod counters;
 mod counting;
 mod cx;
 mod cycles;
@@ -40,6 +41,7 @@ mod vm;
 
 pub use bridge::{NativeFunction, NativeLibrary, Obj};
 pub use code::{Code, ModuleId, NativeFn};
+pub use counters::Counters;
 pub use counting::{
     Counting, CountingHeap, DeferredHeadered, DeferredSideCounts, PreciseHeadered,
     PreciseSideCounts,

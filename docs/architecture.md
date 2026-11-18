@@ -26,6 +26,7 @@ Each boundary below exists for a reason recorded in an ADR:
 | `vali-stdlib` | Vali's standard libraries compiled ahead of time: its build script compiles them with `vali-compiler` and embeds their artifacts, which `install` hands to the compiler, so starting up loads them instead of expanding them. A crate of its own because the compiler cannot depend on what its own build produces | `vali-compiler`, also as a build dependency | M1 |
 | `vali` | The embedding API that hosts depend on. The compiler sits behind its default `eval` feature | `vali-runtime`, `vali-compiler` | M1 |
 | `vali-cli` | The `vali` binary: REPL, scripts, `vali build`, `vali lsp` | `vali`, `vali-build` | M1 |
+| `vali-bench` | The benchmark tool: runs `benchmarks/`, exact counts with the runtime's `counters` feature, medians of repeated timed runs, and comparisons between runs. Not published | `vali-compiler`, `vali-runtime`, `vali-stdlib` | M1 |
 | `vali-macros` | `#[bridge]`. Procedural macros must be a crate of their own | none | M2 |
 | `vali-codegen` | Cranelift code generation, taking CPU and memory strategy as targets, writing to memory (JIT) or object files (ADR 0013) | `vali-abi`, `vali-bytecode` | M3 |
 | `vali-build` | `vali build`: whole-program compilation, runtime archives, linking (ADR 0013) | `vali-compiler`, `vali-codegen`, `vali-artifact` | M4 |

@@ -22,6 +22,9 @@ vali-syntax.workspace = true
 # call-heavy code. Vali's GDB and LLDB extensions show Scheme frames without
 # it.
 native-frames = []
+# Exact counts of what an isolate does (`Cx::counters`), for benchmarks.
+# Off by default: it costs an increment per instruction.
+counters = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

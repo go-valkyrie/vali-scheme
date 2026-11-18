@@ -78,6 +78,9 @@ pub struct Cx<S: Strategy> {
     pub(crate) running: bool,
     /// Calls made, the fuel used so far (ADR 0009).
     pub(crate) fuel_used: u64,
+    /// What it has done, counted (the `counters` feature).
+    #[cfg(feature = "counters")]
+    pub(crate) counters: crate::Counters,
     /// The most fuel the isolate may use, if limited.
     pub(crate) fuel_limit: Option<u64>,
     /// A tail call a Rust procedure asked for, made when it returns.
@@ -181,6 +184,8 @@ impl<S: Strategy> Cx<S> {
             max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
             fuel_used: 0,
+            #[cfg(feature = "counters")]
+            counters: crate::Counters::default(),
             fuel_limit: None,
             tail_call: None,
             syntaxes: Vec::new(),
@@ -247,6 +252,11 @@ impl<S: Strategy> Cx<S> {
         }
         let words = Self::LAYOUT.words(t, fields);
         let memory = S::allocate(&mut self.heap, space, words)?;
+        #[cfg(feature = "counters")]
+        {
+            self.counters.allocations += 1;
+            self.counters.words += words as u64;
+        }
         // SAFETY: the memory was just allocated for an object of type `t`.
         let v = unsafe { Value::from_address(t.tag(), memory.as_ptr() as u64) };
         if let Some(offset) = Self::LAYOUT.header(t) {
