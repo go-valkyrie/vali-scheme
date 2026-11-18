@@ -200,6 +200,18 @@ unsafe impl Allocate for Probe {
     fn bytes_used(heap: &ProbeHeap) -> usize {
         heap.bump.bytes_used()
     }
+
+    fn pool_pair_page(heap: &mut ProbeHeap, _: usize) -> Result<(usize, usize), OutOfMemory> {
+        heap.bump.pool_pair_page()
+    }
+
+    fn pool_page(heap: &mut ProbeHeap) -> Result<(usize, usize), OutOfMemory> {
+        heap.bump.pool_pair_page()
+    }
+
+    fn pool_large(heap: &mut ProbeHeap, bytes: usize) -> Result<NonNull<u64>, OutOfMemory> {
+        heap.bump.pool_large(bytes)
+    }
 }
 
 impl References for Probe {

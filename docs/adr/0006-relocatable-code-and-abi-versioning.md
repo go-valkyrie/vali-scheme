@@ -4,6 +4,7 @@
 - **Date:** 2026-11-16
 - **Amended:** 2026-11-16, the code generator also writes platform object files for standalone executables (ADR 0013); the memory-management strategy is part of the ABI version
 - **Amended:** 2026-11-16, native code reaches disk only through `vali build`; JIT-compiled code is never cached between runs, and artifacts have no native sections
+- **Amended:** 2026-11-18, the ABI version covers the page size, the page header and its `frozen` field, and the sticky count (item 4; ADR 0020)
 - **Related:** 0002 (tags), 0003 (barriers and safepoints), 0004 (frames), 0005 (bytecode), 0008 (isolates), 0009 (trust), 0013 (standalone executables)
 
 ## Context
@@ -27,7 +28,8 @@ Runtimes differ on whether JIT-compiled code is kept between runs. HotSpot never
    - the layout of the context pointer's target;
    - the safepoint and write-barrier protocols (ADR 0003);
    - the calling convention;
-   - the memory-management strategy (ADR 0003), whose barriers, count operations and allocation fast paths are inlined into generated code.
+   - the memory-management strategy (ADR 0003), whose barriers, count operations and allocation fast paths are inlined into generated code;
+   - the page size and alignment, the header word at the start of every page that can hold a pair, with its `frozen` field, which generated code reads before it writes a pair, and the sticky count, which counting code inlined into generated code tests (ADR 0020).
 
    Any change to these bumps the version. Run-format bytecode in the cache records it (ADR 0005), and `vali build` refuses to link object files with a runtime archive whose ABI version, target or strategy differs (ADR 0013).
 5. **Executable memory is never writable at the same time (W^X).** Code is written first, then switched to read and execute.

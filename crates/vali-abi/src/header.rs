@@ -114,8 +114,9 @@ impl TypeCode {
 
 /// The runtime data stored in headers of particular types.
 pub mod data {
-    /// A string, vector or bytevector that cannot be modified, such as a
-    /// literal.
+    /// A string, vector or bytevector that is frozen: it cannot be modified.
+    /// The pool builder sets it on every constant (ADR 0020), and the runtime
+    /// on the few read-only objects it makes, such as a symbol's name.
     pub const IMMUTABLE: u32 = 1 << 0;
     /// A string whose characters are all ASCII, so character indices are
     /// byte indices.

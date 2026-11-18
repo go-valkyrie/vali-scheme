@@ -193,3 +193,58 @@ fn named_lets_become_loops() {
     let escapes = ir("(define (h) (letrec ((f (lambda () f))) (f)))");
     assert!(escapes.contains("closure"), "{escapes}");
 }
+
+#[test]
+fn allocations_are_not_folded_into_constants() {
+    // ADR 0020: constants live in a pool and are immutable, so a pass that
+    // turned an allocation into a constant would turn mutable data into
+    // immutable data. Every fresh pair or vector stays an allocation, and
+    // its result is never a constant of the module, however constant its
+    // arguments are.
+    for source in [
+        "(define (q) (cons 1 2))",
+        "(define (q) (cons '(1) '()))",
+        "(define (q) (list 1 2 3))",
+        "(define (q) (vector 1 2 3))",
+        "(define (q) (make-vector 3 0))",
+        "(define (q) (let ((p (cons 1 2))) (set-car! p 9) p))",
+        "(define (q) (let ((v (vector 1 2))) (vector-set! v 0 9) v))",
+        "(define (q) (let ((p (list 1 2))) (set-cdr! p '()) p))",
+        "(define (q) (let ((p (list 1 2))) (list-set! p 0 9) p))",
+        "(define (q) (list-copy '(1 2)))",
+    ] {
+        let ir = ir(source);
+        let body = ir
+            .split("fun f1 q")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{ir}"));
+        assert!(
+            !body.contains("return c"),
+            "{source} returns a constant:\n{ir}"
+        );
+        assert!(
+            body.contains(" = cons ")
+                || body.contains(" = make-vector ")
+                || body.contains(" = list-copy")
+                || body.contains("tail v0(")
+                || body.contains("call v0("),
+            "{source} has no allocation left:\n{ir}"
+        );
+    }
+    // The constants the module keeps are only the ones its source quotes:
+    // none of these is a quoted pair, so none may be a pair or vector.
+    for source in [
+        "(define (q) (cons 1 2))",
+        "(define (q) (list 1 2 3))",
+        "(define (q) (vector 1 2 3))",
+        "(define (q) (let ((p (cons 1 2))) (set-car! p 9) p))",
+    ] {
+        let ir = ir(source);
+        for line in ir.lines().filter(|l| l.starts_with('c')) {
+            assert!(
+                !line.contains("= (") && !line.contains("= #("),
+                "{source} made a constant of a fresh object:\n{ir}"
+            );
+        }
+    }
+}

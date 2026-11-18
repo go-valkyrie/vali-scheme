@@ -6,7 +6,9 @@ use std::ptr::NonNull;
 
 use vali_abi::StrategyLayout;
 
-use crate::page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PageSource};
+use crate::page::{
+    Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PAGE_HEADER_BYTES, PageSource,
+};
 use crate::strategy::{Allocate, References, Space, Strategy};
 
 /// Allocate, never reclaim.
@@ -27,7 +29,7 @@ impl BumpHeap {
     pub fn new(config: &HeapConfig) -> BumpHeap {
         BumpHeap {
             pages: PageSource::new(config),
-            pair: Bump::default(),
+            pair: Bump::with_header(PAGE_HEADER_BYTES),
             flonum: Bump::default(),
             general: Bump::default(),
         }
@@ -46,6 +48,19 @@ impl BumpHeap {
             Space::General => &mut self.general,
         };
         buffer.allocate(&mut self.pages, bytes)
+    }
+
+    /// A frozen page for the pool's pairs: the header's `frozen` field set,
+    /// and the pairs from after it. Returns the addresses where the first
+    /// pair goes and where the page ends.
+    pub fn pool_pair_page(&mut self) -> Result<(usize, usize), OutOfMemory> {
+        let page = self.pages.frozen_page()?.as_ptr() as usize;
+        Ok((page + PAGE_HEADER_BYTES, page + PAGE_BYTES))
+    }
+
+    /// Memory for one large pool object of `bytes` bytes.
+    pub fn pool_large(&mut self, bytes: usize) -> Result<NonNull<u64>, OutOfMemory> {
+        self.pages.large(bytes).map(NonNull::cast)
     }
 
     /// How many bytes the heap has taken from the system.
@@ -75,6 +90,18 @@ unsafe impl Allocate for NoCollection {
 
     fn bytes_used(heap: &BumpHeap) -> usize {
         heap.bytes_used()
+    }
+
+    fn pool_pair_page(heap: &mut BumpHeap, _words: usize) -> Result<(usize, usize), OutOfMemory> {
+        heap.pool_pair_page()
+    }
+
+    fn pool_page(heap: &mut BumpHeap) -> Result<(usize, usize), OutOfMemory> {
+        heap.pool_pair_page()
+    }
+
+    fn pool_large(heap: &mut BumpHeap, bytes: usize) -> Result<NonNull<u64>, OutOfMemory> {
+        heap.pool_large(bytes)
     }
 }
 

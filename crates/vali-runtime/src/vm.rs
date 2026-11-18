@@ -190,7 +190,7 @@ unsafe fn set(fp: *mut u64, i: usize, v: Value) {
 /// The number a numeric constant stands for, if it is a well-formed one: a
 /// ratio of two integers in lowest terms that is not an integer, or a
 /// complex number of two reals of the same exactness that is not real.
-fn constant_number(constant: &Constant) -> Option<vali_num::Number> {
+pub(crate) fn constant_number(constant: &Constant) -> Option<vali_num::Number> {
     use vali_num::{Number, arith};
     let integer = |c: &Constant| match c {
         Constant::Integer(n) => Some(Number::from(*n)),
@@ -360,7 +360,8 @@ pub(crate) fn wrong_type<S: Strategy>(cx: &Cx<S>, name: &str, expected: &str, go
 /// Loading modules, and the procedures Rust code calls.
 impl<S: Strategy> Cx<S> {
     /// Validates `module` and loads it into this isolate: its constants are
-    /// created in the heap, and its variables are linked (ADR 0005 #4). A
+    /// built into the pool, outside the heap (ADR 0020), and its variables
+    /// are linked (ADR 0005 #4). A
     /// variable it defines gets a cell of its own, unbound until the body
     /// sets it; an imported one shares the cell of the loaded library that
     /// exports it; a global one shares the global's cell, which a host
@@ -376,9 +377,7 @@ impl<S: Strategy> Cx<S> {
             .map_err(|e| Error::scheme(format!("invalid bytecode in {name}: {e}")))?;
         let mut constants = Vec::with_capacity(loaded.module.constants.len());
         for constant in &loaded.module.constants {
-            let value = self.constant(constant)?;
-            self.hold(value);
-            constants.push(value);
+            constants.push(self.pool_constant(constant)?);
         }
         let defined = loaded
             .module
@@ -704,51 +703,6 @@ impl<S: Strategy> Cx<S> {
         self.hold(v);
         self.symbols.insert(name.into(), v);
         Ok(v)
-    }
-
-    fn constant(&mut self, constant: &Constant) -> Result<Value, Error> {
-        Ok(match constant {
-            Constant::Integer(n) => self.integer_raw(&Integer::from(*n))?,
-            Constant::Flonum(x) => self.flonum_raw(*x)?,
-            Constant::Boolean(b) => Value::boolean(*b),
-            Constant::Character(c) => Value::character(*c),
-            Constant::EmptyList => Value::EMPTY_LIST,
-            Constant::Unspecified => Value::UNSPECIFIED,
-            Constant::String(s) => self.string_raw(s, true)?,
-            Constant::Symbol(s) => self.intern(s)?,
-            Constant::Keyword(s) => self.keyword_raw(s)?,
-            Constant::Pair(car, cdr) => {
-                let car = self.constant(car)?;
-                let cdr = self.constant(cdr)?;
-                // SAFETY: both are valid values.
-                unsafe { self.cons_raw(car, cdr)? }
-            }
-            Constant::Bignum { negative, limbs } => {
-                self.integer_raw(&Integer::from_limbs(*negative, limbs))?
-            }
-            Constant::Bytevector(bytes) => {
-                let v = self.bytevector_raw(bytes)?;
-                self.make_immutable(v);
-                v
-            }
-            Constant::Ratio(..) | Constant::Complex(..) => {
-                let n = constant_number(constant).ok_or_else(|| {
-                    Error::scheme(format!("invalid numeric constant {constant:?}"))
-                })?;
-                self.number_raw(&n)?
-            }
-            Constant::Vector(items) => {
-                // SAFETY: the fill is a valid value.
-                let v = unsafe { self.make_vector_raw(items.len(), Value::UNSPECIFIED)? };
-                for (i, item) in items.iter().enumerate() {
-                    let x = self.constant(item)?;
-                    // SAFETY: `v` has `items.len()` elements.
-                    unsafe { self.vector_set(v, i, x) };
-                }
-                self.make_immutable(v);
-                v
-            }
-        })
     }
 
     /// A new closure of `code`, capturing `free`.
@@ -2594,6 +2548,9 @@ impl<S: Strategy> Cx<S> {
                             if !pair.is_pair() {
                                 fail!(type_error("set-car!", "a pair", pair));
                             }
+                            if Self::pair_is_frozen(pair) {
+                                fail!(self.immutable_pair("set-car!", pair));
+                            }
                             self.set_car(pair, slot(fp, b));
                             pc += 1;
                         }
@@ -2601,6 +2558,9 @@ impl<S: Strategy> Cx<S> {
                             let pair = slot(fp, a);
                             if !pair.is_pair() {
                                 fail!(type_error("set-cdr!", "a pair", pair));
+                            }
+                            if Self::pair_is_frozen(pair) {
+                                fail!(self.immutable_pair("set-cdr!", pair));
                             }
                             self.set_cdr(pair, slot(fp, b));
                             pc += 1;

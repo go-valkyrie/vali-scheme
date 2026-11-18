@@ -102,7 +102,12 @@ fn fold(value: &Value, pool: &mut Pool<'_>) -> Option<Operand> {
         // quoted pair or vector can be mutated (`set-car!`, `vector-set!`),
         // so its contents at compile time need not be its contents when the
         // read runs. Its type and a vector's length cannot change, so
-        // `pair?` and `vector-length` fold.
+        // `pair?` and `vector-length` fold. Constants are immutable now
+        // (ADR 0020), so these folds could return, once every tier checks
+        // writes; and no pass may ever fold an allocation (`cons`, `list`,
+        // `vector`, `make-vector`) into a constant, which would make mutable
+        // data immutable. `allocations_are_not_folded_into_constants` tests
+        // it.
         Primitive::VectorLength => match constant(pool, 0)? {
             Constant::Vector(ref items) => Constant::Integer(i64::try_from(items.len()).ok()?),
             _ => return None,

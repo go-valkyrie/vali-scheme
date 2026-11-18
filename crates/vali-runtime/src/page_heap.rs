@@ -19,7 +19,7 @@
 use std::fmt;
 use std::ptr::{self, NonNull};
 
-use crate::page::{LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
+use crate::page::{LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PAGE_HEADER_BYTES, PageSource};
 use crate::strategy::Space;
 
 /// The block sizes, in words. Each is at most a quarter above the one
@@ -56,9 +56,15 @@ fn space_index(space: Space) -> usize {
     }
 }
 
-/// The header at the start of every page.
+/// The header at the start of every page. Its first word, `frozen`, is
+/// where the write check of a pair looks (`PAGE_HEADER_BYTES`): nonzero on a
+/// frozen pair page, which holds the pool's constants (ADR 0020) and is
+/// never in a list, a class or the heap's accounting, and zero on every page
+/// the heap allocates. It is a field of its own: `space` is an index into
+/// `classes`, which `free` uses.
 #[repr(C)]
 struct Page {
+    frozen: usize,
     space: usize,
     class: usize,
     /// The size of each block, in bytes.
@@ -282,6 +288,7 @@ impl PageHeap {
             ptr::write(
                 page,
                 Page {
+                    frozen: 0,
                     space: s,
                     class: c,
                     block_bytes,
@@ -303,6 +310,77 @@ impl PageHeap {
             );
         }
         Ok(page)
+    }
+
+    /// A frozen page for the pool's pairs of `words` words each (ADR 0020),
+    /// laid out as [`Page`] lays out a pair page, because `side_byte` reads
+    /// that layout: a header, the side table if pairs have one, preset to
+    /// sticky counts and no flags, and the blocks. The page is in none of
+    /// the heap's lists, and nothing frees it but the heap's source when it
+    /// is dropped. Returns where the first pair goes and where the last
+    /// ends.
+    pub fn pool_pair_page(
+        &mut self,
+        words: usize,
+        sticky: u8,
+    ) -> Result<(usize, usize), OutOfMemory> {
+        let page = self.source.page()?.as_ptr() as *mut Page;
+        let block_bytes = words * 8;
+        let side = self.pair_side_bytes;
+        let room = PAGE_BYTES - HEADER_BYTES;
+        let capacity = room / (block_bytes + side);
+        let base = page as *mut u8;
+        // SAFETY: the page is `PAGE_BYTES` long and nothing else uses it;
+        // the side table and blocks fit after the header by construction.
+        unsafe {
+            let side_table = base.add(HEADER_BYTES);
+            let blocks = side_table.add((capacity * side).next_multiple_of(8));
+            let end = blocks.add(capacity * block_bytes);
+            for i in 0..capacity * side {
+                side_table
+                    .add(i)
+                    .write(if i % side == 0 { sticky } else { 0 });
+            }
+            ptr::write(
+                page,
+                Page {
+                    frozen: 1,
+                    space: 0,
+                    class: usize::from(CLASS_OF[words]),
+                    block_bytes,
+                    blocks,
+                    side: if side == 0 {
+                        ptr::null_mut()
+                    } else {
+                        side_table
+                    },
+                    stride: side,
+                    // Full, with nothing to free.
+                    used: capacity,
+                    free: ptr::null_mut(),
+                    bump: end,
+                    end,
+                    prev: ptr::null_mut(),
+                    next: ptr::null_mut(),
+                    listed: false,
+                },
+            );
+            Ok((blocks as usize, end as usize))
+        }
+    }
+
+    /// A frozen page for the pool's other objects: its `frozen` field set,
+    /// and objects from after it. Returns where the first goes and where
+    /// the page ends.
+    pub fn pool_page(&mut self) -> Result<(usize, usize), OutOfMemory> {
+        let page = self.source.frozen_page()?.as_ptr() as usize;
+        Ok((page + PAGE_HEADER_BYTES, page + PAGE_BYTES))
+    }
+
+    /// Memory for one large pool object, which the heap neither counts as
+    /// live nor ever frees until it is dropped.
+    pub fn pool_large(&mut self, bytes: usize) -> Result<NonNull<u64>, OutOfMemory> {
+        self.source.large(bytes).map(NonNull::cast)
     }
 
     /// Frees `object`, of `words` words, which this heap allocated.

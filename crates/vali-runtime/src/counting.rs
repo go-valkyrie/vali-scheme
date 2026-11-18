@@ -32,7 +32,11 @@
 //! 0002 #7), with its colour and flags. With side counts, a pair has no
 //! header: its count is a byte in its page's side table, sticky at 255, and
 //! its colour and flags another byte. An object with a sticky count is never
-//! freed.
+//! freed. A headered object's count is sticky at its maximum too, so that
+//! counting up never carries into the colour: the constants of the pool
+//! (ADR 0020) have it from the start, and a heap object that ever reaches it
+//! stays for the isolate's life. Trial deletion treats an object with a
+//! sticky count as a leaf.
 
 use std::ptr::NonNull;
 
@@ -115,6 +119,10 @@ const SIDE_IN_ZCT: u8 = 1;
 const SIDE_COLOUR_SHIFT: u8 = 1;
 const SIDE_BUFFERED: u8 = 1 << 3;
 
+/// A headered object's count, sticky at its maximum, like a side count at
+/// `STICKY`.
+const COUNT_STICKY: usize = COUNT as usize;
+
 /// What `count_down` returns for a sticky count.
 const STUCK: usize = usize::MAX;
 
@@ -147,6 +155,22 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counting<SIDE_COUNTS, PRECISE
         unsafe {
             let first = PageHeap::side_byte(v.address() as *const u64);
             (first, first.add(1))
+        }
+    }
+
+    /// Whether `v`'s count is sticky: it is never counted, and never freed.
+    #[inline(always)]
+    fn is_stuck(v: Value) -> bool {
+        Self::count_of(v) == Self::sticky(v)
+    }
+
+    /// The sticky value of `v`'s kind of count.
+    #[inline(always)]
+    fn sticky(v: Value) -> usize {
+        if Self::side(v) {
+            usize::from(STICKY)
+        } else {
+            COUNT_STICKY
         }
     }
 
@@ -208,7 +232,10 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counting<SIDE_COUNTS, PRECISE
                     *count += 1;
                 }
             } else {
-                *Self::half(v) += 1;
+                let half = Self::half(v);
+                if *half & COUNT != COUNT {
+                    *half += 1;
+                }
             }
         }
     }
@@ -229,6 +256,9 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counting<SIDE_COUNTS, PRECISE
                 usize::from(*count)
             } else {
                 let half = Self::half(v);
+                if *half & COUNT == COUNT {
+                    return STUCK;
+                }
                 debug_assert!(*half & COUNT > 0, "counting down a count of zero");
                 *half -= 1;
                 (*half & COUNT) as usize
@@ -260,7 +290,7 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counting<SIDE_COUNTS, PRECISE
     /// holds a new pair twice does not buffer the pair on the way to zero.
     #[inline(never)]
     fn survived(heap: &mut CountingHeap, v: Value, count: usize) {
-        if count == STUCK || (Self::side(v) && count == usize::from(STICKY)) {
+        if count == STUCK || count == Self::sticky(v) {
             return;
         }
         if Self::in_zct(v) {
@@ -281,6 +311,10 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> Counted for Counting<SIDE_COU
 
     fn count(v: Value) -> usize {
         Self::count_of(v)
+    }
+
+    fn stuck(v: Value) -> bool {
+        Self::is_stuck(v)
     }
 
     fn increment(v: Value) {
@@ -374,6 +408,21 @@ unsafe impl<const SIDE_COUNTS: bool, const PRECISE: bool> Allocate
     fn bytes_used(heap: &CountingHeap) -> usize {
         heap.pages.bytes_used()
     }
+
+    fn pool_pair_page(
+        heap: &mut CountingHeap,
+        words: usize,
+    ) -> Result<(usize, usize), OutOfMemory> {
+        heap.pages.pool_pair_page(words, STICKY)
+    }
+
+    fn pool_page(heap: &mut CountingHeap) -> Result<(usize, usize), OutOfMemory> {
+        heap.pages.pool_page()
+    }
+
+    fn pool_large(heap: &mut CountingHeap, bytes: usize) -> Result<NonNull<u64>, OutOfMemory> {
+        heap.pages.pool_large(bytes)
+    }
 }
 
 impl<const SIDE_COUNTS: bool, const PRECISE: bool> References for Counting<SIDE_COUNTS, PRECISE> {
@@ -392,6 +441,16 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> References for Counting<SIDE_
                 0 => Self::to_zct(heap, v),
                 count => Self::survived(heap, v, count),
             }
+        }
+    }
+
+    #[inline(always)]
+    fn freeze(v: Value) {
+        // A side-counted pair's bytes were preset with its page; any other
+        // object's count is set to its maximum, with no colour or flags.
+        if !Self::side(v) {
+            // SAFETY: a pool object just built, with a header.
+            unsafe { *Self::half(v) = COUNT };
         }
     }
 
@@ -509,4 +568,202 @@ impl Strategy for Counting<false, true> {
 
 impl Strategy for Counting<true, true> {
     const NAME: &'static str = "precise-side";
+}
+
+#[cfg(test)]
+mod tests {
+    use vali_bytecode::Constant;
+
+    use super::*;
+    use crate::cx::Cx;
+
+    type Snapshot = (usize, Colour, bool, u32);
+
+    /// What the collector could change in a pool object: its count, colour,
+    /// buffered flag, and every flag bit beside them.
+    fn snapshot<const SIDE: bool, const PRECISE: bool>(v: Value) -> Snapshot {
+        type S<const A: bool, const B: bool> = Counting<A, B>;
+        let flags = if S::<SIDE, PRECISE>::side(v) {
+            // SAFETY: a live pair on a page with side bytes.
+            u32::from(unsafe { *S::<SIDE, PRECISE>::side_bytes(v).1 })
+        } else {
+            // SAFETY: a live headered object.
+            unsafe { *S::<SIDE, PRECISE>::half(v) >> COLOUR_SHIFT }
+        };
+        (
+            <S<SIDE, PRECISE> as Counted>::count(v),
+            <S<SIDE, PRECISE> as Counted>::colour(v),
+            <S<SIDE, PRECISE> as Counted>::buffered(v),
+            flags,
+        )
+    }
+
+    fn pair(car: Constant, cdr: Constant) -> Constant {
+        Constant::Pair(Box::new(car), Box::new(cdr))
+    }
+
+    /// A pool list of a pair, a string, a vector and a flonum, and every
+    /// object of it that has a count.
+    fn pool_list<const SIDE: bool, const PRECISE: bool>(
+        cx: &mut Cx<Counting<SIDE, PRECISE>>,
+    ) -> (Value, Vec<Value>)
+    where
+        Counting<SIDE, PRECISE>: Strategy,
+    {
+        let constant = pair(
+            pair(Constant::Integer(1), Constant::Integer(2)),
+            pair(
+                Constant::String("two".into()),
+                pair(
+                    Constant::Vector(vec![Constant::Integer(3), Constant::Symbol("four".into())]),
+                    pair(Constant::Flonum(5.5), Constant::EmptyList),
+                ),
+            ),
+        );
+        let list = cx.pool_constant(&constant).unwrap();
+        let mut objects = Vec::new();
+        let mut rest = list;
+        while rest.is_pair() {
+            // SAFETY: a live pair of the pool.
+            let item = unsafe { cx.car(rest) };
+            if item.is_pointer() {
+                objects.push(item);
+            }
+            objects.push(rest);
+            // SAFETY: as above.
+            rest = unsafe { cx.cdr(rest) };
+        }
+        (list, objects)
+    }
+
+    /// A pool object is never counted, coloured, buffered or walked: not
+    /// by the references heap objects take to it, nor by a cycle collection
+    /// whose candidates reach it.
+    fn pool_objects_are_left_alone<const SIDE: bool, const PRECISE: bool>()
+    where
+        Counting<SIDE, PRECISE>: Strategy<Heap = CountingHeap>,
+    {
+        let mut cx = Cx::<Counting<SIDE, PRECISE>>::new(&HeapConfig::default());
+        let (list, objects) = pool_list(&mut cx);
+        // Every pool object starts out stuck, black and unflagged.
+        let before: Vec<_> = objects
+            .iter()
+            .map(|&v| snapshot::<SIDE, PRECISE>(v))
+            .collect();
+        for (v, s) in objects.iter().zip(&before) {
+            assert_eq!(
+                *s,
+                (
+                    Counting::<SIDE, PRECISE>::sticky(*v),
+                    Colour::Black,
+                    false,
+                    0
+                ),
+                "{v:?}"
+            );
+            assert!(Counting::<SIDE, PRECISE>::is_stuck(*v));
+        }
+
+        // Heap objects refer to it many times over: a count that carried
+        // into the colour would show.
+        let base = cx.heap().bytes_live();
+        let mut keep = Vec::new();
+        for _ in 0..2000 {
+            // SAFETY: valid values.
+            let p = unsafe { cx.cons_raw(list, Value::EMPTY_LIST) }.unwrap();
+            // SAFETY: a valid value.
+            keep.push(unsafe { cx.root(p) });
+        }
+        for (v, s) in objects.iter().zip(&before) {
+            assert_eq!(snapshot::<SIDE, PRECISE>(*v), *s, "{v:?} after references");
+        }
+        drop(keep);
+        cx.safepoint();
+        cx.collect_garbage();
+        assert_eq!(cx.heap().bytes_live(), base, "the pairs were freed");
+        for (v, s) in objects.iter().zip(&before) {
+            assert_eq!(snapshot::<SIDE, PRECISE>(*v), *s, "{v:?} after their frees");
+        }
+
+        // A garbage cycle through it: a candidate once its handle drops,
+        // reaching the pool object, which the collection must leave alone
+        // while it frees the cycle.
+        for _ in 0..3 {
+            // SAFETY: valid values throughout; a and b are live.
+            let a = unsafe { cx.cons_raw(list, Value::EMPTY_LIST) }.unwrap();
+            let ha = unsafe { cx.root(a) };
+            let b = unsafe { cx.cons_raw(list, a) }.unwrap();
+            // SAFETY: both are fresh pairs, not constants.
+            unsafe { cx.set_cdr(a, b) };
+            drop(ha);
+            cx.safepoint();
+            cx.collect_garbage();
+            assert_eq!(cx.heap().bytes_live(), base, "the cycle was freed");
+            assert_eq!(cx.heap().cycle_candidates(), 0);
+            for (v, s) in objects.iter().zip(&before) {
+                assert_eq!(snapshot::<SIDE, PRECISE>(*v), *s, "{v:?} after a cycle");
+            }
+        }
+
+        // A live cycle through it, reached by a collection and kept.
+        // SAFETY: as above.
+        let a = unsafe { cx.cons_raw(list, Value::EMPTY_LIST) }.unwrap();
+        let ha = unsafe { cx.root(a) };
+        let b = unsafe { cx.cons_raw(list, a) }.unwrap();
+        let hb = unsafe { cx.root(b) };
+        // SAFETY: fresh pairs.
+        unsafe { cx.set_cdr(a, b) };
+        drop(hb);
+        cx.safepoint();
+        cx.collect_garbage();
+        assert!(cx.heap().bytes_live() > base, "kept by its handle");
+        for (v, s) in objects.iter().zip(&before) {
+            assert_eq!(
+                snapshot::<SIDE, PRECISE>(*v),
+                *s,
+                "{v:?} after a live cycle"
+            );
+        }
+        // SAFETY: still held by the handle.
+        assert_eq!(unsafe { cx.car(a) }, list);
+        drop(ha);
+        cx.safepoint();
+        cx.collect_garbage();
+        assert_eq!(cx.heap().bytes_live(), base);
+    }
+
+    #[test]
+    fn pool_objects_are_left_alone_by_every_counting_strategy() {
+        pool_objects_are_left_alone::<false, false>();
+        pool_objects_are_left_alone::<true, false>();
+        pool_objects_are_left_alone::<false, true>();
+        pool_objects_are_left_alone::<true, true>();
+    }
+
+    /// A headered count stops at its maximum rather than carrying into the
+    /// colour, and a heap object that reaches it stays for good.
+    #[test]
+    fn a_headered_count_is_sticky() {
+        type S = Counting<false, false>;
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        // SAFETY: valid values.
+        let v = unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
+        // SAFETY: a live headered pair.
+        unsafe { *S::half(v) = COUNT - 1 };
+        S::increment(v);
+        assert_eq!(S::count_of(v), COUNT_STICKY);
+        assert!(S::is_stuck(v));
+        S::increment(v);
+        assert_eq!(S::count_of(v), COUNT_STICKY);
+        assert_eq!(<S as Counted>::colour(v), Colour::Black, "no carry");
+        assert_eq!(S::count_down(v), STUCK);
+        assert_eq!(S::count_of(v), COUNT_STICKY);
+        // The first count of an object is not sticky.
+        // SAFETY: valid values.
+        let w = unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
+        S::increment(w);
+        assert_eq!(S::count_of(w), 1);
+        assert!(!S::is_stuck(w));
+        assert_eq!(S::count_down(w), 0);
+    }
 }

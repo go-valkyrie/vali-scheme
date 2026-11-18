@@ -37,6 +37,16 @@ fn pair_arg(name: &str, v: Value) -> Result<Value, Error> {
     }
 }
 
+/// A pair `name` changes: an error if it is not a pair, or is a constant.
+fn mutable_pair_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value, Error> {
+    let pair = pair_arg(name, v)?;
+    // SAFETY: a live pair.
+    if unsafe { Cx::<S>::pair_is_frozen(pair) } {
+        return Err(cx.immutable_pair(name, pair));
+    }
+    Ok(pair)
+}
+
 fn car<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let pair = pair_arg("car", args[0])?;
     // SAFETY: a live pair.
@@ -50,14 +60,14 @@ fn cdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
 }
 
 fn set_car<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let pair = pair_arg("set-car!", args[0])?;
+    let pair = mutable_pair_arg(cx, "set-car!", args[0])?;
     // SAFETY: a live pair, and a valid value.
     unsafe { cx.set_car(pair, args[1]) };
     Ok(Value::UNSPECIFIED)
 }
 
 fn set_cdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let pair = pair_arg("set-cdr!", args[0])?;
+    let pair = mutable_pair_arg(cx, "set-cdr!", args[0])?;
     // SAFETY: a live pair, and a valid value.
     unsafe { cx.set_cdr(pair, args[1]) };
     Ok(Value::UNSPECIFIED)

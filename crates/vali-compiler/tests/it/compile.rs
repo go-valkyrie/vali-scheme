@@ -2697,6 +2697,44 @@ fn cycles_are_collected() {
     }
 }
 
+/// Literals are constants of the pool, never counted (ADR 0020). Under every
+/// strategy, heap objects that refer to them over and over, frames that
+/// move, drop and tail-call them, and garbage cycles that reach them leave
+/// them as they were, with the same answer everywhere.
+#[test]
+fn literals_survive_counting() {
+    check(&[(
+        "(define lit '((1 2) (3 4) \"s\" #(5 6) 7.5 (a . b)))
+         (define (ring)
+           (let ((p (list lit lit)))
+             (set-cdr! (cdr p) p)
+             p))
+         (define (hold n)
+           (let ((v (vector lit (car lit) (cdr lit) (cdr (cdr lit)))))
+             (if (= n 0)
+                 v
+                 (begin (vector-set! v 0 lit) (hold (- n 1))))))
+         (define (churn n box)
+           (if (= n 0)
+               box
+               (let ((r (ring)) (v (hold 1)))
+                 (set-car! (cdr r) (vector-ref v 1))
+                 (churn (- n 1) (cons (vector-ref v 0) (cdr (cdr r)))))))
+         (define result (churn 60000 '()))
+         (list (eq? (car result) lit) (length lit) (car lit) (vector-ref (list-ref lit 3) 1))",
+        "(#t 6 (1 2) 6)",
+    )]);
+    // The pool's objects take any number of references: a literal stored in
+    // a vector, a list and a variable, many times over.
+    check(&[(
+        "(define lit '(1 2 3))
+         (define v (make-vector 100000 lit))
+         (define l (let loop ((i 0) (acc '())) (if (= i 100000) acc (loop (+ i 1) (cons lit acc)))))
+         (list (length lit) (eq? (vector-ref v 99999) lit) (eq? (car l) lit) (length l))",
+        "(3 #t #t 100000)",
+    )]);
+}
+
 #[test]
 fn counting_reclaims_memory() {
     let none = bytes_after::<NoCollection>(CHURN);

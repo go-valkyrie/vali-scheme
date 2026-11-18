@@ -54,6 +54,8 @@ pub struct Cx<S: Strategy> {
     pub(crate) primitives_installed: bool,
     /// Loaded libraries, by identity, which imports link to.
     pub(crate) libraries: HashMap<Box<str>, crate::code::ModuleId>,
+    /// Where the next constant of a module goes (ADR 0020).
+    pub(crate) pool: crate::pool::Pool,
     /// Interned symbols.
     pub(crate) symbols: HashMap<Box<str>, Value>,
     /// The interned SRFI 88 keywords, by name without the colon.
@@ -158,6 +160,7 @@ impl<S: Strategy> Cx<S> {
             native_cells: HashMap::new(),
             primitives_installed: false,
             libraries: HashMap::new(),
+            pool: Default::default(),
             symbols: HashMap::new(),
             keywords: HashMap::new(),
             natives: Vec::new(),
@@ -420,19 +423,26 @@ impl<S: Strategy> Cx<S> {
 
     /// Sets a pair's `car`.
     ///
+    /// Unchecked: for a pair just built, as the reader's cycle patching and
+    /// builders do. A pair that might be a constant, which is immutable,
+    /// must be checked first (`pair_is_frozen`); the VM, the primitives and
+    /// `Handle::set_car` do.
+    ///
     /// # Safety
     ///
-    /// `v` must be a live pair and `x` a valid value.
+    /// `v` must be a live pair that is not a constant, and `x` a valid
+    /// value.
     pub unsafe fn set_car(&mut self, v: Value, x: Value) {
         // SAFETY: passed on to the caller.
         unsafe { self.write_field(v, Self::LAYOUT.car(), x) }
     }
 
-    /// Sets a pair's `cdr`.
+    /// Sets a pair's `cdr`; unchecked, as `set_car` is.
     ///
     /// # Safety
     ///
-    /// `v` must be a live pair and `x` a valid value.
+    /// `v` must be a live pair that is not a constant, and `x` a valid
+    /// value.
     pub unsafe fn set_cdr(&mut self, v: Value, x: Value) {
         // SAFETY: passed on to the caller.
         unsafe { self.write_field(v, Self::LAYOUT.cdr(), x) }
@@ -641,19 +651,37 @@ impl Handle {
         }
     }
 
-    /// Sets a pair's `car`.
+    /// Sets a pair's `car`; an error if the pair is a constant, which is
+    /// immutable.
     pub fn set_car<S: Strategy>(&self, cx: &mut Cx<S>, x: &Handle) -> Result<(), Error> {
         let (pair, x) = (cx.pair(self)?, cx.get(x)?);
         // SAFETY: `pair` is a live pair and `x` a valid value.
-        unsafe { cx.set_car(pair, x) };
+        unsafe {
+            if Cx::<S>::pair_is_frozen(pair) {
+                return Err(Error::scheme(format!(
+                    "the pair {} is immutable",
+                    cx.written(pair)
+                )));
+            }
+            cx.set_car(pair, x);
+        }
         Ok(())
     }
 
-    /// Sets a pair's `cdr`.
+    /// Sets a pair's `cdr`; an error if the pair is a constant, which is
+    /// immutable.
     pub fn set_cdr<S: Strategy>(&self, cx: &mut Cx<S>, x: &Handle) -> Result<(), Error> {
         let (pair, x) = (cx.pair(self)?, cx.get(x)?);
         // SAFETY: `pair` is a live pair and `x` a valid value.
-        unsafe { cx.set_cdr(pair, x) };
+        unsafe {
+            if Cx::<S>::pair_is_frozen(pair) {
+                return Err(Error::scheme(format!(
+                    "the pair {} is immutable",
+                    cx.written(pair)
+                )));
+            }
+            cx.set_cdr(pair, x);
+        }
         Ok(())
     }
 

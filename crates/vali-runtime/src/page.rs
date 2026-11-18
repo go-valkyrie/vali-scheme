@@ -9,6 +9,17 @@ use std::ptr::NonNull;
 /// starts at its address with the low bits cleared.
 pub const PAGE_BYTES: usize = 32 * 1024;
 
+/// The header every page that can hold a pair starts with, and no object
+/// starts at the page's first word. Its first word is `frozen`: nonzero on a
+/// frozen page, one the pool's pair constants live on (ADR 0020), and zero
+/// on every other. A pair is frozen if its page's first word, at its address
+/// with the low bits cleared, is not zero.
+///
+/// This holds for every space that can hold a pair, so a heap that cannot
+/// give its pair pages this header cannot be used with the check
+/// (`Cx::pair_is_frozen`).
+pub const PAGE_HEADER_BYTES: usize = 8;
+
 /// Objects larger than this are allocated on their own, not in pages.
 pub const LARGE_OBJECT_BYTES: usize = 8 * 1024;
 
@@ -74,6 +85,16 @@ impl PageSource {
         self.block(Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).expect("a valid page layout"))
     }
 
+    /// A fresh frozen page: its first word, the header's `frozen` field, set.
+    /// The rest of the page is the caller's to lay out.
+    pub fn frozen_page(&mut self) -> Result<NonNull<u8>, OutOfMemory> {
+        let page = self.page()?;
+        // SAFETY: a page just allocated, `PAGE_BYTES` long and 8-byte
+        // aligned.
+        unsafe { (page.as_ptr() as *mut usize).write(1) };
+        Ok(page)
+    }
+
     /// Memory for one large object of `bytes` bytes, 8-byte aligned.
     pub fn large(&mut self, bytes: usize) -> Result<NonNull<u8>, OutOfMemory> {
         self.block(Layout::from_size_align(bytes, 8).map_err(|_| OutOfMemory)?)
@@ -122,9 +143,22 @@ impl Drop for PageSource {
 pub struct Bump {
     cursor: usize,
     end: usize,
+    /// How many bytes a new page starts with before its first object: a
+    /// page header, which is zeroed.
+    header: usize,
 }
 
 impl Bump {
+    /// A buffer whose pages start with a header of `header` bytes, zeroed:
+    /// for pairs, whose pages need the header of [`PAGE_HEADER_BYTES`].
+    pub const fn with_header(header: usize) -> Bump {
+        Bump {
+            cursor: 0,
+            end: 0,
+            header,
+        }
+    }
+
     /// `bytes` bytes from this buffer, refilled from `source` with a new page
     /// when it runs out. `bytes` must be a multiple of 8 and at most
     /// `PAGE_BYTES`.
@@ -139,6 +173,12 @@ impl Bump {
             let page = source.page()?;
             self.cursor = page.as_ptr() as usize;
             self.end = self.cursor + PAGE_BYTES;
+            if self.header != 0 {
+                // SAFETY: the start of a page just allocated, which has room
+                // for the header.
+                unsafe { std::ptr::write_bytes(page.as_ptr(), 0, self.header) };
+                self.cursor += self.header;
+            }
         }
         let object = self.cursor;
         self.cursor += bytes;

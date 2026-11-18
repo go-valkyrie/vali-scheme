@@ -54,6 +54,10 @@ pub(crate) trait Counted {
     type Heap;
 
     fn count(v: Value) -> usize;
+    /// Whether `v`'s count is sticky: nothing counts it, so it is never
+    /// freed. A pool object always is; so is a heap object whose count
+    /// reached its maximum.
+    fn stuck(v: Value) -> bool;
     /// Counts `v` up, as a reference is restored.
     fn increment(v: Value);
     /// Counts `v` down, as a reference inside a candidate graph is
@@ -224,6 +228,12 @@ impl Cycles {
             // SAFETY: what a live object refers to is live.
             unsafe { describe(x, &mut self.children) };
             for t in self.children.drain(..) {
+                // A child with a stuck count is a leaf: never freed, it
+                // keeps alive what it reaches, so its references are never
+                // subtracted, and neither its count nor its colour changes.
+                if C::stuck(t) {
+                    continue;
+                }
                 C::decrement(t);
                 if C::colour(t) != Colour::Gray {
                     C::set_colour(t, Colour::Gray);
@@ -260,6 +270,9 @@ impl Cycles {
             // SAFETY: as above.
             unsafe { describe(x, &mut self.children) };
             for t in self.children.drain(..) {
+                if C::stuck(t) {
+                    continue;
+                }
                 C::increment(t);
                 if C::colour(t) != Colour::Black {
                     C::set_colour(t, Colour::Black);
@@ -289,7 +302,7 @@ impl Cycles {
             unsafe {
                 let words = describe(x, &mut self.children);
                 for t in self.children.drain(..) {
-                    if C::colour(t) == Colour::White && !C::buffered(t) {
+                    if !C::stuck(t) && C::colour(t) == Colour::White && !C::buffered(t) {
                         C::set_colour(t, Colour::Black);
                         self.work.push(t);
                     }

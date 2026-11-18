@@ -4,8 +4,8 @@
 use vali_compiler::{Identity, LibraryName, LoadError, Loader, Source};
 use vali_runtime::bridge::{Bytes, Rest};
 use vali_runtime::{
-    Cx, DeferredHeadered, Error, Handle, HeapConfig, NativeLibrary, NoCollection, Obj,
-    PreciseHeadered, RustObject, Strategy,
+    Cx, DeferredHeadered, DeferredSideCounts, Error, Handle, HeapConfig, NativeLibrary,
+    NoCollection, Obj, PreciseHeadered, PreciseSideCounts, RustObject, Strategy,
 };
 
 struct Counter {
@@ -481,4 +481,71 @@ fn host_writes_to_literal_vectors() {
         v.vector_set(&mut cx, 0, &x).unwrap();
         assert_eq!(v.vector_ref(&mut cx, 0).unwrap().as_fixnum(), Some(9));
     }
+}
+
+/// A host cannot write a literal pair, as Scheme code cannot (ADR 0020): the
+/// pair lives on a frozen page of the isolate's pool, under every strategy.
+/// A fresh pair, a copy of a literal, and a pair the host made take writes,
+/// including one that holds a literal.
+fn host_writes_to_literal_pairs_under<S: Strategy>() {
+    let mut cx = Cx::<S>::new(&HeapConfig::default());
+    let mut eval = |source: &str| {
+        let program = vali_compiler::compile_program(
+            &format!("(import (scheme base)) {source}"),
+            &Identity::new("test"),
+            &Bridges,
+        )
+        .unwrap();
+        let id = vali_compiler::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap()
+    };
+    let literal = eval("'(1 (2 3) . 4)");
+    let copy = eval("(list-copy '(1 2 3))");
+    let fresh = eval("(list 1 2 3)");
+    let holding = eval("(cons '(7 8) '())");
+    let x = Handle::fixnum(9).unwrap();
+    let error = literal.set_car(&mut cx, &x).unwrap_err();
+    assert!(error.to_string().contains("is immutable"), "{error}");
+    assert!(error.to_string().contains("the pair"), "{error}");
+    assert!(literal.set_cdr(&mut cx, &x).is_err());
+    // Every pair of the literal is frozen.
+    let second = literal.cdr(&mut cx).unwrap();
+    assert!(second.set_car(&mut cx, &x).is_err());
+    assert!(second.set_cdr(&mut cx, &x).is_err());
+    let nested = second.car(&mut cx).unwrap();
+    assert!(nested.set_car(&mut cx, &x).is_err());
+    // A failed write leaves it as it was.
+    assert_eq!(literal.car(&mut cx).unwrap().as_fixnum(), Some(1));
+    assert_eq!(cx.write_string(&literal).unwrap(), "(1 (2 3) . 4)");
+    // Something that is not a pair is a type error, as it was.
+    assert!(matches!(
+        x.set_car(&mut cx, &x).unwrap_err(),
+        Error::WrongType { .. }
+    ));
+    for v in [&copy, &fresh] {
+        v.set_car(&mut cx, &x).unwrap();
+        assert_eq!(v.car(&mut cx).unwrap().as_fixnum(), Some(9));
+        v.set_cdr(&mut cx, &Handle::empty_list()).unwrap();
+        assert_eq!(cx.write_string(v).unwrap(), "(9)");
+    }
+    // A fresh pair holding a literal takes a write that replaces it, but
+    // not one to the literal it holds.
+    let inner = holding.car(&mut cx).unwrap();
+    assert!(inner.set_car(&mut cx, &x).is_err());
+    holding.set_car(&mut cx, &x).unwrap();
+    assert_eq!(cx.write_string(&holding).unwrap(), "(9)");
+    // The host's own pairs are fresh.
+    let made = cx.cons(&x, &Handle::empty_list()).unwrap();
+    made.set_car(&mut cx, &Handle::fixnum(1).unwrap()).unwrap();
+    made.set_cdr(&mut cx, &literal).unwrap();
+    assert_eq!(cx.write_string(&made).unwrap(), "(1 1 (2 3) . 4)");
+}
+
+#[test]
+fn host_writes_to_literal_pairs() {
+    host_writes_to_literal_pairs_under::<NoCollection>();
+    host_writes_to_literal_pairs_under::<DeferredHeadered>();
+    host_writes_to_literal_pairs_under::<DeferredSideCounts>();
+    host_writes_to_literal_pairs_under::<PreciseHeadered>();
+    host_writes_to_literal_pairs_under::<PreciseSideCounts>();
 }

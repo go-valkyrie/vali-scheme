@@ -1,7 +1,8 @@
 # 0020. Constants live outside the isolate heap
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-18
+- **Amended:** 2026-11-18, accepted and built (#60); an As built section records what differs from the text
 - **Related:** 0002 (value representation, #7, #8, #10, #11), 0003 (memory management, the strategy contract), 0005 (bytecode, #4 constants), 0006 (ABI version), 0008 (isolates; #6 shared literals and symbols), 0009 (resource limits), 0012 (distribution format), 0015 (syntax objects), 0017 (the validator)
 
 This record started as the question "where does the immutable bit of a literal pair live" (#60) and was widened to one mechanism for every kind of constant. It also settles what #59 and #66 (literal vectors) and the existing literal strings and bytevectors do, and takes up the question that falls out of it: what a constant that mentions a symbol points to.
@@ -224,7 +225,11 @@ On the first prototype, with the page-word check on for pairs under every strate
 - `eval` and REPL constants take the frozen-heap-page route so that #31 can free them.
 - No format changes: the distribution format and artifacts are untouched, and `VALI_ROUND_TRIP=1` needs nothing.
 
-### Amendments this record needs when accepted
+### Amendments made when accepted
+
+Made in the same change as the code: ADR 0002 (#7, #8, #10 and #11), ADR 0003 (the contract rows, the cycle-collection bullet and the allocator bullet), ADR 0005 #4, ADR 0006 #4, ADR 0008 #6 (marked **planned**) and ADR 0009 #21. ADR 0012 needs none.
+
+As proposed:
 
 - **ADR 0002:** #8 (pairs and flonums: the pool and frozen pages; constants have the heap layout), #7 (the strategy's half of a pool header is frozen; the meaning of `IMMUTABLE`), #10 and #11 (a pool string never installs hints), and the identity-hash rule.
 - **ADR 0003:** the strategy contract gains a row: pool objects are outside the strategy (sticky counts, in headered counting too; **an object with a stuck count is a leaf in trial deletion's `mark_gray`, `scan_black` and `collect_white`, with the reason it is sound**; not roots; not moved; identity hash from the address). It also states the page-header invariant (every space that can hold a pair has a header at the start of each 32 KiB-aligned region, with no object starting there) and says that under MMTk the check becomes a VM-space address-range test.
@@ -246,6 +251,22 @@ Decided while the record is Proposed. They replace the questions this record ope
 6. **The `car` and `cdr` folds removed in #17 are not reinstated now.** They may be, later, once every tier checks writes, including `VALI_NO_OPT`.
 7. **The sticky test is taken in stage 1** for headered counting, and trial deletion treats an object with a stuck count as a leaf (section 1).
 8. **No API for hosts to build constants** for now.
+
+## As built
+
+What the code does where it differs from the text above. Nothing in the Decisions changed.
+
+- **One pool per isolate, not one per `Loaded`.** `Cx` holds a `Pool`, which is a pair of bump regions, and `Cx::pool_constant` builds each constant of a module into it as `Cx::load` runs (`pool.rs`). The text's `Pool::build::<S>(&Module)` and a pool owned by `Loaded` are for the day `Loaded` is shared by `Arc` (ADR 0008 #6), when each shared module needs a pool of its own. One pool per isolate means a bare isolate takes at most one page of pairs, one of everything else, and the large objects, however many modules it loads, where a pool per module would take a page of each kind per module.
+- **The pages come from the isolate's heap.** Three methods of `Allocate` give them: `pool_pair_page(heap, words)`, `pool_page(heap)` and `pool_large(heap, bytes)`. They take pages from the heap's page source, so they are charged to its limit as they are taken (no transient overshoot), counted in `bytes_used`, and freed when the heap is dropped, and they are in none of the heap's lists or size classes. `References::freeze(v)` is the hook that makes a just-built object a constant: under headered counting it sets the header's strategy half to the maximum count, with no colour and no flags; under side counts a pair's bytes are preset when its page is laid out. External strategies need the three methods, as they needed `allocate`.
+- **The page header is a `frozen` word and nothing else for every space that holds a pair.** `PAGE_HEADER_BYTES` is 8. The page heap's `Page` header gained `frozen` as its first field (`space` and `class` are unchanged); under no collection, only the pair bump buffer's pages gain the word, since only they can hold a pair, so a page holds 2047 pairs and not 2048 (4094 for two pages, not 4096). Pool pair pages under side counts are laid out with `Page` as the text says, with `used` set to the capacity and no free list, so `side_byte` works and no list ever takes one.
+- **Large pool objects are one allocation each,** from the heap's source, not a run of consecutive pages: only pairs are found by their page (M2), and a pair is never large, so nothing masks a large pool object's address.
+- **No frozen heap pages.** Section 2's second kind of frozen page is not built, as Decision 3 says. Every constant, `eval` and REPL input included, goes in the isolate's pool and lives until the isolate drops. The page header's `frozen` field is there for them (it is zero on every heap page), and the allocator rules in section 1 are for #31 to build when it needs them. The Consequences' line that `eval` and REPL constants take that route describes the plan, not this change.
+- **A quoted list's spine is built iteratively,** so a long quoted list does not overflow the stack, as it could when `fn constant` recursed along the `cdr`.
+- **`make_immutable` is gone.** `IMMUTABLE` is set by the pool builder and, as before, by `string_raw(.., true)` for the objects in section 4.
+- **Errors.** The VM and the primitives say `set-car!: the pair (1 2) is immutable`, as vectors do, and `Handle::set_car` and `set_cdr` return `Error::scheme("the pair (1 2) is immutable")`. A value that is not a pair is a type error first, and `list-set!` reports a bad index before it reaches `set-car!`.
+- **The sticky test.** `Counted` gained `stuck(v)`. Headered `increment` adds unless the count is at `COUNT`, and `count_down` returns `STUCK` there, as side counts did at 255. `survived` ignores both.
+- **Measured as built.** The runtime's instruction counts are identical to `main` for every benchmark, the mutate benchmarks included (`mutate-hot`, `mutate-list`, `mutate-scattered` are now in `benchmarks/`), since the check is in Rust and not in bytecode. A first run on a Mac under Defender read the headered counting strategies 7 to 15% slower on `closures`, `continuations` and `deriv`, but that did not reproduce: a Linux re-measurement (4 cores, two interleaved rounds, base `ce0e710` against this change, 9 runs each) put those rows within noise (-13% to +9%, no consistent sign), consistent with the 2% or less measured for the sticky test. The cost that does show in both rounds is `mutate-scattered`, +5% to +16% across `none`, deferred, deferred-side and precise, which is the page-word load on cache-missing writes that this record predicted; `mutate-list` and `mutate-hot` are flat. Timing is noisy on every machine tried: the same row swings up to 30% between rounds with no code change, and CI's timing numbers are not comparable from run to run (runner variance is about 30%: a later `main` run with no runtime change was as slow as this change).
+- **No tracing strategy and no reserved range:** neither exists, so neither the MMTk address-range test nor the reserved-range check is built, and the latter stays undecided (Left open).
 
 ## Left open
 

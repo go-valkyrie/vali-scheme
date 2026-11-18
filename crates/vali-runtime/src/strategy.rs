@@ -49,6 +49,22 @@ pub unsafe trait Allocate: Sized + Send + Sync + 'static {
 
     /// How many bytes the heap has taken from the system.
     fn bytes_used(heap: &Self::Heap) -> usize;
+
+    /// A frozen page for the pool's pairs of `words` words each, laid out
+    /// as the strategy lays out a pair page (ADR 0020): its header's
+    /// `frozen` field set, and under side counts the side table preset to
+    /// sticky counts. The page belongs to the heap, which charges it to its
+    /// limit and frees it when dropped, and it is in none of the heap's
+    /// lists. Returns the address of the page's first pair and the address
+    /// its pairs end at.
+    fn pool_pair_page(heap: &mut Self::Heap, words: usize) -> Result<(usize, usize), OutOfMemory>;
+
+    /// A frozen page for the pool's other objects, from the same source:
+    /// the first address an object may start at, and where the page ends.
+    fn pool_page(heap: &mut Self::Heap) -> Result<(usize, usize), OutOfMemory>;
+
+    /// Memory for one large pool object of `bytes` bytes, 8-byte aligned.
+    fn pool_large(heap: &mut Self::Heap, bytes: usize) -> Result<NonNull<u64>, OutOfMemory>;
 }
 
 /// References the runtime holds on objects outside the heap, such as an
@@ -62,6 +78,13 @@ pub trait References: Allocate {
     /// The runtime has dropped one reference to `v`, a heap object.
     #[inline(always)]
     fn release(_heap: &mut Self::Heap, _v: crate::Value) {}
+
+    /// `v`, an object of the pool (ADR 0020), was just built with its
+    /// header, if it has one, written. The strategy makes it a constant that
+    /// is never counted, moved or freed: counting sets a headered object's
+    /// count to its maximum, so it is sticky.
+    #[inline(always)]
+    fn freeze(_v: crate::Value) {}
 
     /// `v` was just allocated, its fields not yet written.
     #[inline(always)]

@@ -25,6 +25,7 @@ mod numbers;
 mod objects;
 mod page;
 mod page_heap;
+mod pool;
 pub mod ports;
 mod primitives;
 mod printer;
@@ -52,7 +53,9 @@ pub use cx::Cx;
 pub use handle::{Error, Frame, Handle, Position, SchemeError};
 pub use isolate::Isolate;
 pub use no_collection::{BumpHeap, NoCollection};
-pub use page::{Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PageSource};
+pub use page::{
+    Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PAGE_HEADER_BYTES, PageSource,
+};
 pub use primitives::{FEATURES, primitive_names};
 pub use rust_objects::RustObject;
 pub use strategy::{Allocate, References, Space, Strategy};

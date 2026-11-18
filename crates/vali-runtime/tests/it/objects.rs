@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 
 use vali_abi::{StrategyLayout, Tag, TypeCode, data};
 use vali_runtime::{
-    Allocate, BumpHeap, Cx, HeapConfig, NoCollection, OutOfMemory, PAGE_BYTES, References, Space,
-    Strategy, Value,
+    Allocate, BumpHeap, Cx, HeapConfig, NoCollection, OutOfMemory, PAGE_BYTES, PAGE_HEADER_BYTES,
+    References, Space, Strategy, Value,
 };
 
 /// No collection, but with a header on every pair and flonum, as a counting
@@ -33,6 +33,18 @@ unsafe impl Allocate for Headered {
 
     fn bytes_used(heap: &BumpHeap) -> usize {
         heap.bytes_used()
+    }
+
+    fn pool_pair_page(heap: &mut BumpHeap, _: usize) -> Result<(usize, usize), OutOfMemory> {
+        heap.pool_pair_page()
+    }
+
+    fn pool_page(heap: &mut BumpHeap) -> Result<(usize, usize), OutOfMemory> {
+        heap.pool_pair_page()
+    }
+
+    fn pool_large(heap: &mut BumpHeap, bytes: usize) -> Result<NonNull<u64>, OutOfMemory> {
+        heap.pool_large(bytes)
     }
 }
 
@@ -94,11 +106,20 @@ fn pairs_fill_pages_densely() {
     let first = unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     let second = unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     assert_eq!(second.address() - first.address(), 16, "two words per pair");
-    assert_eq!(first.address() % PAGE_BYTES as u64, 0, "a fresh page");
+    // A pair page starts with a header word (ADR 0020), so the pairs start
+    // after it, and a page holds one fewer than the whole page would.
+    assert_eq!(
+        first.address() % PAGE_BYTES as u64,
+        PAGE_HEADER_BYTES as u64,
+        "a fresh page, after its header"
+    );
     let used = cx.bytes_used();
-    for _ in 0..(PAGE_BYTES / 16) {
+    let per_page = (PAGE_BYTES - PAGE_HEADER_BYTES) / 16;
+    for _ in 2..per_page {
         unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     }
+    assert_eq!(cx.bytes_used(), used, "the page is full, not overfull");
+    unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.unwrap();
     assert_eq!(cx.bytes_used(), used + PAGE_BYTES);
 }
 
@@ -169,7 +190,8 @@ fn the_heap_limit_is_enforced() {
     while unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.is_ok() {
         pairs += 1;
     }
-    assert_eq!(pairs, 2 * PAGE_BYTES / 16);
+    // Each page starts with a header word.
+    assert_eq!(pairs, 2 * ((PAGE_BYTES - PAGE_HEADER_BYTES) / 16));
     // Large objects count against the same limit.
     assert_eq!(
         unsafe { cx.make_vector_raw(10_000, Value::TRUE) }.unwrap_err(),

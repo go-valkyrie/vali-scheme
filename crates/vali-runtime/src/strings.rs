@@ -51,23 +51,6 @@ impl<S: Strategy> Cx<S> {
         }
     }
 
-    /// Makes `v`, a new string, vector or bytevector, immutable, as a
-    /// literal is.
-    pub(crate) fn make_immutable(&mut self, v: Value) {
-        let t = if v.tag() == Tag::String {
-            TypeCode::String
-        } else {
-            // SAFETY: the caller passes a live value.
-            unsafe { self.header_type(v) }.expect("a vector or bytevector")
-        };
-        debug_assert!(matches!(
-            t,
-            TypeCode::String | TypeCode::Vector | TypeCode::Bytevector
-        ));
-        // SAFETY: the caller passes a live string, vector or bytevector.
-        unsafe { self.set_header_flag(v, t, data::IMMUTABLE, true) };
-    }
-
     /// An error saying `name` cannot change the immutable vector `v`.
     pub(crate) fn immutable_vector(&self, name: &str, v: Value) -> Error {
         Error::scheme(format!(
