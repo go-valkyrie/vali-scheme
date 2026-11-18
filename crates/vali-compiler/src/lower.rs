@@ -11,10 +11,9 @@
 //! `k`. A `letrec` procedure that `analyze` proves is a loop becomes a
 //! `rec join` at its one entry, its own calls jumps.
 //!
-//! Variables follow ADR 0005 #4, as the baseline compiler does: every
-//! assigned variable is boxed (ADR 0017 #5 leaves unboxing to the
-//! optimiser), and closures in a `letrec` that capture a variable bound
-//! after them are patched with `set-free`.
+//! Variables follow ADR 0005 #4: every assigned variable is boxed (ADR
+//! 0017 #5 leaves unboxing to the optimiser), and closures in a `letrec`
+//! that capture a variable bound after them are patched with `set-free`.
 
 use std::collections::{HashMap, HashSet};
 

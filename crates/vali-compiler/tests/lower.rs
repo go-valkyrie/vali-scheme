@@ -19,10 +19,7 @@ fn ir(source: &str) -> String {
     let program =
         vali_compiler::compile_internal_program(source, &Identity::new("test"), &NoLibraries)
             .unwrap();
-    program
-        .ir
-        .expect("debug builds lower every module")
-        .to_string()
+    program.ir.expect("every module is lowered").to_string()
 }
 
 /// Asserts that the IR of `source` has the functions `expected`.

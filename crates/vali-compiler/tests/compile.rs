@@ -157,6 +157,16 @@ fn loops() {
             "(let loop ((i 0) (acc 0)) (if (= i 1000000) acc (loop (+ i 1) (+ acc i))))",
             "499999500000",
         ),
+        // Values that trade places: the moves into the loop's parameters,
+        // and into a tail call's window, form a cycle.
+        (
+            "(let loop ((a 1) (b 2) (c 3) (n 5)) (if (= n 0) (list a b c) (loop b c a (- n 1))))",
+            "(3 1 2)",
+        ),
+        (
+            "(define (f a b n) (if (= n 0) (list a b) (f b a (- n 1)))) (f 'x 'y 3)",
+            "(y x)",
+        ),
         // Entered from a position that is not a tail call.
         (
             "(+ 1 (let loop ((i 0)) (if (< i 10) (loop (+ i 1)) i)))",
@@ -304,8 +314,8 @@ fn fib_compiles_to_tight_bytecode() {
     .unwrap();
     let listing = vali_bytecode::disassemble(&module.functions[1]);
     // The comparison and both subtractions are single instructions, each
-    // call's result stays in the slot where the call put it, and the sum
-    // reuses the first one's slot.
+    // call's operands are computed in its window, each result stays in the
+    // slot where the call put it, and the sum reuses the parameter's slot.
     assert_eq!(
         listing,
         "\
@@ -318,8 +328,8 @@ fib: arity 1, 11 slots, 0 free
   0006  get-variable r9, v0
   0007  sub-imm r10, r1, 2
   0008  call r6, 1
-  0009  add r5, r5, r9
-  0010  return r5
+  0009  add r1, r5, r9
+  0010  return r1
 "
     );
 }

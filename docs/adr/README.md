@@ -33,7 +33,7 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0014](0014-reader-and-source-representation.md) | Reader and source representation | Accepted |
 | [0015](0015-scopes-and-syntax-objects.md) | Scopes and syntax objects | Accepted |
 | [0016](0016-rust-bridges-and-objects.md) | Rust bridges and objects | Accepted |
-| [0017](0017-intermediate-representation-and-optimisation.md) | Intermediate representation and where optimisation runs | Accepted, not built |
+| [0017](0017-intermediate-representation-and-optimisation.md) | Intermediate representation and where optimisation runs | Accepted, partly built |
 | [0018](0018-library-abi-versions.md) | Library ABI versions | Accepted, not built |
 
 Milestone M0 ended with 0002, 0004, 0005 and 0008 accepted. 0003 stays a proposal. M1's measurements exist, but all five strategy variants stay built and tested until the optimising compiler's ownership inference can be measured too.

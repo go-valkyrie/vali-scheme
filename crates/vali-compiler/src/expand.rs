@@ -29,7 +29,7 @@ use vali_syntax::{
     free_identifier_eq,
 };
 
-use vali_bytecode::{Export, Link, Module, ModuleBuilder, validate};
+use vali_bytecode::{Link, Module, ModuleBuilder, validate};
 use vali_runtime::{Cx, DeferredHeadered, Handle};
 
 use crate::CompileError;
@@ -509,8 +509,7 @@ pub(crate) struct Expander {
     available: crate::loader::Available,
     /// The sources read, which spans' source ids index.
     pub(crate) sources: vali_syntax::Sources,
-    /// The IR of the last module compiled, in debug builds, which lowers
-    /// every module beside the baseline compiler to check it.
+    /// The IR of the last module compiled.
     pub(crate) last_ir: Option<vali_dist::Module>,
 }
 
@@ -1055,55 +1054,20 @@ impl Expander {
 
     /// Compiles the `lambda` `body` as a module's body, exporting every
     /// variable the module defines under its own name.
+    /// Everything compiled goes through the IR (ADR 0017): the tree is
+    /// lowered to it, then converted to run-format bytecode.
     fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
-        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
-        let through_ir = through_ir();
-        if cfg!(debug_assertions) || through_ir {
-            let ir =
-                crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
-            vali_dist::validate(&ir).map_err(|e| CompileError {
-                message: format!("{name}: lowering produced invalid IR: {e}"),
-                span: None,
-                location: None,
-            })?;
-            if through_ir {
-                let module = vali_bytecode::convert(&ir).map_err(|e| CompileError {
-                    message: format!("{name}: {e}"),
-                    span: None,
-                    location: None,
-                })?;
-                validate(&module).map_err(|e| CompileError {
-                    message: format!("{name}: conversion produced invalid bytecode: {e}"),
-                    span: None,
-                    location: None,
-                })?;
-                self.last_ir = Some(ir);
-                return Ok(module);
-            }
-            self.last_ir = Some(ir);
-        }
-        let generator = crate::codegen::Generator {
-            vars: &self.vars,
-            lambdas: &self.lambdas,
-            loops: &loops,
-            module: ModuleBuilder::new(name),
-            sources: &self.sources,
-            calls: Vec::new(),
-        };
-        let mut module = generator.program(body)?;
-        for (i, variable) in module.variables.iter().enumerate() {
-            if variable.link == Link::Defined {
-                module.exports.push(Export {
-                    name: variable.name.clone(),
-                    variable: u16::try_from(i).expect("at most 65,536 variables"),
-                });
-            }
-        }
-        validate(&module).map_err(|e| CompileError {
-            message: format!("{name}: the compiler produced invalid bytecode: {e}"),
+        let fail = |message: String| CompileError {
+            message,
             span: None,
             location: None,
-        })?;
+        };
+        let loops = crate::analyze::loops(&self.vars, &self.lambdas, body);
+        let ir = crate::lower::lower(&self.vars, &self.lambdas, &loops, &self.sources, body, name)?;
+        let module = vali_bytecode::convert(&ir).map_err(|e| fail(format!("{name}: {e}")))?;
+        validate(&module)
+            .map_err(|e| fail(format!("{name}: conversion produced invalid bytecode: {e}")))?;
+        self.last_ir = Some(ir);
         Ok(module)
     }
 
@@ -2657,12 +2621,4 @@ impl Expander {
             Box::new(body),
         ))
     }
-}
-
-/// Whether modules are compiled through the IR (ADR 0017) rather than by
-/// the baseline compiler: while both exist, set by the `VALI_IR`
-/// environment variable, so the whole test suite can run either way.
-fn through_ir() -> bool {
-    static THROUGH_IR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *THROUGH_IR.get_or_init(|| std::env::var_os("VALI_IR").is_some())
 }

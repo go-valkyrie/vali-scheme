@@ -7,14 +7,12 @@
 //! is loaded.
 //!
 //! The expander (ADR 0015) resolves every identifier by sets of scopes and
-//! produces the compiler's tree. The compiler is the direct one, in the
-//! manner of Guile 3's baseline compiler: it goes from that tree straight
-//! to bytecode. The optimising compiler, through CPS, comes later as a
-//! second path into the same format.
+//! produces the compiler's tree. Everything compiled goes through the IR
+//! (ADR 0017): the tree is lowered to it, and the IR is converted to
+//! bytecode. The optimiser's passes over the IR come later.
 
 mod analyze;
 mod ast;
-mod codegen;
 mod eval;
 mod expand;
 mod features;
@@ -94,7 +92,7 @@ pub struct Program {
     /// What `eval` needs, if the program imports `(scheme eval)`: the
     /// expander that compiled it, which [`load`] keeps in the isolate.
     pub evaluator: Option<Evaluator>,
-    /// The body's IR, in debug builds, for Vali's own tests.
+    /// The body's IR, for Vali's own tests.
     #[doc(hidden)]
     pub ir: Option<vali_dist::Module>,
 }
