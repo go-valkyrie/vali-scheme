@@ -20,7 +20,8 @@
 //! A comparison bound to a variable that only an `if` tests becomes one
 //! branch instruction.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
 
 use vali_dist as ir;
@@ -71,11 +72,18 @@ pub fn convert(module: &ir::Module) -> std::result::Result<Module, ConvertError>
         ));
     }
     let mut b = ModuleBuilder::new(&module.name);
-    let constants: Vec<u16> = module
+    // The unspecified value's constant comes first, so there is always room
+    // for it: a module's own constants then number 65,535 at most, unless
+    // one of them is the unspecified value too.
+    let unspecified = b.constant(Constant::Unspecified);
+    let constants = module
         .constants
         .iter()
-        .map(|c| b.constant(constant(c)))
-        .collect();
+        .map(|c| b.try_constant(constant(c)))
+        .collect::<Option<Vec<u16>>>()
+        .ok_or_else(|| {
+            fail("more than 65,535 distinct constants (the converter adds one more)".into())
+        })?;
     let variables: Vec<u16> = module
         .globals
         .iter()
@@ -88,7 +96,6 @@ pub fn convert(module: &ir::Module) -> std::result::Result<Module, ConvertError>
         })
         .collect();
     let sources: Vec<u16> = module.sources.iter().map(|s| b.source(s)).collect();
-    let unspecified = b.constant(Constant::Unspecified);
     let indexes: Vec<u32> = module.functions.iter().map(|_| b.declare()).collect();
     let tables = Tables {
         module,
@@ -366,8 +373,10 @@ fn analyse(f: &ir::Function) -> Result<Analysis> {
     let mut def = vec![0u32; n];
     let mut end = vec![0u32; n];
     let mut needs_slot = vec![true; n];
+    let mut is_free = vec![false; n];
     for v in &f.free {
         needs_slot[v.0 as usize] = false;
+        is_free[v.0 as usize] = true;
     }
     let mut join_params = vec![Vec::new(); f.joins as usize];
     let mut regions = Vec::new();
@@ -407,7 +416,7 @@ fn analyse(f: &ir::Function) -> Result<Analysis> {
                     end[var.0 as usize] = p;
                 }
                 let skip_test = matches!(term, ir::Term::If { test: ir::Operand::Var(t), .. }
-                    if !needs_slot[t.0 as usize] && !f.free.contains(t));
+                    if !needs_slot[t.0 as usize] && !is_free[t.0 as usize]);
                 if skip_test {
                     continue;
                 }
@@ -444,13 +453,32 @@ fn analyse(f: &ir::Function) -> Result<Analysis> {
             Event::Else(_) | Event::Entry => {}
         }
     }
+    // A variable bound before a loop and used inside it lives to the
+    // loop's end. Loops nest or are disjoint, so those a use is inside form
+    // a chain, outermost first, with the later ends innermost last; the
+    // outermost one starting after the binding gives the latest end. The
+    // uses are in position order, so one pass keeps the chain on a stack.
+    regions.sort_unstable();
+    used_at.sort_by_key(|&(_, p)| p);
+    let mut next = 0;
+    let mut open: Vec<(u32, u32)> = Vec::new();
     for &(v, p) in &used_at {
+        while next < regions.len() && regions[next].0 < p {
+            let region = regions[next];
+            next += 1;
+            while open.last().is_some_and(|&(_, stop)| stop < region.0) {
+                open.pop();
+            }
+            open.push(region);
+        }
+        while open.last().is_some_and(|&(_, stop)| stop < p) {
+            open.pop();
+        }
         let v = v.0 as usize;
         end[v] = end[v].max(p);
-        for &(start, stop) in &regions {
-            if def[v] < start && start < p && p <= stop {
-                end[v] = end[v].max(stop);
-            }
+        let first = open.partition_point(|&(start, _)| start <= def[v]);
+        if let Some(&(_, stop)) = open.get(first) {
+            end[v] = end[v].max(stop);
         }
     }
     let mut fixed = vec![None; n];
@@ -553,6 +581,34 @@ fn bases(a: &Analysis, slots: &[Option<Slot>]) -> HashMap<usize, usize> {
         .collect()
 }
 
+/// How many live variables each slot holds, and which slots hold any, so
+/// the highest is found without scanning the slots.
+struct Held {
+    count: Vec<u32>,
+    slots: BTreeSet<usize>,
+}
+
+impl Held {
+    fn add(&mut self, slot: usize) {
+        self.count[slot] += 1;
+        if self.count[slot] == 1 {
+            self.slots.insert(slot);
+        }
+    }
+
+    fn remove(&mut self, slot: usize) {
+        self.count[slot] -= 1;
+        if self.count[slot] == 0 {
+            self.slots.remove(&slot);
+        }
+    }
+
+    /// The highest slot held, or 0.
+    fn highest(&self) -> i32 {
+        self.slots.last().map_or(0, |&s| s as i32)
+    }
+}
+
 /// For each position, the highest slot of a variable live there, and of
 /// one live across it: bound before and used after. Only variables
 /// `counted` keeps count.
@@ -576,21 +632,18 @@ fn pressure(
         .map(|&s| usize::from(s))
         .max()
         .unwrap_or(0);
-    let mut count = vec![0u32; top + 1];
-    let max = |count: &[u32]| {
-        (0..count.len())
-            .rev()
-            .find(|&s| count[s] > 0)
-            .map_or(0, |s| s as i32)
+    let mut held = Held {
+        count: vec![0; top + 1],
+        slots: BTreeSet::new(),
     };
     let mut cover = vec![0; len];
     let mut across = vec![0; len];
     let slot = |v: usize| usize::from(slots[v].expect("allocated"));
     for p in 0..len {
         for &v in &starting[p] {
-            count[slot(v)] += 1;
+            held.add(slot(v));
         }
-        cover[p] = max(&count);
+        cover[p] = held.highest();
         // Those bound or last used here are not live across it.
         let edges: Vec<usize> = starting[p]
             .iter()
@@ -603,14 +656,14 @@ fn pressure(
             )
             .collect();
         for &v in &edges {
-            count[slot(v)] -= 1;
+            held.remove(slot(v));
         }
-        across[p] = max(&count);
+        across[p] = held.highest();
         for &v in &edges {
-            count[slot(v)] += 1;
+            held.add(slot(v));
         }
         for &v in &ending[p] {
-            count[slot(v)] -= 1;
+            held.remove(slot(v));
         }
     }
     (cover, across)
@@ -829,33 +882,71 @@ impl Emitter<'_> {
             .map(|&(d, s)| usize::from(d.max(s)))
             .max()
             .unwrap_or(0);
+        // Each step does the first move, in order, whose destination no
+        // other pending move reads. Counting the readers of each slot, and
+        // keeping the moves that are free to go in a heap, makes that
+        // linear in the moves, not their square.
+        let mut readers: HashMap<Slot, Vec<usize>> = HashMap::new();
+        let mut by_dst: HashMap<Slot, usize> = HashMap::new();
+        for (i, &(dst, src)) in moves.iter().enumerate() {
+            readers.entry(src).or_default().push(i);
+            by_dst.insert(dst, i);
+        }
+        let mut pending_reads: HashMap<Slot, usize> =
+            readers.iter().map(|(&slot, r)| (slot, r.len())).collect();
+        let mut ready: BinaryHeap<Reverse<usize>> = moves
+            .iter()
+            .enumerate()
+            .filter(|&(_, &(dst, _))| !pending_reads.contains_key(&dst))
+            .map(|(i, _)| Reverse(i))
+            .collect();
+        let mut done = vec![false; moves.len()];
+        let mut first = 0;
+        let mut left = moves.len();
         let mut scratch = None;
-        while !moves.is_empty() {
-            match moves
-                .iter()
-                .position(|&(dst, _)| !moves.iter().any(|&(_, src)| src == dst))
-            {
-                Some(i) => {
-                    let (dst, src) = moves.remove(i);
-                    self.b.emit(I::Mov { dst, src });
+        while left > 0 {
+            if let Some(Reverse(i)) = ready.pop() {
+                let (dst, src) = moves[i];
+                done[i] = true;
+                left -= 1;
+                self.b.emit(I::Mov { dst, src });
+                let count = pending_reads.get_mut(&src).expect("a reader");
+                *count -= 1;
+                if *count == 0
+                    && let Some(&j) = by_dst.get(&src)
+                    && !done[j]
+                {
+                    ready.push(Reverse(j));
                 }
-                None => {
-                    // A cycle: park one source in a free slot.
-                    let temp = match scratch {
-                        Some(temp) => temp,
-                        None => {
-                            let temp = self.touch(self.scratch.max(highest) + 1)?;
-                            scratch = Some(temp);
-                            temp
-                        }
-                    };
-                    let src = moves[0].1;
-                    self.b.emit(I::Mov { dst: temp, src });
-                    for m in &mut moves {
-                        if m.1 == src {
-                            m.1 = temp;
-                        }
+            } else {
+                // A cycle: park one source in a free slot.
+                let temp = match scratch {
+                    Some(temp) => temp,
+                    None => {
+                        let temp = self.touch(self.scratch.max(highest) + 1)?;
+                        scratch = Some(temp);
+                        temp
                     }
+                };
+                while done[first] {
+                    first += 1;
+                }
+                let src = moves[first].1;
+                self.b.emit(I::Mov { dst: temp, src });
+                let moving: Vec<usize> = readers
+                    .get(&src)
+                    .map(|r| r.iter().copied().filter(|&i| !done[i]).collect())
+                    .unwrap_or_default();
+                for &i in &moving {
+                    moves[i].1 = temp;
+                }
+                *pending_reads.entry(temp).or_insert(0) += moving.len();
+                readers.entry(temp).or_default().extend(moving);
+                pending_reads.insert(src, 0);
+                if let Some(&j) = by_dst.get(&src)
+                    && !done[j]
+                {
+                    ready.push(Reverse(j));
                 }
             }
         }

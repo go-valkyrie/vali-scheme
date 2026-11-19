@@ -77,7 +77,7 @@ fn ifs_on_constants_keep_one_arm() {
     // The join point the `if`'s value went to is just its handler now.
     check(
         "(define (k x) (+ 1 (if (< 1 2) x 0)))",
-        "fun f1 k (v0) []:\n  let v3 = + c0 v0 @0:1:14\n  return v3\n",
+        "fun f1 k (v0) []:\n  let v1 = + c0 v0 @0:1:14\n  return v1\n",
     );
 }
 
@@ -156,15 +156,15 @@ fn named_lets_become_loops() {
     assert!(
         sum.contains(
             "fun f1 sum (v0) []:
-  rec join j0(v4 v5):
-    let v6 = null? v4
-    if v6:
-      return v5
+  rec join j0(v1 v2):
+    let v3 = null? v1
+    if v3:
+      return v2
     else:
-      let v7 = cdr v4 @0:1:66
-      let v8 = car v4 @0:1:81
-      let v9 = + v5 v8 @0:1:74
-      jump j0(v7 v9)
+      let v4 = cdr v1 @0:1:66
+      let v5 = car v1 @0:1:81
+      let v6 = + v2 v5 @0:1:74
+      jump j0(v4 v6)
   jump j0(v0 c1)
 "
         ),
@@ -175,17 +175,17 @@ fn named_lets_become_loops() {
     check(
         "(define (g x) (let ((n (let lp ((i x)) (if (> i 10) i (lp (* i 2)))))) (vector n x n)))",
         "fun f1 g (v0) []:
-  join j1(v3):
-    let v4 = make-vector c3 v3 @0:1:71
-    let v5 = vector-set! v4 c4 v0 @0:1:71
-    return v4
-  rec join j0(v7):
-    let v8 = < c1 v7 @0:1:43
-    if v8:
-      jump j1(v7)
+  join j1(v1):
+    let v2 = make-vector c3 v1 @0:1:71
+    let v3 = vector-set! v2 c4 v0 @0:1:71
+    return v2
+  rec join j0(v4):
+    let v5 = < c1 v4 @0:1:43
+    if v5:
+      jump j1(v4)
     else:
-      let v9 = * v7 c2 @0:1:58
-      jump j0(v9)
+      let v6 = * v4 c2 @0:1:58
+      jump j0(v6)
   jump j0(v0)
 ",
     );

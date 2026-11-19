@@ -36,12 +36,12 @@ fn calls_to_known_procedures_are_direct() {
   if v1:
     return v0
   else:
-    let v3 = - v0 c1 @0:1:38
-    let v4 = call direct f1(v3) @0:1:33
-    let v6 = - v0 c0 @0:1:52
-    let v7 = call direct f1(v6) @0:1:47
-    let v8 = + v4 v7 @0:1:30
-    return v8
+    let v2 = - v0 c1 @0:1:38
+    let v3 = call direct f1(v2) @0:1:33
+    let v4 = - v0 c0 @0:1:52
+    let v5 = call direct f1(v4) @0:1:47
+    let v6 = + v3 v5 @0:1:30
+    return v6
 "
         ),
         "{fib}"
@@ -52,7 +52,7 @@ fn calls_to_known_procedures_are_direct() {
     // so it is not inlined.
     let other = ir("(define (down n) (if (= n 0) 0 (down (- n 1)))) (define (f y) (+ (down y) 1))");
     assert!(
-        other.contains("fun f2 f (v0) []:\n  let v2 = call direct f1(v0)"),
+        other.contains("fun f2 f (v0) []:\n  let v1 = call direct f1(v0)"),
         "{other}"
     );
 }

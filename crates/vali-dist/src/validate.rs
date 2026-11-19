@@ -14,9 +14,21 @@
 //! function, and no other `set-free` writes a self-tied index. Later tiers
 //! may rely on these to treat a self-tied slot as the closure itself.
 //!
+//! Limits that bound the work and memory validation and conversion take by
+//! the size of the module in memory:
+//!
+//! - A function declares no more variables than it binds (its parameters,
+//!   free variables, `let`s and join-point parameters) and no more join
+//!   points than it has `join` terms, so nothing is allocated for a count
+//!   that nothing in the function backs.
+//! - No two globals have the same name and link, as they would share one
+//!   cell once linked.
+//! - Conversion adds one constant of its own, so at most 65,535 distinct
+//!   constants convert (65,536 if one of them is the unspecified value).
+//!
 //! The walk is iterative: no input can make it recurse.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use crate::ir::{
@@ -73,14 +85,55 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
     if let Some(pair) = names.windows(2).find(|pair| pair[0] == pair[1]) {
         return Err(fail(format!("{} is exported twice", pair[0])));
     }
+    // Two globals with one name and link would be one cell once linked.
+    let mut seen = HashSet::new();
+    for (n, global) in module.globals.iter().enumerate() {
+        if !seen.insert((&*global.name, &global.link)) {
+            return Err(fail(format!(
+                "global g{n} is defined twice: {} appears again with the same link",
+                global.name
+            )));
+        }
+    }
     for (n, function) in module.functions.iter().enumerate() {
         let id = FunId(n as u32);
-        Checker::new(module, function)
-            .run()
-            .map_err(|message| ValidationError {
-                function: Some(id),
-                message,
-            })?;
+        let at = |message: String| ValidationError {
+            function: Some(id),
+            message,
+        };
+        check_counts(function).map_err(at)?;
+        Checker::new(module, function).run().map_err(at)?;
+    }
+    Ok(())
+}
+
+/// Checks that a function does not declare more variables or join points
+/// than it binds, before anything is allocated for the declared counts: they
+/// are numbers in the input, not sizes of anything in it.
+fn check_counts(function: &Function) -> Result<(), String> {
+    let mut vars = function.params.len() as u64 + function.free.len() as u64;
+    let mut joins = 0u64;
+    for term in &function.terms {
+        match term {
+            Term::Let { .. } => vars += 1,
+            Term::Join { params, .. } => {
+                joins += 1;
+                vars += params.len() as u64;
+            }
+            _ => {}
+        }
+    }
+    if u64::from(function.vars) > vars {
+        return Err(format!(
+            "it declares {} variables but binds {vars}",
+            function.vars
+        ));
+    }
+    if u64::from(function.joins) > joins {
+        return Err(format!(
+            "it declares {} join points but binds {joins}",
+            function.joins
+        ));
     }
     Ok(())
 }

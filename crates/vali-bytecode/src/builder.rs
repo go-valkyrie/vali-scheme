@@ -205,11 +205,14 @@ impl FunctionBuilder {
 pub struct ModuleBuilder {
     name: Box<str>,
     constants: Vec<Constant>,
+    /// The pool's shareable constants, by [`shallow_hash`].
+    constant_index: HashMap<u64, Vec<u16>>,
     variables: Vec<Variable>,
     variable_index: HashMap<Variable, u16>,
     exports: Vec<Export>,
     functions: Vec<Option<Function>>,
     sources: Vec<Box<str>>,
+    source_index: HashMap<Box<str>, u16>,
 }
 
 impl ModuleBuilder {
@@ -230,23 +233,39 @@ impl ModuleBuilder {
     ///
     /// If the pool would exceed 65,536 constants.
     pub fn constant(&mut self, constant: Constant) -> u16 {
+        self.try_constant(constant)
+            .expect("at most 65,536 constants")
+    }
+
+    /// As [`ModuleBuilder::constant`], but `None` if the pool is full and
+    /// `constant` is not already in it. Finding an equal constant takes time
+    /// in the constant's size, not the pool's.
+    pub fn try_constant(&mut self, constant: Constant) -> Option<u16> {
         let mutable = matches!(
             constant,
             Constant::Pair(..) | Constant::Vector(_) | Constant::Labelled(..)
         );
-        let found = if mutable {
+        let hash = if mutable {
             None
         } else {
-            self.constants.iter().position(|c| identical(c, &constant))
+            Some(shallow_hash(&constant))
         };
-        let index = match found {
-            Some(index) => index,
-            None => {
-                self.constants.push(constant);
-                self.constants.len() - 1
-            }
-        };
-        u16::try_from(index).expect("at most 65,536 constants")
+        if let Some(hash) = hash
+            && let Some(found) = self.constant_index.get(&hash).and_then(|bucket| {
+                bucket
+                    .iter()
+                    .copied()
+                    .find(|&i| identical(&self.constants[usize::from(i)], &constant))
+            })
+        {
+            return Some(found);
+        }
+        let index = u16::try_from(self.constants.len()).ok()?;
+        self.constants.push(constant);
+        if let Some(hash) = hash {
+            self.constant_index.entry(hash).or_default().push(index);
+        }
+        Some(index)
     }
 
     /// The index of the global variable named `name`, adding it if it is
@@ -343,11 +362,13 @@ impl ModuleBuilder {
     /// The index of the source `identity` in the module's table, added if
     /// it is not there yet.
     pub fn source(&mut self, identity: &str) -> u16 {
-        if let Some(i) = self.sources.iter().position(|s| &**s == identity) {
-            return u16::try_from(i).expect("at most 65,536 sources");
+        if let Some(&i) = self.source_index.get(identity) {
+            return i;
         }
+        let index = u16::try_from(self.sources.len()).expect("at most 65,536 sources");
         self.sources.push(identity.into());
-        u16::try_from(self.sources.len() - 1).expect("at most 65,536 sources")
+        self.source_index.insert(identity.into(), index);
+        index
     }
 
     /// Adds a function, returning its index.
@@ -386,6 +407,41 @@ impl ModuleBuilder {
             body,
         }
     }
+}
+
+/// A hash that [`identical`] constants share: of a constant's own value,
+/// and of the tag alone for the parts that are mutable objects. Iterative,
+/// like [`identical`].
+fn shallow_hash(constant: &Constant) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut pending = vec![constant];
+    while let Some(c) = pending.pop() {
+        std::mem::discriminant(c).hash(&mut h);
+        match c {
+            Constant::Integer(n) => n.hash(&mut h),
+            Constant::Flonum(x) => x.to_bits().hash(&mut h),
+            Constant::Boolean(b) => b.hash(&mut h),
+            Constant::Character(ch) => ch.hash(&mut h),
+            Constant::String(s) | Constant::Symbol(s) | Constant::Keyword(s) => s.hash(&mut h),
+            Constant::Bignum { negative, limbs } => {
+                negative.hash(&mut h);
+                limbs.hash(&mut h);
+            }
+            Constant::Bytevector(bytes) => bytes.hash(&mut h),
+            Constant::Ratio(a, b) | Constant::Complex(a, b) => {
+                pending.push(b);
+                pending.push(a);
+            }
+            Constant::LabelRef(n) => n.hash(&mut h),
+            Constant::EmptyList
+            | Constant::Unspecified
+            | Constant::Pair(..)
+            | Constant::Vector(_)
+            | Constant::Labelled(..) => {}
+        }
+    }
+    h.finish()
 }
 
 /// Whether two constants are the same value, so that one pool entry can
