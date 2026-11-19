@@ -14,6 +14,10 @@
 //! The REPL and programs use deferred counting, for now the fastest
 //! strategy that frees memory (ADR 0003).
 //!
+//! Libraries compiled from source are saved to a cache and loaded from it
+//! on later runs (ADR 0001 #10), unless `--no-cache` says not to; `vali
+//! build` fills it ahead of time, and `vali cache` looks after it.
+//!
 //! Vali's own libraries are loaded from the artifacts `vali-stdlib` built,
 //! not expanded; setting `VALI_NO_PREBUILT` compiles them from source, to
 //! compare.
@@ -26,11 +30,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use vali::cache::Cache;
 use vali::load::Identity;
 use vali::strategy::DeferredHeadered;
 use vali::{Error, HeapConfig, Isolate, Repl};
 
-use args::{Command, HELP, Options};
+use args::{CacheCommand, Command, HELP, Options};
 use host::Host;
 
 fn main() -> ExitCode {
@@ -59,16 +64,95 @@ fn main() -> ExitCode {
         }
         Command::Repl => repl(options),
         Command::Run { file, args } => run(&file, args, options),
+        Command::Build { file } => build(&file, options),
+        Command::Cache(which) => cache_command(which, &options),
     }
 }
 
-/// Runs the program in `file`, whose command line is `file` and `args`.
-fn run(file: &str, args: Vec<String>, mut options: Options) -> ExitCode {
+/// The library cache this run uses, if it uses one: in `--cache-dir`, or
+/// `VALI_CACHE_DIR`, or the user's cache directory.
+fn open_cache(options: &Options) -> Option<Cache> {
+    if options.no_cache {
+        return None;
+    }
+    let dir = options.cache_dir.clone().or_else(Cache::user_dir)?;
+    let mut cache = Cache::new(dir);
+    if let Some(mebibytes) = std::env::var("VALI_CACHE_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        cache = cache.with_max_bytes(mebibytes.saturating_mul(1 << 20));
+    }
+    Some(cache)
+}
+
+/// Says what a compile did with the cache, if `VALI_CACHE_TRACE` is set.
+fn trace_cache(report: &vali::cache::CacheReport) {
+    if std::env::var_os("VALI_CACHE_TRACE").is_none() {
+        return;
+    }
+    for library in &report.hits {
+        eprintln!("vali: cache: loaded {library}");
+    }
+    for (library, why) in &report.refused {
+        eprintln!("vali: cache: refused {library}: {why}");
+    }
+    for library in &report.stored {
+        eprintln!("vali: cache: stored {library}");
+    }
+    for (library, why) in &report.failed {
+        eprintln!("vali: cache: could not store {library}: {why}");
+    }
+}
+
+/// `vali cache`.
+fn cache_command(which: CacheCommand, options: &Options) -> ExitCode {
+    let Some(cache) = open_cache(options) else {
+        eprintln!("vali: no cache directory: set VALI_CACHE_DIR or pass --cache-dir");
+        return ExitCode::from(2);
+    };
+    match which {
+        CacheCommand::Dir => {
+            println!("{}", cache.root().display());
+            return ExitCode::SUCCESS;
+        }
+        CacheCommand::Stats => match cache.stats() {
+            Ok(stats) => println!(
+                "{}: {} entries, {} bytes (kept under {})",
+                cache.root().display(),
+                stats.entries,
+                stats.bytes,
+                cache.max_bytes()
+            ),
+            Err(e) => {
+                eprintln!("vali: {}: {e}", cache.root().display());
+                return ExitCode::FAILURE;
+            }
+        },
+        CacheCommand::Clean => match cache.clear() {
+            Ok(n) => println!("deleted {n} entries from {}", cache.root().display()),
+            Err(e) => {
+                eprintln!("vali: {}: {e}", cache.root().display());
+                return ExitCode::FAILURE;
+            }
+        },
+    }
+    ExitCode::SUCCESS
+}
+
+/// Reads the program `file`, and sets up the host that serves its
+/// libraries: the text with a `#!` line blanked, its identity and the
+/// host.
+fn prepare(
+    file: &str,
+    args: Vec<String>,
+    mut options: Options,
+) -> Result<(String, Identity, Arc<Host>), ExitCode> {
     let mut source = match std::fs::read_to_string(file) {
         Ok(source) => source,
         Err(e) => {
             eprintln!("vali: {file}: {e}");
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
     // A `#!` line is for the operating system, not the reader, but a
@@ -94,13 +178,73 @@ fn run(file: &str, args: Vec<String>, mut options: Options) -> ExitCode {
     ));
     let identity = Identity::new(file);
     host.serve_program(&identity, Path::new(file));
-    let program = match vali::compile::compile_program(&source, &identity, &*host) {
+    Ok((source, identity, host))
+}
+
+/// `vali build`: compiles the libraries of the program in `file` into the
+/// cache, or the directory `-o` names, without running it.
+fn build(file: &str, mut options: Options) -> ExitCode {
+    if options.no_cache {
+        eprintln!("vali: build makes a cache: --no-cache cannot apply");
+        return ExitCode::from(2);
+    }
+    if let Some(output) = options.output.take() {
+        options.cache_dir = Some(output);
+    }
+    let Some(cache) = open_cache(&options) else {
+        eprintln!("vali: no directory to build into: pass -o DIR or --cache-dir DIR");
+        return ExitCode::from(2);
+    };
+    let (source, identity, host) = match prepare(file, Vec::new(), options) {
+        Ok(prepared) => prepared,
+        Err(code) => return code,
+    };
+    let program = match vali::compile::compile_program_cached(&source, &identity, &*host, &cache) {
         Ok(program) => program,
         Err(e) => {
             eprintln!("vali: {e}");
             return ExitCode::FAILURE;
         }
     };
+    trace_cache(&program.cache);
+    let report = &program.cache;
+    for (library, why) in &report.failed {
+        eprintln!(
+            "vali: {}: could not write {library}: {why}",
+            cache.root().display()
+        );
+    }
+    if !report.failed.is_empty() {
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{}: {} libraries compiled, {} already there",
+        cache.root().display(),
+        report.stored.len(),
+        report.hits.len()
+    );
+    ExitCode::SUCCESS
+}
+
+/// Runs the program in `file`, whose command line is `file` and `args`.
+fn run(file: &str, args: Vec<String>, options: Options) -> ExitCode {
+    let cache = open_cache(&options);
+    let (source, identity, host) = match prepare(file, args, options) {
+        Ok(prepared) => prepared,
+        Err(code) => return code,
+    };
+    let compiled = match &cache {
+        Some(cache) => vali::compile::compile_program_cached(&source, &identity, &*host, cache),
+        None => vali::compile::compile_program(&source, &identity, &*host),
+    };
+    let program = match compiled {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("vali: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    trace_cache(&program.cache);
     let mut isolate = Isolate::<DeferredHeadered>::new(&HeapConfig::default());
     let result = isolate.with(|cx| {
         cx.install_primitives()?;

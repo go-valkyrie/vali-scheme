@@ -80,6 +80,35 @@ fn the_import_graph_is_read_from_the_artifacts() {
     assert_eq!(read, ["host:process-context"]);
 }
 
+/// The prebuilt standard libraries still win with a cache: they are
+/// loaded from their artifacts and never stored in it, and only the
+/// library a host served is.
+#[test]
+fn the_cache_holds_what_a_host_served_not_the_standard_libraries() {
+    vali_stdlib::install();
+    let dir = std::env::temp_dir().join(format!("vali-stdlib-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = vali_compiler::Cache::new(&dir);
+    let source = "(import (scheme base) (srfi 1) (scheme process-context))
+         (list (fold + 0 '(1 2 3)) (get-environment-variable \"HOME\"))";
+    let cold = vali_compiler::compile_program_cached(source, &Identity::new("main"), &Host, &cache)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let stored: Vec<&str> = cold.cache.stored.iter().map(Identity::as_str).collect();
+    assert_eq!(stored, ["host:process-context"]);
+    assert!(loaded(&cold).contains(&"vali:srfi/1"));
+    assert_eq!(run(cold), "(6 \"granted\")");
+    let warm = vali_compiler::compile_program_cached(source, &Identity::new("main"), &Host, &cache)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let hits: Vec<&str> = warm.cache.hits.iter().map(Identity::as_str).collect();
+    assert_eq!(hits, ["host:process-context"]);
+    assert!(warm.cache.stored.is_empty());
+    let loaded = loaded(&warm);
+    assert!(loaded.contains(&"vali:scheme/base") && loaded.contains(&"vali:srfi/1"));
+    assert_eq!(run(warm), "(6 \"granted\")");
+    assert_eq!(cache.stats().unwrap().entries, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_library_a_host_serves_is_compiled_from_its_source() {
     let program = compile(
