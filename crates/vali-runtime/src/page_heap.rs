@@ -211,6 +211,16 @@ impl PageHeap {
         self.source.bytes_used()
     }
 
+    /// Charges memory held outside the heap against its limit.
+    pub fn charge_external(&mut self, bytes: usize) -> Result<(), OutOfMemory> {
+        self.source.charge_external(bytes)
+    }
+
+    /// Gives back what `charge_external` charged.
+    pub fn release_external(&mut self, bytes: usize) {
+        self.source.release_external(bytes);
+    }
+
     /// How many bytes live objects take.
     pub fn bytes_live(&self) -> usize {
         self.live

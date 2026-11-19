@@ -14,7 +14,6 @@ use vali_syntax::{Datum, DatumKind, ScopeSetId, Span, Syntax};
 
 use crate::cx::{Cx, get, put};
 use crate::handle::{Error, Handle};
-use crate::page::OutOfMemory;
 use crate::strategy::Strategy;
 use crate::value::Value;
 
@@ -38,9 +37,21 @@ enum Shape {
 
 impl<S: Strategy> Cx<S> {
     /// A new heap object for `syntax`.
-    pub fn syntax_raw(&mut self, syntax: Syntax) -> Result<Value, OutOfMemory> {
+    pub fn syntax_raw(&mut self, syntax: Syntax) -> Result<Value, Error> {
+        if let Some(max) = self.limits.max_syntaxes
+            && self.syntaxes.len() >= max
+        {
+            return Err(Error::LimitExceeded(crate::Limit::Syntaxes));
+        }
+        self.charge_rust_bytes(crate::cx::SYNTAX_SLOT_BYTES)?;
         let index = Value::fixnum(self.syntaxes.len() as i64).expect("an index fits a fixnum");
-        let v = self.new_object(TypeCode::Syntax, 1, 0)?;
+        let v = match self.new_object(TypeCode::Syntax, 1, 0) {
+            Ok(v) => v,
+            Err(e) => {
+                self.release_rust_bytes(crate::cx::SYNTAX_SLOT_BYTES);
+                return Err(e.into());
+            }
+        };
         // SAFETY: the object was just allocated with its one field.
         unsafe { put(v, Self::LAYOUT.field(TypeCode::Syntax, 0), index.raw()) };
         self.syntaxes.push(syntax);

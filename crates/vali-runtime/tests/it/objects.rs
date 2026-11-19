@@ -185,6 +185,7 @@ fn strings_are_utf8() {
 fn the_heap_limit_is_enforced() {
     let mut cx = Cx::<NoCollection>::new(&HeapConfig {
         max_bytes: Some(2 * PAGE_BYTES),
+        ..Default::default()
     });
     let mut pairs = 0;
     while unsafe { cx.cons_raw(Value::TRUE, Value::TRUE) }.is_ok() {

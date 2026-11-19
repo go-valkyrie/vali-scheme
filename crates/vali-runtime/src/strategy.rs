@@ -55,6 +55,16 @@ pub unsafe trait Allocate: Sized + Send + Sync + 'static {
     /// How many bytes the heap has taken from the system.
     fn bytes_used(heap: &Self::Heap) -> usize;
 
+    /// Charges `bytes` the runtime holds outside the heap, such as the
+    /// table entry of a symbol, against the heap's memory limit (ADR 0023);
+    /// later pages count them too. A heap with no limit accepts any.
+    fn charge_external(_heap: &mut Self::Heap, _bytes: usize) -> Result<(), OutOfMemory> {
+        Ok(())
+    }
+
+    /// Gives back `bytes` charged with `charge_external`.
+    fn release_external(_heap: &mut Self::Heap, _bytes: usize) {}
+
     /// A frozen page for the pool's pairs of `words` words each, laid out
     /// as the strategy lays out a pair page (ADR 0020): its header's
     /// `frozen` field set, and under side counts the side table preset to

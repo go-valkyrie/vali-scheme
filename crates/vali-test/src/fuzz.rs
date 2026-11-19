@@ -436,6 +436,7 @@ fn run<S: Strategy>(module: &Module) -> Result<(&'static str, String), String> {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let mut cx = Cx::<S>::new(&HeapConfig {
             max_bytes: Some(64 << 20),
+            ..Default::default()
         });
         cx.set_fuel_limit(Some(10_000));
         cx.set_max_stack_bytes(1 << 20);

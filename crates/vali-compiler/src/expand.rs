@@ -339,6 +339,9 @@ pub(crate) struct Expander {
     /// Whether what is compiled now is optimised: false while evaluated
     /// code or a REPL input is.
     pub(crate) optimise: bool,
+    /// The caps the host set on its isolate, which the isolates that run
+    /// its macros share (ADR 0023). Unset while building outside an isolate.
+    pub(crate) caps: vali_runtime::HeapConfig,
 }
 
 impl Expander {
@@ -386,6 +389,7 @@ impl Expander {
             last_ir: None,
             last_lowered: None,
             optimise: true,
+            caps: Default::default(),
             repl: None,
             repl_floor: None,
         };
@@ -473,6 +477,15 @@ impl Expander {
         }
         let _ = span;
         Ok(Vec::new())
+    }
+
+    /// Gives the isolates that run macros the caps of the host's isolate,
+    /// those made already and those to come (ADR 0023).
+    pub(crate) fn set_caps(&mut self, caps: &vali_runtime::HeapConfig) {
+        self.caps = *caps;
+        for phase in &mut self.phases {
+            phase.cx.set_caps(caps);
+        }
     }
 
     pub(crate) fn add_native(

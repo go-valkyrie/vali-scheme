@@ -252,6 +252,7 @@ impl Expander {
                 span: None,
                 location: None,
             })?;
+            cx.set_caps(&self.caps);
             for (identity, library) in &self.natives {
                 cx.register_native_library(identity, std::sync::Arc::clone(library));
             }
