@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c8fc0813_19dcf284",
+        "filename": "crates/vali-test/src/lib.rs",
+        "patchSetId": 2
+      },
+      "lineNbr": 273,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:12:40Z",
+      "side": 1,
+      "message": "This ties the `library-path` fixture itself to the shim\u0027s output format. Any later regression test that uses the fixture for something else (it\u0027s documented as a general fixture in the module docs above) would fail unless it printed `summary: `. Either note the requirement in the fixture\u0027s description at the top of the file, or make the check the conformance runner\u0027s: for instance, have `conformance.rs` pass the expected marker in, so the fixture stays general.",
+      "revId": "622389be9f4ec9eace4bfe4a05d0d4bb6e77090c",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
