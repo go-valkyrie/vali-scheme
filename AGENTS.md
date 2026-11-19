@@ -7,7 +7,7 @@ Vali is a Scheme (R7RS-small plus SRFIs and some R6RS names) built to be embedde
 Tasks live in `mise.toml` and run through `bin/mise`, which downloads a pinned mise on first use (`bin/mise install` sets up the toolchain and cargo-deny).
 
 - `bin/mise run check`: everything CI runs (`lint`, `test`, `docs`, `deny`).
-- `bin/mise run test`: `cargo test --workspace`, plus five more passes. The native debugger tests run with `--features native-frames`, the library tests run with `VALI_ROUND_TRIP=1`, the library and bridge tests run with `VALI_NO_OPT=1`, and so do the regressions and the conformance suites.
+- `bin/mise run test`: `cargo test --workspace`, plus five more passes. The native debugger tests run with `--features native-frames`, the library tests run with `VALI_ROUND_TRIP=1`, the whole `it` binaries run with `VALI_NO_OPT=1`, and so do the regressions and the conformance suites. A test that asserts on optimiser output skips itself when `VALI_NO_OPT` is set.
 - `bin/mise run lint`: `cargo fmt --all --check` and Clippy with `-D warnings`.
 - `bin/mise run docs`: rustdoc with `-D warnings`, so a broken intra-doc link fails the build.
 - `bin/mise run bench`, `bin/mise run bench-compare OLD NEW`: the programs in `benchmarks/`.

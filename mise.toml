@@ -18,7 +18,7 @@ description = "Build every crate"
 run = "cargo build --workspace --all-targets"
 
 [tasks.test]
-description = "Run every crate's tests, the native debugger tests with native frames on, the library tests on artifacts, the library and bridge tests unoptimised, and the regressions and conformance suites unoptimised"
+description = "Run every crate's tests, the native debugger tests with native frames on, the library tests on artifacts, the whole `it` binaries unoptimised, and the regressions and conformance suites unoptimised"
 run = [
     # Not the examples: they have no tests, linking them costs time, and
     # Clippy (`lint`) already checks they compile. Naming the targets turns
@@ -30,7 +30,9 @@ run = [
     # first run and these reuse its build: the variables are read at run time.
     # The library and bridge tests are modules of vali-compiler's `it` binary.
     "VALI_ROUND_TRIP=1 cargo test --workspace --test it -- libraries::",
-    "VALI_NO_OPT=1 cargo test --workspace --test it -- libraries:: bridges::",
+    # The unoptimised pass runs every test in the `it` binaries; a test that
+    # asserts on optimiser output skips itself when `VALI_NO_OPT` is set.
+    "VALI_NO_OPT=1 cargo test --workspace --test it",
     "VALI_NO_OPT=1 cargo test --workspace --test regressions",
     "VALI_NO_OPT=1 cargo test --workspace --test conformance",
 ]

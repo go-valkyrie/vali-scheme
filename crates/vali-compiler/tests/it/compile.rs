@@ -19,6 +19,18 @@ impl Loader for NoLibraries {
     }
 }
 
+/// Whether the optimiser is off (`VALI_NO_OPT`). A test that asserts on
+/// the optimiser's output returns early, with a message, when it is: that
+/// is the rule for such tests, so the no-opt pass can run every test in
+/// this binary and nothing in it hides.
+fn skip_without_optimiser(test: &str) -> bool {
+    let off = std::env::var_os("VALI_NO_OPT").is_some();
+    if off {
+        eprintln!("skipping {test}: it asserts on optimiser output and VALI_NO_OPT is set");
+    }
+    off
+}
+
 /// Compiles and runs `source` under strategy `S`, returning its value as
 /// `write` prints it. A collection runs before it is printed, so whatever
 /// only the result's handle keeps, cycles included, must survive it.
@@ -195,6 +207,9 @@ fn loops() {
 
 #[test]
 fn a_loop_needs_no_closure() {
+    if skip_without_optimiser("a_loop_needs_no_closure") {
+        return;
+    }
     // The named let compiles into the body: one function, no closure.
     let module = compile("(let loop ((i 0)) (if (< i 10) (loop (+ i 1)) i))", "test").unwrap();
     assert_eq!(module.functions.len(), 1);
@@ -336,6 +351,9 @@ fn direct_calls_run_as_calls_do() {
 
 #[test]
 fn fib_compiles_to_tight_bytecode() {
+    if skip_without_optimiser("fib_compiles_to_tight_bytecode") {
+        return;
+    }
     let module = compile(
         "(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))",
         "test",
