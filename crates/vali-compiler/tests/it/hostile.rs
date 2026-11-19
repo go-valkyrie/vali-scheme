@@ -66,6 +66,7 @@ fn libraries() -> Map {
                (export shout)
                (begin
                  (define (loud x) (string-append x \"!\"))
+                 (define (quiet x) x)
                  (define-syntax shout
                    (syntax-rules () ((_ e) (loud e))))))"
                 .to_owned(),
@@ -80,7 +81,18 @@ fn libraries() -> Map {
         (
             "(test evil)",
             "(define-library (test evil) (import (scheme base))
-               (export dummy) (begin (define dummy 1)))"
+               (export dummy) (begin (define dummy 1) (define secret 2)))"
+                .to_owned(),
+        ),
+        (
+            "(test pub)",
+            "(define-library (test pub) (import (scheme base))
+               (export shown)
+               (cond-expand (vali (publish hidden)) (else))
+               (begin
+                 (define (shown) 1)
+                 (define (hidden) 2)
+                 (define (other) 3)))"
                 .to_owned(),
         ),
     ])
@@ -196,7 +208,7 @@ fn greet_interface(set: &Set, count: u64, entries: &[u8]) -> Set {
 }
 
 /// `identity`'s artifact with its library record's interface replaced by
-/// `count` entries, `entries` in all.
+/// `count` entries, `entries` in all, and nothing published.
 fn library_interface(set: &Set, identity: &str, count: u64, entries: &[u8]) -> Set {
     let bytes = find(set, identity);
     let library = section(bytes, "library");
@@ -209,6 +221,7 @@ fn library_interface(set: &Set, identity: &str, count: u64, entries: &[u8]) -> S
     let mut new = library[..at].to_vec();
     new.extend(uint(count));
     new.extend_from_slice(entries);
+    new.extend(uint(0)); // published
     with(set, identity, replace_section(bytes, "library", new))
 }
 
@@ -773,6 +786,219 @@ fn a_librarys_code_may_not_link_an_isolate_global() {
     assert!(r.contains("an isolate global"), "{r}");
 }
 
+const SHOUT: &str = "lib:(test shout)";
+const PUB: &str = "lib:(test pub)";
+
+/// `identity`'s artifact with a link to `name` of `library` added to its
+/// code.
+fn linking(set: &Set, identity: &str, library: &str, name: &str) -> Set {
+    let bytes = find(set, identity);
+    let mut ir = vali_dist::decode(&section(bytes, "invoke")).unwrap();
+    ir.globals.push(vali_dist::Global {
+        name: name.into(),
+        link: vali_dist::GlobalLink::Imported(library.into()),
+    });
+    let invoke = vali_dist::encode(&ir).unwrap();
+    with(set, identity, replace_section(bytes, "invoke", invoke))
+}
+
+/// The names `identity`'s artifact publishes, sorted.
+fn published(set: &Set, identity: &str) -> Vec<String> {
+    let library = section(find(set, identity), "library");
+    let mut names: Vec<String> = walk_library(&library)
+        .iter()
+        .filter(|f| f.what == "published.name")
+        .map(|f| Reader::new(&library[f.at..]).str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+const LINKS: &str = "(import (scheme base) (test greet) (test shout) (test pub) (test evil)) 1";
+
+#[test]
+fn a_library_publishes_what_its_macros_can_reach_and_nothing_else() {
+    let set = written(LINKS);
+    // `loud` is in the template of `shout`, with no annotation. `helper`,
+    // `quiet`, `secret` and `other` are reached by no macro.
+    assert_eq!(published(&set, SHOUT), ["loud"]);
+    assert_eq!(published(&set, GREET), Vec::<String>::new());
+    assert_eq!(published(&set, EVIL), Vec::<String>::new());
+    // `(publish hidden)` is the library's own say, for what a walk cannot see.
+    assert_eq!(published(&set, PUB), ["hidden"]);
+}
+
+#[test]
+fn code_may_link_what_a_library_exports_or_publishes_and_no_more() {
+    let set = written(LINKS);
+    for (library, name) in [
+        (GREET, "greet"),
+        (SHOUT, "loud"),
+        (PUB, "shown"),
+        (PUB, "hidden"),
+    ] {
+        let r = attempt(
+            "an accessible link",
+            LINKS,
+            &linking(&set, EVIL, library, name),
+        );
+        assert!(r.starts_with("ran"), "{library} {name}: {r}");
+    }
+    for (library, name) in [
+        (GREET, "helper"),
+        (SHOUT, "quiet"),
+        (PUB, "other"),
+        (EVIL, "secret"),
+    ] {
+        // Evil's own private variable is linked from greet, which loads
+        // after it in the program below; the others are linked from evil.
+        let (hostile, program) = if library == EVIL {
+            (
+                linking(&set, GREET, library, name),
+                "(import (scheme base) (test evil) (test greet) (test shout) (test pub)) 1",
+            )
+        } else {
+            (linking(&set, EVIL, library, name), LINKS)
+        };
+        let r = attempt("a private link", program, &hostile);
+        assert!(r.starts_with("refused"), "{library} {name}: {r}");
+        assert!(
+            r.contains(&format!("links {library}'s private {name}")),
+            "{r}"
+        );
+    }
+}
+
+#[test]
+fn a_link_to_a_library_that_is_not_loaded_is_refused() {
+    let set = written(LINKS);
+    let r = attempt(
+        "a link to nowhere",
+        LINKS,
+        &linking(&set, EVIL, "lib:(test nowhere)", "x"),
+    );
+    assert!(r.contains("which is not loaded"), "{r}");
+}
+
+#[test]
+fn a_transformer_may_not_link_another_librarys_private_variable() {
+    // Evil loads before greet, so greet's transformer's link to its
+    // `secret` is one to a loaded library's private variable.
+    let program = "(import (scheme base) (test evil) (test greet)) (count-args 1 2)";
+    let set = written(program);
+    let bytes = find(&set, GREET);
+    let syntax = section(bytes, "syntax");
+    let fields = walk_syntax(&syntax);
+    let f = fields.iter().find(|f| f.what == "macro.ir").unwrap();
+    let ir_bytes = Reader::new(&syntax[f.at..]).bytes().unwrap().to_vec();
+    let patched = |name: &str| {
+        let mut ir = vali_dist::decode(&ir_bytes).unwrap();
+        ir.globals.push(vali_dist::Global {
+            name: name.into(),
+            link: vali_dist::GlobalLink::Imported(EVIL.into()),
+        });
+        let mut w = Writer::new();
+        w.bytes(&vali_dist::encode(&ir).unwrap());
+        let patched = splice(&syntax, f.at, f.len, &w.finish());
+        with(&set, GREET, replace_section(bytes, "syntax", patched))
+    };
+    let r = attempt(
+        "a transformer linking a private",
+        program,
+        &patched("secret"),
+    );
+    assert!(r.contains("links lib:(test evil)'s private secret"), "{r}");
+    // What the library exports it may link.
+    let r = attempt(
+        "a transformer linking an export",
+        program,
+        &patched("dummy"),
+    );
+    assert!(r.starts_with("ran"), "{r}");
+}
+
+#[test]
+fn a_macro_of_a_library_that_did_not_publish_what_it_expands_to_is_an_error() {
+    // An artifact written before inference, or by another front end, that
+    // lists nothing published: `shout` expands to `loud`, which is private.
+    let program = "(import (scheme base) (test shout)) (shout \"hi\")";
+    let set = written(program);
+    let ran = attempt("as written", program, &set);
+    assert!(ran.starts_with("ran: \"hi!\""), "{ran}");
+    let bytes = find(&set, SHOUT);
+    let library = section(bytes, "library");
+    let at = walk_library(&library)
+        .iter()
+        .find(|f| f.what == "published.count")
+        .unwrap()
+        .at;
+    let mut bare = library[..at].to_vec();
+    bare.extend(uint(0));
+    let bare = with(&set, SHOUT, replace_section(bytes, "library", bare));
+    let r = attempt("nothing published", program, &bare);
+    assert!(r.starts_with("refused"), "{r}");
+    assert!(r.contains("private definition of lib:(test shout)"), "{r}");
+    assert!(r.contains("publish loud"), "{r}");
+}
+
+#[test]
+fn vali_s_own_libraries_publish_what_their_macros_expand_to() {
+    let set = written("(import (scheme base) (scheme lazy) (srfi 64)) 1");
+    let ids: Vec<&str> = set.iter().map(|(i, _)| i.as_str()).collect();
+    for (library, name) in [
+        ("vali:scheme/base", "%guard"),
+        ("vali:scheme/base", "%parameterize"),
+        ("vali:scheme/lazy", "%make-promise"),
+        ("vali:srfi/64", "run-test"),
+    ] {
+        let identity = ids
+            .iter()
+            .find(|i| **i == library)
+            .unwrap_or_else(|| panic!("{library} is not in {ids:?}"));
+        assert!(
+            published(&set, identity).iter().any(|n| n == name),
+            "{identity} does not publish {name}"
+        );
+    }
+}
+
+#[test]
+fn publish_names_a_definition_of_the_library() {
+    let library = Map(vec![(
+        "(test bad)",
+        "(define-library (test bad) (import (scheme base)) (export f)
+           (publish car) (begin (define (f) 1)))"
+            .to_owned(),
+    )]);
+    let r = compile_program_with(
+        "(import (scheme base) (test bad)) 1",
+        &Identity::new("main"),
+        &library,
+        &Artifacts::default(),
+    );
+    assert!(r.is_err_and(|e| {
+        e.message
+            .contains("publish: car is not a variable this library defines")
+    }));
+}
+
+#[test]
+fn source_code_reaches_only_exported_names() {
+    // `helper` is (test greet)'s own, and its scope does not reach a
+    // program that imports the library.
+    let r = compile(
+        "(import (scheme base) (test greet)) (helper \"x\")",
+        &Artifacts::default(),
+    );
+    assert!(r.is_err_and(|e| e.contains("helper is not bound")));
+    // Nor can an import name it.
+    let r = compile(
+        "(import (scheme base) (only (test greet) helper)) 1",
+        &Artifacts::default(),
+    );
+    assert!(r.is_err_and(|e| e.contains("does not export helper")));
+}
+
 #[test]
 fn a_transformer_may_not_link_an_internal_primitive() {
     let set = written(PROGRAM);
@@ -1084,6 +1310,10 @@ impl<'a> Walk<'a> {
         for _ in 0..n {
             self.str("interface.name")?;
             self.binding()?;
+        }
+        let n = self.uint("published.count")?;
+        for _ in 0..n {
+            self.str("published.name")?;
         }
         self.r.end()
     }

@@ -356,13 +356,31 @@ impl Expander {
         Ok(())
     }
 
-    /// A reference to the top-level variable `name` of unit `owner`.
-    pub(super) fn variable(&self, owner: usize, name: String) -> Expr {
+    /// A reference to the top-level variable `name` of unit `owner`, which
+    /// `id` names. Code of another library may reach a variable only if its
+    /// library exports or publishes it (ADR 0012 #9): source code reaches
+    /// only exported names, and a macro's expansion reaches what its library
+    /// published. A macro whose library did not publish what it expands to,
+    /// as one from an artifact that predates or bypasses the compiler's
+    /// inference can, is an error here and not a link the loader refuses.
+    pub(super) fn variable(&self, owner: usize, name: String, id: &Syntax) -> Result<Expr> {
         if owner == self.units.len() - 1 {
-            Expr::Global(name)
-        } else {
-            Expr::Imported(self.units[owner].identity.clone(), name)
+            return Ok(Expr::Global(name));
         }
+        let unit = &self.units[owner];
+        if !unit.linkable.contains(&name) {
+            return Err(error(
+                format!(
+                    "{}: a macro expands to {name}, a private definition of {}, which it \
+                     does not publish; add (publish {name}) to its define-library, or \
+                     export it",
+                    id.as_identifier().unwrap_or(&name),
+                    unit.identity
+                ),
+                id.span(),
+            ));
+        }
+        Ok(Expr::Imported(unit.identity.clone(), name))
     }
 
     /// An error if a transformer uses a variable of the unit being

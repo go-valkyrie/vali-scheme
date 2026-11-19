@@ -35,6 +35,7 @@ use vali_runtime::{Cx, DeferredHeadered, Handle};
 
 mod artifact;
 mod context;
+mod published;
 mod quasiquote;
 mod transformers;
 mod units;
@@ -592,6 +593,7 @@ impl Expander {
         )?;
         let unit = self.units.len() - 1;
         self.units[unit].source = source;
+        self.publish(unit, form, top)?;
         if !round_trip() {
             return self.digested(unit, module);
         }
@@ -1057,7 +1059,7 @@ impl Expander {
                 }
                 Some(Binding::Variable(owner, global)) => {
                     self.global_in_context(owner, &global, stx)?;
-                    Ok(self.variable(owner, global))
+                    self.variable(owner, global, stx)
                 }
                 Some(Binding::Primitive(name)) => Ok(Expr::Free(name)),
                 Some(Binding::Global(name)) => Ok(Expr::ReplGlobal(name)),
