@@ -32,10 +32,6 @@
     ("(member? 1.7976931348623157e308 (\"1.7976931348623157e+308\" \"+inf.0\")) => #t"
      "upstream: Vali prints 1.7976931348623157e308, with no +, which is valid R7RS")
 
-    ;; 6.10 Control features
-    ("(apply +)"
-     "#50: gap: apply with no list argument returns 0 where R7RS 6.10 makes it an error")
-
     ;; 6.14 System interface: the suite's host grants no capabilities, so
     ;; (scheme time) and (scheme file) raise (ADR 0009).
     ("(real? (current-second)) => #t" "#52: not run: the host grants no clock")
