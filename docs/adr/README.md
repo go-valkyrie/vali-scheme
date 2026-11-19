@@ -37,5 +37,6 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0018](0018-library-abi-versions.md) | Library ABI versions | Accepted, not built |
 | [0019](0019-webassembly-target.md) | WebAssembly target | Proposed |
 | [0020](0020-constants-outside-the-heap.md) | Constants live outside the isolate heap | Accepted |
+| [0021](0021-portable-artifacts-and-platform-features.md) | Portable artifacts and platform features | Accepted, not built |
 
 Milestone M0 ended with 0002, 0004, 0005 and 0008 accepted. 0003 stays a proposal. M1's measurements exist, but all five strategy variants stay built and tested until the optimising compiler's ownership inference can be measured too.
