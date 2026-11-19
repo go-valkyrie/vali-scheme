@@ -37,6 +37,41 @@ impl fmt::Display for Digest {
     }
 }
 
+/// A fast 128-bit digest of `bytes`, for telling whether two builds of a
+/// library are the same one: the same bytes, the same digest, in any build
+/// of Vali. It is not collision resistant, and not a defence against
+/// bytes made to collide; where that matters, use [`Digest`].
+pub fn fingerprint(bytes: &[u8]) -> u128 {
+    const A: u64 = 0x9e37_79b9_7f4a_7c15;
+    const B: u64 = 0xc2b2_ae3d_27d4_eb4f;
+    let word = |chunk: &[u8]| u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+    let length = bytes.len() as u64;
+    let (mut a, mut b) = (A ^ length, B.rotate_left(17) ^ length);
+    let mut chunks = bytes.chunks_exact(16);
+    for chunk in &mut chunks {
+        // Two lanes, each fed alternate words, so they run side by side;
+        // the first also takes the second's state, so a word moves both.
+        let (x, y) = (word(&chunk[..8]), word(&chunk[8..]));
+        a = (a ^ x).wrapping_mul(A);
+        b = (b ^ y).wrapping_mul(B);
+        a ^= a >> 29;
+        b ^= b >> 31;
+        a ^= b.rotate_left(23);
+    }
+    let mut rest = [0u8; 16];
+    rest[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+    a = (a ^ word(&rest[..8])).wrapping_mul(A);
+    b = (b ^ word(&rest[8..])).wrapping_mul(B);
+    // Both lanes reach every bit of both outputs.
+    a ^= b.rotate_left(32);
+    b ^= a.rotate_left(32);
+    a = (a ^ (a >> 32)).wrapping_mul(B);
+    b = (b ^ (b >> 32)).wrapping_mul(A);
+    a ^= a >> 29;
+    b ^= b >> 31;
+    (u128::from(a) << 64) | u128::from(b)
+}
+
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -164,6 +199,21 @@ impl Hasher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprints_tell_bytes_apart() {
+        let a: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
+        assert_eq!(fingerprint(&a), fingerprint(&a.clone()));
+        // Any one byte, and the length, change it.
+        for i in 0..a.len() {
+            let mut b = a.clone();
+            b[i] ^= 1;
+            assert_ne!(fingerprint(&a), fingerprint(&b), "byte {i}");
+        }
+        assert_ne!(fingerprint(&a), fingerprint(&a[..999]));
+        assert_ne!(fingerprint(b""), fingerprint(b"\0"));
+        assert_ne!(fingerprint(b"\0"), fingerprint(b"\0\0"));
+    }
 
     #[test]
     fn matches_the_published_vectors() {

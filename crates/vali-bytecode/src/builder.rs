@@ -405,6 +405,7 @@ impl ModuleBuilder {
             functions,
             sources: self.sources,
             body,
+            digest: None,
         }
     }
 }

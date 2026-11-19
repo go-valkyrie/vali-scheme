@@ -37,7 +37,7 @@ mod validate;
 pub use artifact::{Artifact, FORMAT_VERSION, KNOWN_FEATURES, MAGIC, Section};
 pub use bytes::{DecodeError, Reader, Writer};
 pub use encode::{decode, encode};
-pub use hash::{Digest, Hasher};
+pub use hash::{Digest, Hasher, fingerprint};
 
 pub use bounds::{Bounds, bounds};
 pub use ir::{

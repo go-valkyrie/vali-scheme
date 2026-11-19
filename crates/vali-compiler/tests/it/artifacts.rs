@@ -114,6 +114,55 @@ fn a_program_runs_the_same_on_artifacts() {
     assert_eq!(again, artifacts);
 }
 
+/// A library made from source and the same one loaded from its artifact
+/// have one fingerprint, taken from the IR and not the converted code, so
+/// a program compiled one way links to libraries loaded the other.
+#[test]
+fn a_library_has_one_fingerprint_from_source_or_artifact() {
+    let loader = greet();
+    let from_source = compile(&loader, &Artifacts::default()).unwrap();
+    let artifacts = written(&loader);
+    let from_artifacts = compile(&loader, &reading(&artifacts)).unwrap();
+    assert_eq!(from_source.libraries.len(), from_artifacts.libraries.len());
+    for ((identity, a), (_, b)) in from_source.libraries.iter().zip(&from_artifacts.libraries) {
+        // A native library, which has no IR, has none.
+        let native = identity.as_str() == "vali:vali/ports";
+        assert_eq!(a.digest.is_none(), native, "{identity:?}");
+        assert_eq!(b.digest.is_none(), native, "{identity:?}");
+        assert_eq!(a.fingerprint(), b.fingerprint(), "{identity:?}");
+    }
+    // One isolate takes both: the second finds each library loaded and
+    // the same.
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    vali_compiler::load(&mut cx, from_source).unwrap();
+    vali_compiler::load(&mut cx, from_artifacts).unwrap();
+    // A changed library is another.
+    let changed = Map(vec![(
+        "(test greet)",
+        "(define-library (test greet)
+           (import (scheme base))
+           (export greet twice count-args)
+           (begin
+             (define (greet x) x)
+             (define-syntax twice (syntax-rules () ((_ e) (begin e e))))
+             (define-syntax count-args (syntax-rules () ((_ a ...) 0)))))"
+            .to_owned(),
+    )]);
+    let other = compile(&changed, &Artifacts::default()).unwrap();
+    let greet_of = |p: &Program| {
+        p.libraries
+            .iter()
+            .find(|(i, _)| i.as_str() == "lib:(test greet)")
+            .map(|(_, m)| m.fingerprint())
+    };
+    assert_ne!(greet_of(&other), None);
+    assert_ne!(
+        greet_of(&other),
+        greet_of(&compile(&loader, &Artifacts::default()).unwrap())
+    );
+}
+
 /// A library whose constants and macros are deeper or longer than a test
 /// thread's 2 MiB stack could recurse through: it compiles, is written as
 /// an artifact, is read back and runs.

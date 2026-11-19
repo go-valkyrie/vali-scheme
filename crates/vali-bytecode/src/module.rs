@@ -179,6 +179,11 @@ pub struct Module {
     pub sources: Vec<Box<str>>,
     /// The function that runs the module's body.
     pub body: u32,
+    /// A digest of what the module was made from, if its maker has one:
+    /// of the IR's encoding for a library the compiler made, so telling
+    /// it from another build needs none of the converted code.
+    /// [`Module::fingerprint`] is this when it is set.
+    pub digest: Option<u128>,
 }
 
 impl std::hash::Hash for Constant {
@@ -410,16 +415,23 @@ impl Drop for Constant {
 }
 
 impl Module {
-    /// A 128-bit digest of the whole module, code, constants and debug
-    /// information included, that is the same for equal modules (floating
-    /// point constants by their bits). A host that has loaded a module and
-    /// dropped its bytecode can still tell whether another is the same one.
-    /// Deterministic within a build of Vali, not across builds, and not a
-    /// defence against a module made to collide: it guards against mixing
-    /// up two builds of a library by accident.
+    /// A 128-bit digest that tells two builds of a module apart. A host
+    /// that has loaded a module and dropped its bytecode can still tell
+    /// whether another is the same one. It is the module's
+    /// [`digest`](Module::digest) if it has one: the compiler gives each
+    /// library a digest of its IR's encoding, which is the same however
+    /// the library was made, from source or from its artifact. Otherwise
+    /// it is a digest of the whole module, code, constants and debug
+    /// information included, the same for equal modules (floating point
+    /// constants by their bits), deterministic within a build of Vali and
+    /// not across builds. Not a defence against a module made to collide:
+    /// it guards against mixing up two builds of a library by accident.
     pub fn fingerprint(&self) -> u128 {
         use std::hash::{Hash, Hasher};
 
+        if let Some(digest) = self.digest {
+            return digest;
+        }
         /// Two hashers fed alike, one keyed differently.
         struct Digest(std::hash::DefaultHasher, std::hash::DefaultHasher);
         impl Hasher for Digest {
