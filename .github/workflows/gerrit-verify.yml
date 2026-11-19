@@ -15,6 +15,10 @@
 # Needs the repository variable GERRITHUB_CI_URL, the Worker's URL.
 
 name: gerrit-verify
+# repository_dispatch runs always show the default branch; name them after
+# the change instead. Only fields the Worker validated: numbers and the
+# trigger, never the change's own text.
+run-name: "Gerrit ${{ github.event.client_payload.change }},${{ github.event.client_payload.patchset }} (${{ github.event.client_payload.trigger }})"
 
 on:
   repository_dispatch:
@@ -35,19 +39,28 @@ env:
   # jouet is a development aid, not needed to check the code.
   MISE_DISABLE_TOOLS: jouet
   CARGO_TERM_COLOR: always
+  # As in check.yml, for every job, so the rust-cache keys match.
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   verify:
-    name: ${{ matrix.check }} (${{ github.event.client_payload.change }},${{ github.event.client_payload.patchset }})
+    name: ${{ matrix.check }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         check: [lint, test, docs]
-    env:
-      # As in check.yml: line tables are enough for test failures.
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
+      - name: Link the change
+        if: matrix.check == 'lint'
+        env:
+          CHANGE_URL: ${{ github.event.client_payload.url }}
+          CHANGE: ${{ github.event.client_payload.change }}
+          PATCHSET: ${{ github.event.client_payload.patchset }}
+        run: |
+          printf 'Verifying [change %s, patch set %s](%s) at revision %s.\n' \
+            "$CHANGE" "$PATCHSET" "$CHANGE_URL" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Check out the patch set
         run: |
           case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
@@ -58,7 +71,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.check }}
+          # check.yml's job of the same name saves this cache on main;
+          # a patch set restores it but never writes one.
+          shared-key: ${{ matrix.check }}
           save-if: false
 
       - name: Install the pinned toolchain

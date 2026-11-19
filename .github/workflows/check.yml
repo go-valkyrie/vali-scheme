@@ -5,7 +5,9 @@
 #
 # Each part is its own job so they run side by side: in one job Clippy and
 # the test build fight over the runner's cores, and the benchmarks wait for
-# both. Each job keeps its own Rust cache, since rust-cache keys on the job.
+# both. Each job keeps its own Rust cache under a shared key named after
+# the job, which gerrit-verify.yml's matching jobs restore (but never
+# save), so changes under review build on main's last cache.
 #
 # A change only to files the check never reads skips it: prose, agent
 # settings, and the fuzz targets, which fuzz.yml builds. Anything else,
@@ -46,6 +48,11 @@ env:
   # jouet is a development aid, not needed to check the code.
   MISE_DISABLE_TOOLS: jouet
   CARGO_TERM_COLOR: always
+  # Function names and line numbers are enough for test failures, and
+  # full debug info makes every test binary slower to build and link.
+  # Set for every job: rust-cache folds CARGO_* variables into its key,
+  # and gerrit-verify.yml sets the same, so the keys match.
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   lint:
@@ -53,6 +60,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
       - name: Install the pinned toolchain
         run: bin/mise install
       - name: Lint
@@ -60,13 +69,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    env:
-      # Function names and line numbers are enough for test failures, and
-      # full debug info makes every test binary slower to build and link.
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
       - name: Install the pinned toolchain
         run: bin/mise install
       - name: Test
@@ -77,6 +84,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
       - name: Install the pinned toolchain and cargo-deny
         run: bin/mise install
       - name: Docs
@@ -90,6 +99,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
       - name: Install the pinned toolchain
         run: bin/mise install
       - name: Benchmarks
