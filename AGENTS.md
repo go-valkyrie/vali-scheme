@@ -7,7 +7,7 @@ Vali is a Scheme (R7RS-small plus SRFIs and some R6RS names) built to be embedde
 Tasks live in `mise.toml` and run through `bin/mise`, which downloads a pinned mise on first use (`bin/mise install` sets up the toolchain and cargo-deny). `mise.toml` holds only hk; the Rust toolchain and the other development tools are in the `development` environment, `mise.development.toml`, which `.miserc.toml` turns on by default. CI's commit-message check sets `MISE_ENV` empty to install hk alone.
 
 - `bin/mise run check`: everything CI runs (`lint`, `test`, `docs`, `deny`).
-- `bin/mise run test`: `cargo test --workspace`, plus five more passes. The native debugger tests run with `--features native-frames`, the library tests run with `VALI_ROUND_TRIP=1`, the whole `it` binaries run with `VALI_NO_OPT=1`, and so do the regressions and the conformance suites. A test that asserts on optimiser output skips itself when `VALI_NO_OPT` is set.
+- `bin/mise run test`: `cargo test --workspace`, plus six more passes. The native debugger tests run with `--features native-frames`, the library tests run with `VALI_ROUND_TRIP=1`, the whole `it` binaries run with `VALI_NO_OPT=1`, and so do the regressions and the conformance suites. A test that asserts on optimiser output skips itself when `VALI_NO_OPT` is set. The same three run again with `VALI_EAGER=1`, which converts every function of a library as it loads, where the default converts each as it is first called.
 - `bin/mise run lint`: `cargo fmt --all --check` and Clippy with `-D warnings`.
 - `bin/mise run docs`: rustdoc with `-D warnings`, so a broken intra-doc link fails the build.
 - `bin/mise run bench`, `bin/mise run bench-compare OLD NEW`: the programs in `benchmarks/`.
@@ -32,7 +32,7 @@ Source goes through these stages:
 1. `vali-syntax` reads it: lexer, event parser, spans, scope sets and syntax objects.
 2. The expander in `vali-compiler` lowers it to the IR, whose types live in `vali-dist`.
 3. `vali-opt` optimises the IR for each library.
-4. `vali-bytecode` converts it to run-format bytecode and validates it.
+4. `vali-bytecode` converts it to run-format bytecode and validates it, a library's functions each on its first call.
 5. The VM in `vali-runtime` runs it.
 
 Two formats, two policies:
@@ -41,7 +41,7 @@ Two formats, two policies:
 
 Until 0.0.1 is released, change either format, and the IR, whenever a design calls for it, and don't bump `FORMAT_VERSION` in `vali-dist` or `vali-bytecode`. Leave format version bumps out of ADRs too. Stale artifacts are caught by their build stamp and source fingerprint, not the version.
 
-The standard libraries' Scheme sources are in `crates/vali-compiler/lib/` (`scheme/`, `srfi/`, `vali/`). `vali-stdlib`'s build script compiles them ahead of time and embeds the artifacts, so editing a library rebuilds `vali-stdlib` and everything that depends on it. `VALI_NO_PREBUILT=1` makes the `vali` CLI compile the libraries from source instead. `VALI_NO_OPT=1` turns off the optimiser, and `VALI_ROUND_TRIP=1` round-trips artifacts through their encoding.
+The standard libraries' Scheme sources are in `crates/vali-compiler/lib/` (`scheme/`, `srfi/`, `vali/`). `vali-stdlib`'s build script compiles them ahead of time and embeds the artifacts, so editing a library rebuilds `vali-stdlib` and everything that depends on it. `VALI_NO_PREBUILT=1` makes the `vali` CLI compile the libraries from source instead. `VALI_NO_OPT=1` turns off the optimiser, `VALI_ROUND_TRIP=1` round-trips artifacts through their encoding, and `VALI_EAGER=1` (or `vali_compiler::set_eager_conversion`) converts a library's functions to run-format bytecode as it loads, not on each one's first call.
 
 ## Docs and decisions
 

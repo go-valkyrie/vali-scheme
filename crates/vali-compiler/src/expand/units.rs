@@ -10,8 +10,10 @@ pub(super) struct Unit {
     pub(super) interface: HashMap<String, Binding>,
     /// The units it imports, which its instances need first.
     pub(super) imports: Vec<usize>,
-    /// Its compiled module, once there is one.
-    pub(super) module: Option<Module>,
+    /// Its compiled module, once there is one. A library's converts to
+    /// bytecode as its functions are first called, unless eager conversion
+    /// is asked for (`crate::eager_conversion`).
+    pub(super) module: Option<Converted>,
     /// Whether it is one of Vali's own libraries, or a program of Vali's
     /// own tests, which may import `(vali primitive)`.
     pub(super) own: bool,
@@ -168,6 +170,34 @@ pub(super) fn converted(ir: &vali_dist::Module) -> Result<Module> {
     })
 }
 
+/// The module of a unit that is not a library, which converts whole.
+fn whole(converted: Converted) -> Module {
+    match converted {
+        Converted::Eager(module) => module,
+        Converted::Lazy(_) => unreachable!("only a library converts lazily"),
+    }
+}
+
+/// `ir` converted for loading as a library: to be converted a function at a
+/// time as each is first called, unless `lazy` is false or eager conversion
+/// is asked for. As for [`converted`], loading validates the result.
+pub(super) fn converted_library(ir: &Arc<vali_dist::Module>, lazy: bool) -> Result<Converted> {
+    let failed = |e: vali_bytecode::ConvertError| CompileError {
+        message: format!("{}: {e}", ir.name),
+        span: None,
+        location: None,
+    };
+    if lazy && !crate::eager_conversion() {
+        vali_bytecode::convert_lazy(Arc::clone(ir))
+            .map(Converted::Lazy)
+            .map_err(failed)
+    } else {
+        vali_bytecode::convert(ir)
+            .map(Converted::Eager)
+            .map_err(failed)
+    }
+}
+
 impl Expander {
     /// The unit for a native library (ADR 0016 #8): a module whose
     /// variables link straight to the library's functions as it loads, and
@@ -206,7 +236,7 @@ impl Expander {
             identity: identity.to_owned(),
             interface,
             imports: Vec::new(),
-            module: Some(module.clone()),
+            module: Some(Converted::Eager(module.clone())),
             own: false,
             repl: false,
             syntax: None,
@@ -503,7 +533,7 @@ impl Expander {
         bytes: &[u8],
         own: bool,
         source: Option<Digest>,
-    ) -> Result<Module> {
+    ) -> Result<Converted> {
         let fail = |message: String| CompileError {
             message: format!("{identity}: {message}"),
             span: None,
@@ -563,11 +593,12 @@ impl Expander {
                 "it links {name}, an isolate global, which only a REPL's input may"
             )));
         }
-        let mut module = converted(&ir)?;
+        let ir = Arc::new(ir);
+        let mut module = converted_library(&ir, true)?;
         // The digest that tells this build from another is the IR's
         // encoding's, as `library` computes it for a library made from
         // source.
-        module.digest = Some(Digest::of(section("invoke")?).0);
+        module.module_mut().digest = Some(Digest::of(section("invoke")?).0);
         // The unit goes in first: what it exports names it.
         let index = self.units.len();
         self.units.push(Unit {
@@ -579,7 +610,7 @@ impl Expander {
             repl: false,
             syntax: None,
             key: identity.to_owned(),
-            ir: Some(Arc::new(ir)),
+            ir: Some(ir),
             export_hash: None,
             artifact_hash: None,
             source: None,
@@ -596,7 +627,7 @@ impl Expander {
             }
             let syntax = artifact::decode(section("syntax")?, &resolve, &mut self.sources)?;
             self.check_export(index, own, &record, &syntax)
-                .map_err(&fail)?;
+                .map_err(fail)?;
             let unit = &mut self.units[index];
             // The records of what it imports must agree.
             if record.imports != imported {
@@ -803,10 +834,13 @@ impl Expander {
             let around = self.scope(ScopeKind::Library)?;
             let imported = self.context.intern(&[around]).map_err(too_many)?;
             let top = self.context.intern(&[around, scope]).map_err(too_many)?;
-            return self.unit(identity, imports, imported, top, body, &[], span, false);
+            return self
+                .unit(identity, imports, imported, top, body, &[], span, false)
+                .map(whole);
         }
         let top = self.context.intern(&[scope]).map_err(too_many)?;
         self.unit(identity, imports, top, top, body, &[], span, false)
+            .map(whole)
     }
 
     /// Expands and compiles a REPL's input in the interaction environment
@@ -841,7 +875,9 @@ impl Expander {
             }
         };
         // Imports bound before are bound again, which is a no-op.
-        let module = self.unit(identity, imports, imported, top, body, &[], span, true);
+        let module = self
+            .unit(identity, imports, imported, top, body, &[], span, true)
+            .map(whole);
         // The context lives as long as the REPL does, so what only saves
         // time is dropped with each input, or it grows for the whole
         // session. The next input rebuilds what it uses.
@@ -901,7 +937,7 @@ impl Expander {
         exports: &[ExportSpec],
         span: Span,
         repl: bool,
-    ) -> Result<Module> {
+    ) -> Result<Converted> {
         let index = self.units.len();
         // A new unit expands with fresh expansion-time instances, and
         // numbers what it makes from zero, so its output depends only on
@@ -914,6 +950,7 @@ impl Expander {
         self.stack.clear();
         self.floors.clear();
         let imported_at = imported;
+        let library = std::mem::take(&mut self.next_library);
         let mut imported = Vec::new();
         for set in imports {
             if let Some(&unit) = self.by_name.get(set.library()) {
@@ -968,8 +1005,8 @@ impl Expander {
                 ));
             }
         }
-        let module = self.module(lambda, identity)?;
-        let ir = self.last_ir.clone().map(Arc::new);
+        let module = self.module(lambda, identity, library)?;
+        let ir = self.last_ir.clone();
         let unit = &mut self.units[index];
         unit.interface = interface;
         unit.module = Some(module.clone());
@@ -980,12 +1017,19 @@ impl Expander {
     /// Compiles the `lambda` `body` as a module's body, exporting every
     /// variable the module defines under its own name. Everything
     /// compiled goes through the IR (ADR 0017): the tree is
-    /// lowered to it, then converted to run-format bytecode.
-    pub(super) fn module(&mut self, body: LambdaId, name: &str) -> Result<Module> {
+    /// lowered to it, then converted to run-format bytecode: for a
+    /// `library`, as its functions are first called (`converted_library`).
+    pub(super) fn module(
+        &mut self,
+        body: LambdaId,
+        name: &str,
+        library: bool,
+    ) -> Result<Converted> {
         let lowered = self.lower_only(body, name)?;
         let mut ir = lowered.clone();
         self.optimised(&mut ir);
-        let module = converted(&ir)?;
+        let ir = Arc::new(ir);
+        let module = converted_library(&ir, library)?;
         self.last_lowered = Some(lowered);
         self.last_ir = Some(ir);
         Ok(module)

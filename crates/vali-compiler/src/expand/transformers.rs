@@ -236,7 +236,7 @@ impl Expander {
             .expect("an imported library is compiled before its importers");
         let identity = self.units[unit].identity.clone();
         let cx = self.phase_isolate(phase).map_err(made)?;
-        let id = cx.load_library(module)?;
+        let id = cx.load_converted(module)?;
         cx.run(id)?;
         cx.register_library(&identity, id);
         self.phases[phase].units.insert(unit);
