@@ -121,9 +121,9 @@ pub fn optimise(module: &mut Module) {
     compact_constants(module);
     compact_variables(module);
     debug_assert!(
-        vali_dist::validate(module).is_ok(),
+        vali_dist::validate_structure(module).is_ok(),
         "the optimiser produced invalid IR: {:?}",
-        vali_dist::validate(module)
+        vali_dist::validate_structure(module)
     );
 }
 

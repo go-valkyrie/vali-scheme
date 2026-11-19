@@ -24,12 +24,14 @@
 //! separate, private format (ADR 0005), so the two can change apart.
 
 mod artifact;
+mod bounds;
 mod bytes;
 mod encode;
 mod hash;
 mod ir;
 mod primitive;
 mod print;
+
 mod validate;
 
 pub use artifact::{Artifact, FORMAT_VERSION, KNOWN_FEATURES, MAGIC, Section};
@@ -37,9 +39,13 @@ pub use bytes::{DecodeError, Reader, Writer};
 pub use encode::{decode, encode};
 pub use hash::{Digest, Hasher};
 
+pub use bounds::{Bounds, bounds};
 pub use ir::{
     Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, Inlined, JoinId,
     Module, Operand, Position, Term, TermId, Value, Var,
 };
 pub use primitive::{Effects, Primitive};
-pub use validate::{ValidationError, validate};
+pub use validate::{
+    MAX_CODE_WORDS, MAX_CONSTANTS, MAX_COUNT, MAX_POOL, MAX_SLOT, ValidationError, validate,
+    validate_limits, validate_structure,
+};
