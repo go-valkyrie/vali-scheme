@@ -117,6 +117,12 @@ pub(crate) fn install<S: Strategy>(cx: &mut Cx<S>) -> Result<(), Error> {
     for (name, arity, f) in natives {
         cx.define_primitive(name, arity, f)?;
     }
+    cx.set_extra_features(
+        crate::loader::srfi_features()
+            .into_iter()
+            .map(String::into_boxed_str)
+            .collect(),
+    );
     crate::eval::install(cx)
 }
 
