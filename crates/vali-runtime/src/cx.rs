@@ -452,6 +452,50 @@ impl<S: Strategy> Cx<S> {
         Ok(pair)
     }
 
+    /// A new immutable pair (SRFI 116): a header, then `icar` and `icdr`.
+    /// It is a different type from a pair and cannot be changed.
+    ///
+    /// # Safety
+    ///
+    /// `car` and `cdr` must be valid values.
+    pub unsafe fn ipair_raw(&mut self, car: Value, cdr: Value) -> Result<Value, OutOfMemory> {
+        let pair = self.new_object(TypeCode::Ipair, 2, 0)?;
+        // SAFETY: the ipair was just allocated with both fields.
+        unsafe {
+            self.init_field(pair, Self::LAYOUT.field(TypeCode::Ipair, 0), car);
+            self.init_field(pair, Self::LAYOUT.field(TypeCode::Ipair, 1), cdr);
+        }
+        Ok(pair)
+    }
+
+    /// Whether `v` is an immutable pair.
+    #[inline(always)]
+    pub(crate) fn is_ipair(&self, v: Value) -> bool {
+        self.is_other(v, TypeCode::Ipair)
+    }
+
+    /// An immutable pair's `icar`.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live immutable pair.
+    #[inline(always)]
+    pub unsafe fn icar(&self, v: Value) -> Value {
+        // SAFETY: passed on to the caller.
+        unsafe { Value::from_raw(get(v, Self::LAYOUT.field(TypeCode::Ipair, 0))) }
+    }
+
+    /// An immutable pair's `icdr`.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live immutable pair.
+    #[inline(always)]
+    pub unsafe fn icdr(&self, v: Value) -> Value {
+        // SAFETY: passed on to the caller.
+        unsafe { Value::from_raw(get(v, Self::LAYOUT.field(TypeCode::Ipair, 1))) }
+    }
+
     /// A new flonum.
     pub fn flonum_raw(&mut self, x: f64) -> Result<Value, OutOfMemory> {
         let v = self.new_object(TypeCode::Flonum, 1, 0)?;
