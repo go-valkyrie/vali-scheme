@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "2e5eb839_82f711e1",
+        "filename": "docs/adr/0022-lint-framework.md",
+        "patchSetId": 7
+      },
+      "lineNbr": 24,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T15:11:41Z",
+      "side": 1,
+      "message": "Naming clash: the compiler already has an `own` flag on the libraries a loader serves (`library.own` in `lib.rs`, `Unit::own`), and there it means one of Vali\u0027s own libraries. Those may import `(vali primitive)` and link the `%` internal primitives. The lint origin here calls the user\u0027s code *own* and the standard library a dependency, which is close to the opposite set.\n\nIf the loader API grows a field for this, a host that sets the existing flag thinking it\u0027s the lint origin would give its libraries the internal primitives. A different word for the lint origin (*local*, *first-party* or *workspace*), in a separate field, would keep the two apart.",
+      "revId": "81326846215b36e246b91e5653ee2f4dbb2a969d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
