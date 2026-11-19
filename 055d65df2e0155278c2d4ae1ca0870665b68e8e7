@@ -16,6 +16,24 @@
       "message": "This is fine for what the doc comment says it\u0027s for: telling two builds apart when they were mixed up by accident.\n\nSince 1260697, though, untrusted artifacts are something the loader is built to take. `is_loaded_from` decides whether a library already in the isolate is \"the same\" as the one a program was compiled against. With a hash this simple, someone who controls one of the two artifacts may be able to build a collision, so the program would link against code it wasn\u0027t compiled with. That only matters if an isolate mixes code from parties that don\u0027t trust each other, which ADR 0008 may already rule out. Either way, a sentence here or in ADR 0020 saying fingerprint equality is never a trust decision would settle it. The other option is the SHA-256 `artifact_hash` the loader computes for dependency checks, if that\u0027s already at hand when a library loads from an artifact.",
       "revId": "055d65df2e0155278c2d4ae1ca0870665b68e8e7",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "4f6fd0f7_c053340e",
+        "filename": "crates/vali-dist/src/hash.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 44,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:47:46Z",
+      "side": 1,
+      "message": "Done in patch set 2: the digest is now the full SHA-256 of the IR\u0027s encoding, so equal fingerprints mean the same IR. Only hand-built and native modules keep the 128-bit structural digest, and the doc comment says so.",
+      "parentUuid": "5a357f31_a7b03a39",
+      "revId": "055d65df2e0155278c2d4ae1ca0870665b68e8e7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
