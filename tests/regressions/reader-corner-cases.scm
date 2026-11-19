@@ -100,6 +100,14 @@
 ;; A label must stand for some datum, not only for a label being defined.
 (test-error (read-string-datum "#0=#0#"))
 (test-error (read-string-datum "#0=#1=#0#"))
+;; A label defined inside a datum comment ends with the comment.
+(test-error (read-string-datum "(#;#0=a #0#)"))
+(test-error (read-string-datum "(#;(b #0=a) #0#)"))
+(test-error (read-string-datum "(#;#;#0=a #1=b #0#)"))
+(test-equal '(b b) (read-string-datum "(#;#0=a #0=b #0#)"))
+;; A label defined before the comment stays visible in it and after it.
+(let ((x (read-string-datum "(#0=(a) #;#0# #0#)")))
+  (test-eq (car x) (cadr x)))
 
 ;; Deep nesting reads without overflowing the native stack.
 (define deep 100000)
