@@ -32,14 +32,6 @@
     ("(member? 1.7976931348623157e308 (\"1.7976931348623157e+308\" \"+inf.0\")) => #t"
      "upstream: Vali prints 1.7976931348623157e308, with no +, which is valid R7RS")
 
-    ;; 6.14 System interface: the suite's host grants no capabilities, so
-    ;; (scheme time) and (scheme file) raise (ADR 0009).
-    ("(real? (current-second)) => #t" "#52: not run: the host grants no clock")
-    ("(inexact? (current-second)) => #t" "#52: not run: the host grants no clock")
-    ("(exact? (current-jiffy)) => #t" "#52: not run: the host grants no clock")
-    ("(file-exists? \".\") => #t" "#52: not run: the host grants no file access")
-    ("(file-exists? \" no such file \") => #f" "#52: not run: the host grants no file access")
-
     ;; Read syntax: write must put bars around symbols that read as numbers
     ("(get-output-string out) => \"|+NaN.0abc|\""
      "upstream: +NaN.0abc is not a number, so no bars are needed to read it back; chibi writes them anyway")))

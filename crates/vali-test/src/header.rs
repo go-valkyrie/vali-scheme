@@ -13,6 +13,10 @@ pub struct Header {
     pub kind: Kind,
     /// For [`Kind::Host`], the host fixture it needs.
     pub host: Option<String>,
+    /// For [`Kind::Host`], the capabilities the host grants the test, which
+    /// it has none of unless it asks: [`Grant::Clock`], and [`Grant::Read`]
+    /// for files below the test's own directory.
+    pub grants: Vec<Grant>,
     /// If the test is expected to fail, why.
     pub expect_fail: Option<String>,
 }
@@ -28,6 +32,16 @@ pub enum Kind {
     Performance,
     /// Tracked over time rather than passed or failed.
     Benchmark,
+}
+
+/// A capability a host test can ask for with `grant:` (ADR 0009).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grant {
+    /// The clock, serving `(scheme time)`.
+    Clock,
+    /// Reading files, and asking whether they exist, below the test's own
+    /// directory, serving `(scheme file)`.
+    Read,
 }
 
 /// A problem with a header.
@@ -51,7 +65,8 @@ impl std::error::Error for HeaderError {}
 /// with `;;;`.
 ///
 /// Keys are `requirement` and `kind` (both required), `found-in`, `host`
-/// (required for, and only allowed with, `kind: host`) and `expect`, whose
+/// (required for, and only allowed with, `kind: host`), `grant` (only with
+/// `kind: host`: `clock`, `read`, or both, comma separated) and `expect`, whose
 /// value is `fail` or `fail, <reason>`. Unknown or repeated keys are errors,
 /// so a typo can't silently drop an `expect` line.
 pub fn parse_header(source: &str) -> Result<Header, HeaderError> {
@@ -59,6 +74,7 @@ pub fn parse_header(source: &str) -> Result<Header, HeaderError> {
     let mut found_in = None;
     let mut kind = None;
     let mut host = None;
+    let mut grant = None;
     let mut expect_fail = None;
     let mut last_line = 0;
 
@@ -81,6 +97,7 @@ pub fn parse_header(source: &str) -> Result<Header, HeaderError> {
             "found-in" => &mut found_in,
             "kind" => &mut kind,
             "host" => &mut host,
+            "grant" => &mut grant,
             "expect" => &mut expect_fail,
             _ => return Err(error(format!("unknown key `{key}`"))),
         };
@@ -118,6 +135,27 @@ pub fn parse_header(source: &str) -> Result<Header, HeaderError> {
             message: "`host` is required for, and only allowed with, `kind: host`".to_owned(),
         });
     }
+    let mut grants = Vec::new();
+    if let Some(list) = grant {
+        if kind != Kind::Host {
+            return Err(HeaderError {
+                line: last_line,
+                message: "`grant` is only allowed with `kind: host`".to_owned(),
+            });
+        }
+        for name in list.split(',').map(str::trim) {
+            grants.push(match name {
+                "clock" => Grant::Clock,
+                "read" => Grant::Read,
+                other => {
+                    return Err(HeaderError {
+                        line: last_line,
+                        message: format!("unknown grant `{other}`; use clock or read"),
+                    });
+                }
+            });
+        }
+    }
     let expect_fail = match expect_fail {
         None => None,
         Some(value) => match value.strip_prefix("fail") {
@@ -137,6 +175,7 @@ pub fn parse_header(source: &str) -> Result<Header, HeaderError> {
         found_in,
         kind,
         host,
+        grants,
         expect_fail,
     })
 }
@@ -159,6 +198,15 @@ mod tests {
         assert_eq!(header.found_in.as_deref(), Some("scheme-rs"));
         assert_eq!(header.kind, Kind::Benchmark);
         assert_eq!(header.expect_fail.as_deref(), Some("until M1"));
+    }
+
+    #[test]
+    fn grants() {
+        let header = parse_header(
+            ";;; requirement: r\n;;; kind: host\n;;; host: h\n;;; grant: clock, read\n",
+        )
+        .unwrap();
+        assert_eq!(header.grants, [Grant::Clock, Grant::Read]);
     }
 
     #[test]
@@ -188,5 +236,12 @@ mod tests {
         );
         assert!(err(";;; requirement: r\n;;; kind: quick\n").contains("unknown kind"));
         assert_eq!(err(";;; nothing here\n"), "expected `;;; key: value`");
+        assert!(
+            err(";;; requirement: r\n;;; kind: scheme\n;;; grant: clock\n").contains("`grant`")
+        );
+        assert!(
+            err(";;; requirement: r\n;;; kind: host\n;;; host: h\n;;; grant: write\n")
+                .contains("unknown grant")
+        );
     }
 }
