@@ -688,3 +688,18 @@ fn equal_pairs_and_vectors_are_not_shared() {
     assert_eq!(m.constant(vector()), 2);
     assert_eq!(m.constant(vector()), 3);
 }
+
+/// A finished module holds no spare capacity: evaluated code stays loaded
+/// as long as its module does (#31), and `Vec` growth would leave most of
+/// a small module's buffers empty.
+#[test]
+fn finished_modules_hold_no_spare_capacity() {
+    let module = fib_module();
+    assert_eq!(module.functions.capacity(), module.functions.len());
+    assert_eq!(module.constants.capacity(), module.constants.len());
+    assert_eq!(module.variables.capacity(), module.variables.len());
+    for f in &module.functions {
+        assert_eq!(f.code.capacity(), f.code.len());
+        assert_eq!(f.positions.capacity(), f.positions.len());
+    }
+}

@@ -181,6 +181,12 @@ impl FunctionBuilder {
         let end = self.code.len();
         self.positions.retain(|p| (p.pc as usize) < end);
         self.scopes.retain(|s| (s.pc as usize) < end);
+        // A function stays in memory as long as its module does, and
+        // `Vec` growth leaves up to half of each buffer empty.
+        self.code.shrink_to_fit();
+        self.positions.shrink_to_fit();
+        self.inlined.shrink_to_fit();
+        self.scopes.shrink_to_fit();
         Ok(Function {
             name: self.name,
             arity: self.arity,
@@ -352,13 +358,21 @@ impl ModuleBuilder {
     /// # Panics
     ///
     /// If a declared function was never defined.
-    pub fn finish(self, body: u32) -> Module {
-        let functions = self
+    pub fn finish(mut self, body: u32) -> Module {
+        // As for a function: a module that is evaluated and kept loaded
+        // pays for every spare slot, which for a small expression is
+        // most of its bytes.
+        self.constants.shrink_to_fit();
+        self.variables.shrink_to_fit();
+        self.exports.shrink_to_fit();
+        self.sources.shrink_to_fit();
+        let mut functions: Vec<Function> = self
             .functions
             .into_iter()
             .enumerate()
             .map(|(i, f)| f.unwrap_or_else(|| panic!("function {i} declared but not defined")))
             .collect();
+        functions.shrink_to_fit();
         Module {
             name: self.name,
             constants: self.constants,
