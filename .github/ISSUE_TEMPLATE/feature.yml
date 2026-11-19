@@ -1,0 +1,32 @@
+name: Feature request
+description: Something Vali should do that it doesn't, such as a missing R7RS or SRFI feature, or a host API.
+type: Feature
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The problem this would solve, in your own terms, rather than the solution you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: The feature, and how you'd expect to use it. Example code is welcome.
+    validations:
+      required: true
+
+  - type: input
+    id: standard
+    attributes:
+      label: Standard or spec, if any
+      description: An R7RS section, SRFI number, or R6RS name this comes from.
+      placeholder: "R7RS 6.13, SRFI 133"
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do now
+      description: Any workaround you use today, or alternatives you've considered.

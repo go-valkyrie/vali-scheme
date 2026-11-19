@@ -1,0 +1,86 @@
+name: Bug report
+description: Vali gives a wrong answer, crashes, hangs, leaks or rejects valid code.
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. A small program that shows it is the most useful thing you can give us.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happens
+      description: One or two sentences on what goes wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest Scheme program, or Rust host code, that shows the problem, and how you run it (REPL, `vali` CLI, embedded).
+      render: scheme
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead, with the full error message or backtrace.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Vali version
+      description: The crate version, or the commit if you built from source.
+      placeholder: "0.0.1, or 1a2b3c4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: strategy
+    attributes:
+      label: Memory strategy
+      description: The strategy the isolate uses, if you chose one.
+      options:
+        - Default
+        - none
+        - deferred
+        - deferred-side
+        - precise
+        - precise-side
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: optimiser
+    attributes:
+      label: Does it happen with the optimiser off?
+      description: "Run with `VALI_NO_OPT=1`. If the answer changes, that narrows it down a lot."
+      options:
+        - Didn't try
+        - "Yes, it still happens"
+        - "No, it only happens with the optimiser on"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and architecture, Rust version if you embed Vali, and anything else that might matter.
+      placeholder: "macOS 26 on arm64, Rust 1.97"
