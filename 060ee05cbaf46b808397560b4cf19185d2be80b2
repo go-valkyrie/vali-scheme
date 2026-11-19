@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "69ec59c3_be0c047f",
+        "filename": "crates/vali-compiler/src/expand/artifact.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 712,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:38:13Z",
+      "side": 1,
+      "message": "Done in patch set 2. `depths()` and the template ellipsis counts now go through `small()`, capped at `MAX_DECODED_NESTING`. Repeat variable numbers moved to their own `variables()`.",
+      "parentUuid": "9df6e9b9_be764596",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "d2299aa5_2ca2da91",
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T14:03:39Z",
       "side": 1,
       "message": "Loading never checks that the decoded export\u0027s `macros` and `compiled` entries belong to the library being loaded. A `MacroId` names its unit, and a compiled key names its unit too. So a library can ship an entry under another unit\u0027s id or key, and `import_syntax` copies it in with `own: None`, first one wins.\n\nReproduced: `(test evil)`\u0027s export carried a macro under greet\u0027s `MacroId` that expands to `\"hijacked\"`. A library importing evil, then greet, got evil\u0027s version of greet\u0027s `twice`.\n\nFix: at load, refuse any macro whose `id.unit` isn\u0027t this unit\u0027s index, and any compiled key other than `record.key`. Then `own: None` is safe, since every export holds only its own.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "b9232d16_627a1e96",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 506,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:38:13Z",
+      "side": 1,
+      "message": "Done in patch set 2. `check_export` refuses a syntax export that holds another unit\u0027s macro, or compiled syntax under a key other than its own. Re-exporting another library\u0027s macro through a binding still works. `a_library_cannot_define_another_librarys_macros` and `a_library_cannot_supply_another_librarys_compiled_syntax` cover it.",
+      "parentUuid": "d2299aa5_2ca2da91",
       "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
@@ -52,6 +88,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "92d300fb_f0e2deb9",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 561,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:38:13Z",
+      "side": 1,
+      "message": "Done in patch set 2. Transformer IR goes through `links_internal`, which allows only `%quote-syntax`, `%syntax-match` and `%syntax-build`, and `a_transformer_may_not_link_an_internal_primitive` covers it. The rule itself refuses `define-record-type` in user code, though; see the new comment on `links_internal` in patch set 2.",
+      "parentUuid": "fd0ae896_787e3d39",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "406bfb68_2b43654a",
@@ -69,6 +123,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "d46780a4_aa3b3c85",
+        "filename": "crates/vali-compiler/src/pattern.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 669,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:38:13Z",
+      "side": 1,
+      "message": "Done in patch set 2. It uses `saturating_add` now, and the counts are bounded at decode as well.",
+      "parentUuid": "406bfb68_2b43654a",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "7e03c328_c69db5dd",
@@ -82,6 +154,24 @@
       "writtenOn": "2026-11-19T14:03:39Z",
       "side": 1,
       "message": "`Pattern::remap`, and `Template::remap` below it, recurse once per level with no `stacker::maybe_grow`, though `build` and the walk at the top of the file use it. So the decoder\u0027s 2,000-level limit doesn\u0027t stop the remap from overflowing a small stack.\n\nReproduced: a `twice` clause pattern 1,999 lists deep aborted on a 2 MB test thread (opt-level 1), with thousands of `Pattern::remap` frames in gdb. 500, 999 and 1,500 were fine. Source patterns are capped at 1,000, so this is new with the doubled limit. The existing deep tests use 200,000, which decode refuses, so nothing exercises the limit itself. Wrap both in `maybe_grow` (or lower the limit), and add a test at the limit.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "9e7c3c7c_e1225376",
+        "filename": "crates/vali-compiler/src/pattern.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 698,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:38:13Z",
+      "side": 1,
+      "message": "Done in patch set 2. Both remaps, `Builder::repeat` and `drivers` grow the stack in segments, and `a_pattern_at_the_nesting_limit_loads_on_a_small_stack` covers it.",
+      "parentUuid": "7e03c328_c69db5dd",
       "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
