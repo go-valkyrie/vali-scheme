@@ -148,7 +148,7 @@ impl<B> Symbol<B> {
 
 /// The scope an entry with `scopes` is kept by.
 fn key(context: &ScopeContext, scopes: ScopeSetId) -> Option<Scope> {
-    context.scopes(scopes).last().copied()
+    context.newest(scopes)
 }
 
 impl<S, B> Default for BindingTable<S, B> {
@@ -395,7 +395,7 @@ impl<S: Eq + Hash + Clone, B> BindingTable<S, B> {
         };
         // `chain` now holds the sets above the base, newest first.
         while let Some(set) = chain.pop() {
-            let newest = *context.scopes(set).last().expect("not empty");
+            let newest = context.newest(set).expect("not empty");
             if let Some(entries) = sym.by_key.get(&Some(newest)) {
                 let mut all = result;
                 let fresh = entries
@@ -419,7 +419,7 @@ impl<S: Eq + Hash + Clone, B> BindingTable<S, B> {
     ) {
         let mut memo = sym.memo.lock().expect("memo");
         memo.by_set.insert((set, phase), maximal.to_vec());
-        let newest = context.scopes(set).last().copied();
+        let newest = context.newest(set);
         if newest > memo.newest {
             memo.newest = newest;
         }
@@ -445,17 +445,17 @@ impl<S: Eq + Hash + Clone, B> BindingTable<S, B> {
         phase: Phase,
     ) -> Vec<At> {
         let by_key = &sym.by_key;
-        let own = context.scopes(scopes);
         let keep = |e: &Entry<B>| e.phases.contains(phase) && context.is_subset(e.scopes, scopes);
-        let mut keyed: Vec<At> = if by_key.len() <= own.len() {
+        let mut keyed: Vec<At> = if by_key.len() <= context.len(scopes) {
             by_key
                 .iter()
-                .filter(|(k, _)| k.is_none_or(|k| own.binary_search(&k).is_ok()))
+                .filter(|(k, _)| k.is_none_or(|k| context.contains(scopes, k)))
                 .flat_map(|(&k, entries)| entries.iter().enumerate().map(move |(i, e)| (k, i, e)))
                 .filter(|(_, _, e)| keep(e))
                 .map(|(k, i, _)| (k, i))
                 .collect()
         } else {
+            let own = context.scopes(scopes);
             std::iter::once(None)
                 .chain(own.iter().copied().map(Some))
                 .filter_map(|k| by_key.get(&k).map(|v| (k, v)))
@@ -468,7 +468,7 @@ impl<S: Eq + Hash + Clone, B> BindingTable<S, B> {
         let scopes = |&(k, i): &At| sym.by_key[&k][i].scopes;
         // The largest set wins if it holds all the others, which is one
         // test each; only otherwise is the quadratic search needed.
-        let Some(best) = keyed.iter().max_by_key(|c| context.scopes(scopes(c)).len()) else {
+        let Some(best) = keyed.iter().max_by_key(|c| context.len(scopes(c))) else {
             return keyed;
         };
         if keyed

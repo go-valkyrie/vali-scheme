@@ -29,6 +29,7 @@ mod kind;
 mod lexer;
 mod origin;
 mod parser;
+mod pending;
 mod reader;
 #[cfg(any(test, feature = "reference"))]
 pub mod reference;

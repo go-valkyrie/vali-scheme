@@ -1335,7 +1335,7 @@ impl<'a> Brought<'a> {
 fn shape(state: &ContextState, set: ScopeSetId) -> ([usize; 5], bool) {
     let mut kinds = [0; 5];
     let mut core = false;
-    for &s in state.context.scopes(set) {
+    for s in state.context.scopes(set) {
         if s == state.core_scope {
             core = true;
             continue;

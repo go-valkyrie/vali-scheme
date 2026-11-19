@@ -15,9 +15,11 @@
 //! Origins are not propagated: whatever builds a node gives it the origin
 //! of the macro step building it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::binding::{BindingTable, Phase, Resolution};
+use crate::pending::Pending;
 use crate::scope::{Remap, Scope, ScopeContext, ScopeSetId, TooManyScopes};
 use crate::walk::{Split, TreeMap, map_tree};
 use crate::{Datum, DatumKind, Origin, Span};
@@ -28,7 +30,7 @@ pub struct Syntax {
     content: Arc<Content>,
     scopes: ScopeSetId,
     /// Changes to apply to every node below this one, sorted by scope.
-    pending: Option<Arc<[(Scope, Effect)]>>,
+    pending: Option<Pending>,
     span: Span,
     origin: Option<Arc<Origin>>,
 }
@@ -100,7 +102,7 @@ pub enum Effect {
 
 impl Effect {
     /// `self`, then `then`. `None` is no change.
-    fn then(self, then: Effect) -> Option<Effect> {
+    pub(crate) fn then(self, then: Effect) -> Option<Effect> {
         match (self, then) {
             (_, Effect::Add) => Some(Effect::Add),
             (_, Effect::Remove) => Some(Effect::Remove),
@@ -122,40 +124,6 @@ impl Effect {
             Effect::Flip => context.flip(set, scope),
         }
     }
-}
-
-/// `first`, then `then`, as one sorted list of changes.
-fn compose(
-    first: Option<&Arc<[(Scope, Effect)]>>,
-    then: &[(Scope, Effect)],
-) -> Option<Arc<[(Scope, Effect)]>> {
-    let first = first.map_or(&[][..], |p| &p[..]);
-    let mut out = Vec::with_capacity(first.len() + then.len());
-    let (mut i, mut j) = (0, 0);
-    while i < first.len() || j < then.len() {
-        let next = match (first.get(i), then.get(j)) {
-            (Some(&(a, x)), Some(&(b, y))) if a == b => {
-                i += 1;
-                j += 1;
-                x.then(y).map(|e| (a, e))
-            }
-            (Some(&(a, x)), Some(&(b, _))) if a < b => {
-                i += 1;
-                Some((a, x))
-            }
-            (Some(&change), None) => {
-                i += 1;
-                Some(change)
-            }
-            (_, Some(&change)) => {
-                j += 1;
-                Some(change)
-            }
-            (None, None) => unreachable!(),
-        };
-        out.extend(next);
-    }
-    (!out.is_empty()).then(|| out.into())
 }
 
 /// A syntax object's own node, with pending scope changes not applied:
@@ -217,6 +185,7 @@ impl Syntax {
                 from,
                 to,
                 open: Vec::new(),
+                pending_memo: HashMap::new(),
             },
             self,
         )
@@ -356,8 +325,8 @@ impl Syntax {
     }
 
     /// The scope changes waiting to reach its children, sorted by scope.
-    pub fn pending(&self) -> &[(Scope, Effect)] {
-        self.pending.as_deref().unwrap_or(&[])
+    pub fn pending(&self) -> Vec<(Scope, Effect)> {
+        self.pending.as_ref().map_or_else(Vec::new, Pending::ops)
     }
 
     /// A syntax object from its parts, as [`Syntax::node`] and
@@ -383,7 +352,7 @@ impl Syntax {
         Some(Syntax {
             content: Arc::new(content),
             scopes,
-            pending: (!pending.is_empty()).then(|| pending.into()),
+            pending: Pending::from_ops(pending),
             span,
             origin,
         })
@@ -498,13 +467,13 @@ impl Syntax {
         let Some(pending) = &self.pending else {
             return Ok(child.clone());
         };
-        let scopes = context.apply_changes(child.scopes, pending)?;
+        let scopes = context.apply_pending(child.scopes, pending)?;
         // A leaf has nothing below it to pend for; a child with nothing
         // pending of its own shares its parent's list.
         let pending = match (&*child.content, &child.pending) {
             (Content::Identifier(_) | Content::Atom(_), _) => None,
-            (_, None) => Some(Arc::clone(pending)),
-            (_, Some(own)) => compose(Some(own), pending),
+            (_, None) => Some(pending.clone()),
+            (_, Some(own)) => Pending::compose(Some(own), pending),
         };
         Ok(Syntax {
             content: Arc::clone(&child.content),
@@ -524,7 +493,7 @@ impl Syntax {
         let scopes = effect.apply(context, self.scopes, scope)?;
         let pending = match &*self.content {
             Content::Identifier(_) | Content::Atom(_) => None,
-            _ => compose(self.pending.as_ref(), &[(scope, effect)]),
+            _ => Pending::push(self.pending.as_ref(), scope, effect),
         };
         Ok(Syntax {
             content: Arc::clone(&self.content),
@@ -691,7 +660,7 @@ impl<'a> TreeMap<'a> for ToDatum {
 /// What [`Remapper`] works out for a node before its parts.
 struct Moved {
     scopes: ScopeSetId,
-    pending: Option<Arc<[(Scope, Effect)]>>,
+    pending: Option<Pending>,
     span: Span,
     origin: Option<Arc<Origin>>,
 }
@@ -704,6 +673,9 @@ struct Remapper<'r> {
     /// The lists and vectors whose parts are being remapped, innermost
     /// last.
     open: Vec<Moved>,
+    /// What each link of a pending list was mapped to, for the lists
+    /// that share links.
+    pending_memo: HashMap<usize, Option<Pending>>,
 }
 
 impl Remapper<'_> {
@@ -712,15 +684,10 @@ impl Remapper<'_> {
         let pending = match &syntax.pending {
             None => None,
             Some(changes) => {
-                let mut mapped = changes
-                    .iter()
-                    .map(|&(scope, effect)| {
-                        Ok((self.remap.scope(self.from, self.to, scope)?, effect))
-                    })
-                    .collect::<Result<Vec<_>, TooManyScopes>>()?;
-                // Pending changes are kept sorted by scope.
-                mapped.sort_by_key(|&(scope, _)| scope);
-                Some(mapped.into())
+                let (remap, from, to) = (&mut *self.remap, self.from, &mut *self.to);
+                changes.map_scopes(&mut self.pending_memo, &mut |scope| {
+                    remap.scope(from, to, scope)
+                })?
             }
         };
         Ok(Moved {

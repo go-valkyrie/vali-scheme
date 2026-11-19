@@ -211,3 +211,55 @@ fn exposing_a_deep_chain_of_dotted_tails_is_one_list() {
         ));
     }
 }
+
+/// Walks down `n` levels of nested lists, adding a fresh scope at each as a
+/// binding form does to its body. Returns how many scope sets the context
+/// interned and how many changes the innermost node has pending.
+fn walk_down_binding(n: usize) -> (usize, usize) {
+    let mut context = ScopeContext::new();
+    let scope = context.new_scope(ScopeKind::Library).unwrap();
+    let top = context.intern(&[scope]).unwrap();
+    let mut node = Syntax::from_datum(&nest("list", n), top);
+    // Down to the innermost list, which is the last with anything pending.
+    for _ in 0..n - 1 {
+        let vali_syntax::Exposed::List { items, .. } = node.expose(&mut context).unwrap() else {
+            panic!("a list");
+        };
+        let binder = context.new_scope(ScopeKind::Binder).unwrap();
+        node = items[0].add(&mut context, binder).unwrap();
+    }
+    (context.set_count(), node.pending().len())
+}
+
+#[test]
+fn nested_binders_take_linear_space_and_time() {
+    // The set at depth k holds k scopes and so does the pending list, but
+    // each is stored as the one before it and one more, so a nest costs a
+    // node a level, not a copy.
+    let n = 40_000;
+    let (sets, pending) = walk_down_binding(n);
+    assert!(sets <= 2 * n + 2, "{sets} sets for {n} levels");
+    assert_eq!(pending, n - 1);
+    // And the time is linear, not quadratic: four times the depth takes
+    // about four times as long (a quadratic walk, sixteen). The best of a
+    // few runs, to leave a loaded machine out of it, and a second try.
+    let time = |n: usize| {
+        (0..3)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                walk_down_binding(n);
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let ratio = |small: usize| {
+        let (a, b) = (time(small), time(4 * small));
+        (b.as_secs_f64() / a.as_secs_f64().max(1e-4), a, b)
+    };
+    let (mut r, mut a, mut b) = ratio(20_000);
+    if r >= 10.0 {
+        (r, a, b) = ratio(20_000);
+    }
+    assert!(r < 10.0, "20,000 levels took {a:?}, 80,000 took {b:?}");
+}

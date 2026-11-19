@@ -321,7 +321,7 @@ impl Encoder<'_> {
         self.w.u32(s.scopes().index());
         let pending = s.pending();
         self.w.usize(pending.len());
-        for &(scope, effect) in pending {
+        for (scope, effect) in pending {
             self.w.u32(scope.index());
             self.w.byte(match effect {
                 Effect::Add => 0,
