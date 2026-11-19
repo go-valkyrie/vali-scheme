@@ -1,0 +1,89 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "29fcf80a_fe7ee9ea",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 166,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:39Z",
+      "side": 1,
+      "message": "`VALI_NO_OPT` (`optimising()`) changes the artifact but is in neither the stamp nor the key, so the two settings share one entry and the first run decides what both get.\n\n- A cold `VALI_NO_OPT\u003d1` run of a small library writes a 904-byte entry.\n- A cold optimised run on an empty cache writes 907 bytes at the same path.\n- Each later run, in either mode, loads whichever is there.\n\nSo `VALI_NO_OPT\u003d1`, which exists to bypass the optimiser, silently runs optimised code for cached libraries, and the reverse. It also makes ADR line 91\u0027s \"they compile the same bytes\" untrue for two concurrent runs.\n\nHash the setting into the stamp (or the key), or skip the cache when it\u0027s set.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "67e78ec3_86c6bf55",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 172,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:39Z",
+      "side": 1,
+      "message": "The key\u0027s `source` is the source hash, which (ADR 0001 line 59) doesn\u0027t yet record what a body-level `cond-expand` found about libraries. So the cache serves a stale entry when that answer changes:\n\n```scheme\n;; lib/probe.sld\n(define-library (probe)\n  (import (scheme base))\n  (export which)\n  (begin\n    (cond-expand\n      ((library (opt feature)) (define which \u0027with-opt-feature))\n      (else (define which \u0027without)))))\n```\n\n- `vali --cache-dir C -I lib main.scm` prints `without` (cold).\n- `vali --cache-dir C -I lib -I extra main.scm`, where `extra/opt/feature.sld` exists, prints `without` (warm). Expected `with-opt-feature`, which `--no-cache` prints.\n- The reverse also happens: a cache filled with `-I extra` keeps saying `with-opt-feature` after `extra` is dropped.\n\nThe docs here (line 26) and ADR line 88 say the key covers \"what its `cond-expand`s found\", which is only true of declaration-level ones.\n\nEither record the body-level availability answers in the library\u0027s source hash (the loader already asks them before expansion, so they\u0027re known when the hash is made), or don\u0027t cache a library whose body tested `(library ...)` until that lands.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "aeec660a_b897be7a",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 247,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:39Z",
+      "side": 1,
+      "message": "This takes any `*.vac` or `.tmp-*` file in any subdirectory of the root as an entry, and `remove_empty_dirs` (line 320) removes every empty subdirectory, not just stamp directories.\n\nWith a root holding `notes/design.vac`, `notes/readme.txt`, `build/.tmp-session` and an empty `emptydir/`, `vali --cache-dir D cache clean` leaves only `notes/readme.txt`. `prune` matches the same files.\n\nThat contradicts 1260917\u0027s ADR text (\"Only files the cache itself names are ever deleted, so a directory that holds other things is safe to point it at\"), and `--cache-dir`/`VALI_CACHE_DIR` invite pointing it at a project directory.\n\nMatch only what `entry` and the temp writer make: directories named with 16 hex digits, files named `\u003c64 hex\u003e.vac` or the exact temp pattern. And only remove those directories.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "3412a953_7ea43120",
+        "filename": "crates/vali-compiler/src/lib.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 426,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:39Z",
+      "side": 1,
+      "message": "This `?` makes a cache write fail the run, contrary to line 465 (\"what cannot be written is reported there, not raised\"). A library whose syntax export holds a datum label is enough:\n\n```scheme\n(define-syntax m (syntax-rules () ((_) \u0027(#1\u003d(x) #1#))))\n```\n\n- `--no-cache` prints `((x) (x))` and exits 0.\n- The default run prints `vali: encoding a syntax export: a datum label in a syntax export` and exits 1.\n- `vali build` fails the same way.\n\nPush the error to `report.failed` and continue, and add a test with such a library.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "e29a5c8a_07f1c514",
+        "filename": "crates/vali-compiler/src/lib.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 462,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:39Z",
+      "side": 1,
+      "message": "Nit: \"or tampered with\" (here, in cache.rs\u0027s module docs, the `--help` text and ADR line 87) overstates it. An edit that keeps the artifact valid and updates the entry\u0027s SHA-256 is loaded; flipping a bit in an arity or a name and re-hashing gets past the checks. ADR line 87 rightly says the hash isn\u0027t a defence against someone who can write the directory. \"Damaged, or failing validation\" would match what\u0027s checked.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
