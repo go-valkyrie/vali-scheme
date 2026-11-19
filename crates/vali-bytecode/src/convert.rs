@@ -105,9 +105,16 @@ pub fn convert(module: &ir::Module) -> std::result::Result<Module, ConvertError>
         unspecified,
     };
     for (n, function) in module.functions.iter().enumerate() {
-        let converted = convert_function(&tables, function).map_err(|message| ConvertError {
-            function: Some(n as u32),
-            message,
+        let converted = convert_function(&tables, function).map_err(|message| {
+            // The validator refuses what conversion cannot do (ADR 0017 #13).
+            debug_assert!(
+                false,
+                "conversion failed on validated IR, function f{n}: {message}"
+            );
+            ConvertError {
+                function: Some(n as u32),
+                message,
+            }
         })?;
         b.define(indexes[n], converted);
     }
@@ -741,15 +748,38 @@ type Allocation = (Analysis, Vec<Option<Slot>>, Vec<i32>, HashMap<usize, usize>)
 
 fn allocation(f: &ir::Function) -> Result<Allocation> {
     let a = analyse(f)?;
+    let ceiling = ir::bounds(f).allocated_slot;
+    let highest = |slots: &[Option<Slot>]| {
+        slots
+            .iter()
+            .flatten()
+            .map(|&s| usize::from(s))
+            .max()
+            .unwrap_or(0)
+    };
     let mut hints = HashMap::new();
     let mut slots = allocate(&a, &hints)?;
+    debug_assert!(
+        highest(&slots) <= ceiling,
+        "allocation without hints needs slot {}, above the validator's bound {ceiling}",
+        highest(&slots)
+    );
     for _ in 0..4 {
         let next = call_hints(f, &a, &bases(&a, &slots));
         if next == hints {
             break;
         }
         hints = next;
-        slots = allocate(&a, &hints)?;
+        // Hints can push slots up; past the ceiling the validator allowed
+        // for, go without them: with none, no slot is above the number of
+        // variables.
+        match allocate(&a, &hints) {
+            Ok(hinted) if highest(&hinted) <= ceiling => slots = hinted,
+            _ => {
+                slots = allocate(&a, &HashMap::new())?;
+                break;
+            }
+        }
     }
     let (cover, _) = pressure(&a, &slots, |_| true);
     let bases = bases(&a, &slots);
@@ -835,6 +865,18 @@ fn convert_function(tables: &Tables<'_>, f: &ir::Function) -> Result<Function> {
     let top = e.top;
     let mut function = e.b.finish().map_err(|e| e.to_string())?;
     function.slots = u16::try_from(top + 1).map_err(|_| "too many slots".to_owned())?;
+    let bounds = ir::bounds(f);
+    debug_assert!(
+        top <= bounds.top_slot,
+        "slot {top} is above the validator's bound {}",
+        bounds.top_slot
+    );
+    debug_assert!(
+        function.code.len() as u64 <= bounds.code_words,
+        "{} words of code are above the validator's bound {}",
+        function.code.len(),
+        bounds.code_words
+    );
     Ok(function)
 }
 
