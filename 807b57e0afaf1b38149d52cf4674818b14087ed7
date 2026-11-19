@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "01d223d8_59b9657c",
+        "filename": "crates/vali-runtime/src/rust_objects.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 228,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:52Z",
+      "side": 1,
+      "message": "Done in patch set 3. `finalize` and the cycle collection both go through `finalize_in`, which empties the syntax slot and gives back its charge. `retire_syntax` also overwrites the index, so a second visit finds nothing. `syntax_objects_in_garbage_cycles_are_freed` and `a_syntax_slot_is_retired_once` cover it.",
+      "parentUuid": "3d55576d_f96e1098",
+      "revId": "807b57e0afaf1b38149d52cf4674818b14087ed7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "9724d3c7_15c240e4",
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T14:01:51Z",
       "side": 1,
       "message": "Objects whose count reached zero wait in the zero-count table until the next epoch, which comes after about 1 MiB of heap allocation. `collect_garbage` does nothing while Scheme runs, so a program can\u0027t force one. Meanwhile their slots still count.\n\nA loop that keeps at most one syntax object, `(datum-\u003esyntax context i)` in a loop, fails at a cap of baseline + 1000 after 1,000 iterations under deferred and precise counting. Without the cap it ends with one live slot. The test hides this by calling `collect_garbage()` between rounds.\n\nTwo things would help:\n- Charge the Rust side with `S::charge`, as `load_transient` does for a module, so syntax-heavy code brings epochs sooner.\n- At the cap, run an epoch (when not inside one) and check again before failing. Then the cap means \"live\", as ADR 0023 item 6 and the as-built note say.",
+      "revId": "807b57e0afaf1b38149d52cf4674818b14087ed7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "f94f8e01_dcfa6e22",
+        "filename": "crates/vali-runtime/src/syntax.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 41,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:52Z",
+      "side": 1,
+      "message": "Done in patch set 3. Each syntax object counts as allocation through `S::charge`, paced to about two epochs per cap\u0027s worth, and an idle isolate at the cap runs an epoch and counts again. `the_syntax_cap_means_live_objects_under_counting` runs my loop: 5,000 objects under a cap of the baseline plus 1,000, without asking for a collection.",
+      "parentUuid": "9724d3c7_15c240e4",
       "revId": "807b57e0afaf1b38149d52cf4674818b14087ed7",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
