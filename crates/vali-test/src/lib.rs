@@ -96,7 +96,8 @@ impl Backend for ReadOnly {
 
 /// A backend that compiles and runs each `kind: scheme` file in a fresh
 /// isolate, with the standard libraries. A file passes if it runs to the
-/// end: SRFI 64's `test-end` raises an error when an assertion failed.
+/// end: SRFI 64's default runner ends the run with exit code 1, which this
+/// reports as an error, when the outermost `test-end` finds a failed test.
 /// Files that don't read are [`Outcome::Invalid`]; other kinds of test are
 /// [`Outcome::Unsupported`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -215,7 +216,17 @@ fn run<S: vali_runtime::Strategy>(
         .install_primitives()
         .and_then(|()| vali_compiler::load_with(&mut cx, program, Arc::new(host.clone())))
         .map_err(|e| format!("under {}: {e}", S::NAME))?;
-    cx.run(id).map_err(|e| format!("under {}: {e}", S::NAME))?;
+    if let Err(e) = cx.run(id) {
+        // A failing suite ends the run with exit code 1 after its runner
+        // has written what failed, which is the test's only report.
+        let written = cx.take_output() + &cx.take_error_output();
+        let written = written.trim_end();
+        return Err(if written.is_empty() {
+            format!("under {}: {e}", S::NAME)
+        } else {
+            format!("under {}: {e}\n{written}", S::NAME)
+        });
+    }
     Ok((cx, id))
 }
 
