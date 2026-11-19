@@ -384,38 +384,83 @@ fn loops(module: &Module) -> bool {
 }
 
 /// Validates `module`, and if it is valid, runs it under every strategy,
-/// returning whether it ran. An error is a panic in the VM: valid bytecode
-/// may fail, never panic.
+/// returning whether it ran. An error is a panic in the VM, which includes
+/// the debug assertions that catch silent corruption (a frame whose slot 0
+/// no longer holds its own closure, say), or an answer that depends on the
+/// strategy: valid bytecode may fail, never panic, and no strategy may
+/// change the answer.
 pub fn check(module: &Module) -> Result<bool, String> {
     if validate(module).is_err() || loops(module) {
         return Ok(false);
     }
-    run::<NoCollection>(module)?;
-    run::<DeferredHeadered>(module)?;
-    run::<DeferredSideCounts>(module)?;
-    run::<PreciseHeadered>(module)?;
-    run::<PreciseSideCounts>(module)?;
+    let outcomes = [
+        run::<NoCollection>(module)?,
+        run::<DeferredHeadered>(module)?,
+        run::<DeferredSideCounts>(module)?,
+        run::<PreciseHeadered>(module)?,
+        run::<PreciseSideCounts>(module)?,
+    ];
+    // Running out of memory is the one answer that may differ: a strategy
+    // that reclaims runs further than one that never does.
+    let comparable: Vec<&(&str, String)> = outcomes
+        .iter()
+        .filter(|(_, outcome)| !outcome.starts_with("error: out of memory"))
+        .collect();
+    if let Some(first) = comparable.first()
+        && let Some(other) = comparable.iter().find(|o| o.1 != first.1)
+    {
+        return Err(format!(
+            "the answer depends on the strategy: under {} it is {}, under {} it is {}",
+            first.0, first.1, other.0, other.1
+        ));
+    }
     Ok(true)
 }
 
-fn run<S: Strategy>(module: &Module) -> Result<(), String> {
+/// `text` with each hexadecimal address, which differs from strategy to
+/// strategy, replaced by `0x`.
+fn without_addresses(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("0x") {
+        out.push_str(&rest[..at + 2]);
+        rest = rest[at + 2..].trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Runs `module` under strategy `S` and describes how it ended: the value
+/// it returned as `write` prints it, or its error.
+fn run<S: Strategy>(module: &Module) -> Result<(&'static str, String), String> {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let mut cx = Cx::<S>::new(&HeapConfig {
             max_bytes: Some(64 << 20),
         });
         cx.set_fuel_limit(Some(10_000));
         cx.set_max_stack_bytes(1 << 20);
+        let mut outcome = String::from("not loaded");
         if let Ok(id) = cx.load(module.clone()) {
-            let _ = cx.run(id);
+            outcome = match cx.run(id) {
+                Ok(value) => match cx.write_string(&value) {
+                    Ok(text) => format!("value: {text}"),
+                    Err(e) => format!("error: {e}"),
+                },
+                Err(e) => format!("error: {e}"),
+            };
             cx.collect_garbage();
         }
+        outcome
     }));
-    outcome.map_err(|panic| {
-        let message = panic
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "a panic".into());
-        format!("under {}: panicked: {message}", S::NAME)
-    })
+    match outcome {
+        Ok(outcome) => Ok((S::NAME, without_addresses(&outcome))),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic".into());
+            Err(format!("under {}: panicked: {message}", S::NAME))
+        }
+    }
 }
