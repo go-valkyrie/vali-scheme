@@ -596,27 +596,100 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
     ];
     table.extend(crate::numbers::table());
     table.extend(crate::strings::table());
-    table.push(("features", Arity::exactly(0), features));
+    table.push(("features", Arity::exactly(0), features_primitive));
     table.extend(crate::continuations::dynamic_table());
     table
 }
 
-/// The features `cond-expand` tests for and `features` lists (R7RS
-/// appendix B).
-pub const FEATURES: &[&str] = &[
-    "r7rs",
-    "exact-closed",
-    "exact-complex",
-    "ieee-float",
-    "full-unicode",
-    "ratios",
-    "vali",
-];
+/// The feature identifiers a build of Vali has by itself (R7RS appendix
+/// B): the language, the version, the operating system, the architecture
+/// and the byte order. The compiler adds the `srfi-N` of the libraries it
+/// ships ([`Cx::set_extra_features`]), since only it knows them.
+///
+/// The platform identifiers are those of the build the runtime is
+/// compiled into, so they can differ between machines that share a
+/// compiled artifact. Vali's own libraries never test them (ADR 0001 #8).
+pub fn features() -> Vec<String> {
+    let mut out: Vec<String> = [
+        "r7rs",
+        "exact-closed",
+        "exact-complex",
+        "ieee-float",
+        "full-unicode",
+        "ratios",
+        "vali",
+    ]
+    .map(String::from)
+    .into();
+    out.push(format!("vali-{}", env!("CARGO_PKG_VERSION")));
+    let platform: &[&str] = if cfg!(target_os = "macos") {
+        &["posix", "unix", "darwin", "macosx"]
+    } else if cfg!(target_os = "ios") {
+        &["posix", "unix", "darwin"]
+    } else if cfg!(target_os = "linux") {
+        &["posix", "unix", "linux", "gnu-linux"]
+    } else if cfg!(target_os = "windows") {
+        &["windows"]
+    } else if cfg!(target_os = "freebsd") {
+        &["posix", "unix", "bsd", "freebsd"]
+    } else if cfg!(any(target_os = "netbsd", target_os = "openbsd")) {
+        &["posix", "unix", "bsd"]
+    } else if cfg!(target_os = "solaris") {
+        &["posix", "unix", "solaris"]
+    } else if cfg!(target_family = "unix") {
+        &["posix", "unix"]
+    } else {
+        &[]
+    };
+    out.extend(platform.iter().map(|s| s.to_string()));
+    let arch: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["x86-64"]
+    } else if cfg!(target_arch = "x86") {
+        &["i386"]
+    } else if cfg!(target_arch = "aarch64") {
+        &["aarch64"]
+    } else if cfg!(target_arch = "arm") {
+        &["arm"]
+    } else if cfg!(target_arch = "riscv64") {
+        &["riscv64"]
+    } else if cfg!(target_arch = "wasm32") {
+        &["wasm32"]
+    } else if cfg!(target_arch = "powerpc64") {
+        &["ppc", "ppc64"]
+    } else if cfg!(target_arch = "powerpc") {
+        &["ppc"]
+    } else if cfg!(target_arch = "sparc64") {
+        &["sparc", "sparc64"]
+    } else {
+        &[]
+    };
+    out.extend(arch.iter().map(|s| s.to_string()));
+    out.push(
+        if cfg!(target_endian = "big") {
+            "big-endian"
+        } else {
+            "little-endian"
+        }
+        .to_owned(),
+    );
+    out
+}
+
+impl<S: Strategy> Cx<S> {
+    /// Sets the feature identifiers `(features)` reports besides
+    /// [`features`]: the `srfi-N` of the libraries the compiler ships.
+    #[doc(hidden)]
+    pub fn set_extra_features(&mut self, names: Vec<Box<str>>) {
+        self.extra_features = names;
+    }
+}
 
 /// `(features)`: a fresh list of the features, as symbols.
-fn features<S: Strategy>(cx: &mut Cx<S>, _args: &[Value]) -> Result<Value, Error> {
+fn features_primitive<S: Strategy>(cx: &mut Cx<S>, _args: &[Value]) -> Result<Value, Error> {
+    let mut names = features();
+    names.extend(cx.extra_features.iter().map(|s| s.to_string()));
     let mut list = Value::EMPTY_LIST;
-    for name in FEATURES.iter().rev() {
+    for name in names.iter().rev() {
         let symbol = cx.intern(name)?;
         // SAFETY: valid values; nothing is collected meanwhile.
         list = unsafe { cx.cons_raw(symbol, list) }?;

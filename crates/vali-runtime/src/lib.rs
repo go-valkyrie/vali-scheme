@@ -56,7 +56,7 @@ pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{
     Bump, HeapConfig, LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PAGE_HEADER_BYTES, PageSource,
 };
-pub use primitives::{FEATURES, primitive_names};
+pub use primitives::{features, primitive_names};
 pub use rust_objects::RustObject;
 pub use strategy::{Allocate, References, Space, Strategy};
 pub use vali_macros::{bridge, object};

@@ -2103,6 +2103,13 @@ fn cond_expand_and_features() {
         // In a body, the chosen clause's definitions are the body's.
         ("(let () (cond-expand (vali (define x 5))) (+ x 1))", "6"),
         ("(if (memq 'r7rs (features)) #t #f)", "#t"),
+        ("(cond-expand (srfi-1 'yes) (else 'no))", "yes"),
+        ("(cond-expand (srfi-9999 'yes) (else 'no))", "no"),
+        ("(if (memq 'srfi-1 (features)) #t #f)", "#t"),
+        (
+            "(cond-expand ((or big-endian little-endian) 'yes) (else 'no))",
+            "yes",
+        ),
     ]);
 }
 

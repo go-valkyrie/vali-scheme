@@ -289,6 +289,24 @@ pub(crate) fn standard_names() -> Vec<LibraryName> {
         .collect()
 }
 
+/// The `srfi-N` feature identifiers of the SRFIs Vali ships: one for each
+/// number `N` that some `(srfi N ...)` library in [`STANDARD`] has, so the
+/// features cannot drift from the libraries.
+pub(crate) fn srfi_features() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (parts, _) in STANDARD {
+        if let [first, number, ..] = parts
+            && *first == "srfi"
+        {
+            let feature = format!("srfi-{number}");
+            if !out.contains(&feature) {
+                out.push(feature);
+            }
+        }
+    }
+    out
+}
+
 /// Whether `name` is one of Vali's own libraries.
 pub(crate) fn is_standard(name: &LibraryName) -> bool {
     library::is_builtin(name)
@@ -560,5 +578,38 @@ mod tests {
         ));
         assert_eq!(names(&graph.unwrap()), ["(c)", "(b)", "(a)"]);
         assert_eq!(polls, 1);
+    }
+
+    /// The prebuilt artifacts are compiled where they are built, and
+    /// record no feature they tested (ADR 0001 #8), so none of Vali's own
+    /// libraries may test one: its platform features could differ on the
+    /// machine that loads the artifact.
+    #[test]
+    fn standard_libraries_test_no_features() {
+        for (parts, source) in STANDARD {
+            // (scheme base) only exports the forms.
+            if parts == &["scheme", "base"] {
+                continue;
+            }
+            assert!(
+                !source.contains("cond-expand") && !source.contains("(features)"),
+                "{parts:?} tests features, which prebuilt artifacts do not record"
+            );
+        }
+    }
+
+    #[test]
+    fn srfi_features_follow_the_libraries() {
+        let features = srfi_features();
+        for (parts, _) in STANDARD {
+            if let ["srfi", n, ..] = parts {
+                assert!(features.contains(&format!("srfi-{n}")), "srfi-{n}");
+            }
+        }
+        // One per number, even where a SRFI has several libraries.
+        let mut unique = features.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), features.len());
     }
 }

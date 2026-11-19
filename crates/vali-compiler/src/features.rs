@@ -17,6 +17,17 @@ fn error(d: &Datum) -> CompileError {
     }
 }
 
+/// Every feature identifier: the runtime's own, and the `srfi-N` of the
+/// SRFI libraries that ship. `(features)` reports the same list.
+pub(crate) fn all() -> &'static [String] {
+    static ALL: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = vali_runtime::features();
+        all.extend(crate::loader::srfi_features());
+        all
+    })
+}
+
 /// A requirement's operator and operands, if it is a list.
 fn parts(d: &Datum) -> Option<(&str, &[Datum])> {
     match &d.kind {
@@ -46,7 +57,7 @@ pub(crate) fn satisfied(
     library: &mut dyn FnMut(&LibraryName) -> bool,
 ) -> Result<bool> {
     if let DatumKind::Symbol(name) = &requirement.kind {
-        return Ok(vali_runtime::FEATURES.contains(&name.as_str()));
+        return Ok(all().iter().any(|f| f == name));
     }
     match parts(requirement).ok_or_else(|| error(requirement))? {
         ("and", rest) => {
