@@ -155,7 +155,7 @@ fn gdb_backtrace() {
         .env(CHILD, "1")
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = transcript(&output);
     let frames: Vec<&str> = text.lines().filter(|l| l.starts_with('#')).collect();
     let position = |name: &str| {
         frames
@@ -201,7 +201,7 @@ fn lldb_backtrace() {
         .env(CHILD, "1")
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = transcript(&output);
     // The stop report repeats frame 0; the backtrace follows it.
     let frames: Vec<&str> = text
         .lines()
@@ -227,6 +227,18 @@ fn lldb_backtrace() {
         frames.join("\n")
     );
     assert_eq!(named, 3, "{}", frames.join("\n"));
+}
+
+/// What a debugger printed: its standard output, then its standard
+/// error. The extensions report failures on standard error, so a failed
+/// assertion shows why a command printed nothing.
+#[cfg(target_os = "linux")]
+fn transcript(output: &std::process::Output) -> String {
+    format!(
+        "{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 /// The extensions in `tools/debugger/`.
@@ -290,7 +302,7 @@ fn gdb_shows_scheme_frames() {
         .env(CHILD, "1")
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = transcript(&output);
     check_scheme_frames(&text);
     // The pretty-printer shows the value `stop` was called with, and
     // `vali-print` decodes a raw word: 0x17 is the empty list.
@@ -332,7 +344,7 @@ fn lldb_shows_scheme_frames() {
         .env(CHILD, "1")
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = transcript(&output);
     check_scheme_frames(&text);
     assert!(text.contains("args.data_ptr[0] = 0"), "{text}");
     assert!(text.contains("\n()\n"), "{text}");

@@ -31,6 +31,13 @@ vali-syntax = { path = "crates/vali-syntax", version = "0.0.0" }
 [profile.test]
 opt-level = 1
 
+# The debugger extensions in tools/debugger/ read the interpreter's
+# locals from DWARF, so the runtime keeps full debug information in test
+# builds even when CI asks for line tables only
+# (CARGO_PROFILE_TEST_DEBUG): a per-package setting wins over that.
+[profile.test.package.vali-runtime]
+debug = "full"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"

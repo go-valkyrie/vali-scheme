@@ -13,6 +13,7 @@ and a summary for `vali_runtime::value::Value`.
 """
 
 import os
+import re
 import sys
 
 import lldb
@@ -33,11 +34,22 @@ class LldbTarget(vali_debug.Target):
         return data
 
 
+def is_interpreter(name):
+    """Whether `name` is the VM's interpreter function.
+
+    With full debug information the name has its module path
+    (`vali_runtime::vm::...::interpret<...>`); with line tables only it
+    is just `interpret<vali_runtime::...>`.
+    """
+    return re.search(r"(?:^|::)interpret(?:<|$)", name) is not None \
+        and "vali_runtime" in name
+
+
 def interpreter(thread):
     """The innermost interpreter frame's `fp` and `pc`, from DWARF."""
     for frame in thread:
         name = frame.GetFunctionName() or ""
-        if "::interpret" in name and "vali_runtime" in name:
+        if is_interpreter(name):
             fp, pc = frame.FindVariable("fp"), frame.FindVariable("pc")
             if not (fp.IsValid() and pc.IsValid()):
                 raise RuntimeError(

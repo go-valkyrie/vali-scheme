@@ -13,6 +13,7 @@ and a pretty-printer for `vali_runtime::value::Value`.
 """
 
 import os
+import re
 import sys
 
 import gdb
@@ -29,12 +30,23 @@ class GdbTarget(vali_debug.Target):
             raise MemoryError(str(e))
 
 
+def is_interpreter(name):
+    """Whether `name` is the VM's interpreter function.
+
+    With full debug information the name has its module path
+    (`vali_runtime::vm::...::interpret<...>`); with line tables only it
+    is just `interpret<vali_runtime::...>`.
+    """
+    return re.search(r"(?:^|::)interpret(?:<|$)", name) is not None \
+        and "vali_runtime" in name
+
+
 def interpreter():
     """The innermost interpreter frame's `fp` and `pc`, from DWARF."""
     frame = gdb.newest_frame()
     while frame is not None:
         name = frame.name() or ""
-        if "::interpret" in name and "vali_runtime" in name:
+        if is_interpreter(name):
             try:
                 return int(frame.read_var("fp")), int(frame.read_var("pc"))
             except (ValueError, gdb.error):
