@@ -2,8 +2,10 @@
 
 Load it with `command script import tools/debugger/vali_lldb.py`, or from
 .lldbinit. It adds three commands, which work whether or not vali-runtime
-was built with native frames, as long as the build keeps the interpreter's
-locals in its debug information:
+was built with native frames. They find the innermost Scheme frame from the
+records the VM keeps (the exported symbol VALI_DEBUG_STATES_3), which needs no
+debug information, or from the interpreter's locals where the build has full
+debug information. Set VALI_DEBUGGER_NO_DWARF=1 to use the records only:
 
     vali-bt          the Scheme frames, innermost first
     vali-frame N     Scheme frame N's procedure and slots, as values
@@ -45,18 +47,51 @@ def is_interpreter(name):
         and "vali_runtime" in name
 
 
-def interpreter(thread):
-    """The innermost interpreter frame's `fp` and `pc`, from DWARF."""
+def from_dwarf(thread):
+    """The innermost interpreter frame's `fp` and `pc`, from DWARF locals,
+    or None where the build lacks them (or they were optimised out)."""
     for frame in thread:
         name = frame.GetFunctionName() or ""
         if is_interpreter(name):
             fp, pc = frame.FindVariable("fp"), frame.FindVariable("pc")
             if not (fp.IsValid() and pc.IsValid()):
-                raise RuntimeError(
-                    "the interpreter's fp and pc were optimised out: "
-                    "build with full debug information")
+                return None
             return fp.GetValueAsUnsigned(), pc.GetValueAsUnsigned()
-    raise RuntimeError("no Vali interpreter frame on this thread")
+    return None
+
+
+def from_records(thread):
+    """The innermost Scheme frame's `fp` and `pc`, from the VM's records,
+    found through the exported symbol."""
+    process = thread.GetProcess()
+    target = process.GetTarget()
+    symbols = target.FindSymbols(vali_debug.STATE_SYMBOL)
+    if symbols.GetSize() == 0:
+        found = set()
+        for module in target.module_iter():
+            for symbol in module:
+                name = symbol.GetName() or ""
+                if name.startswith(vali_debug.STATE_SYMBOL_PREFIX):
+                    found.add(name[len(vali_debug.STATE_SYMBOL_PREFIX):])
+        raise RuntimeError(vali_debug.missing_symbol(found))
+    symbol = symbols.GetContextAtIndex(0).GetSymbol()
+    address = symbol.GetStartAddress().GetLoadAddress(target)
+    reader = LldbTarget(process)
+    try:
+        return vali_debug.current_state(
+            reader, reader.u64(address), thread.GetThreadID())
+    except (LookupError, MemoryError) as e:
+        raise RuntimeError(str(e))
+
+
+def interpreter(thread):
+    """The innermost Scheme frame's `fp` and `pc`: from the interpreter's
+    DWARF locals when the build has them, else from the VM's records."""
+    if not os.environ.get("VALI_DEBUGGER_NO_DWARF"):
+        found = from_dwarf(thread)
+        if found is not None:
+            return found
+    return from_records(thread)
 
 
 def run(debugger, result, f):

@@ -1,8 +1,9 @@
 """Vali's Scheme frames and values, read from a stopped process's memory.
 
 Shared by the GDB extension (vali_gdb.py) and the LLDB one (vali_lldb.py),
-which supply a `Target` that reads memory, and the interpreter's `fp` and
-`pc` locals, read from DWARF (ADR 0004 #6).
+which supply a `Target` that reads memory, and find the interpreter's `fp`
+and `pc`: from the records the VM keeps for them (`current_state` below),
+or from DWARF locals where the build has them (ADR 0004 #6).
 
 What is read here is described by crates/vali-runtime/src/debug.rs, in C
 layout: each function's `Code` starts with a `DebugFunction`, which points
@@ -14,7 +15,15 @@ are checked against it, so a mismatch is an error, not a wrong answer.
 
 import struct
 
-DEBUG_VERSION = 2
+DEBUG_VERSION = 3
+
+# The exported symbol that heads the list of the VM's per-isolate records,
+# named for the layout version so two incompatible vali-runtimes in one
+# binary do not clash, and what a record holds (`DebugState` in crates/vali-runtime/src/debug.rs):
+# the byte offset of each field.
+STATE_SYMBOL_PREFIX = "VALI_DEBUG_STATES_"
+STATE_SYMBOL = STATE_SYMBOL_PREFIX + str(DEBUG_VERSION)
+STATE_FIELDS = {"version": 0, "next": 8, "thread": 16, "fp": 24, "pc": 32}
 
 # Needed before a layout can be read, and checked against it: a closure's
 # tag, and its pointer to its Code. Closures always have a header, so the
@@ -165,6 +174,69 @@ class Function:
         name = self.sources + 16 * source
         return "%s:%d:%d" % (t.text(t.u64(name), t.u64(name + 8)),
                              t.u32(found + 8), t.u32(found + 12) + 1)
+
+
+# More records than this, one per isolate, means the list is corrupt.
+MAX_STATES = 100000
+
+
+def missing_symbol(found):
+    """The message for a host without this extension's state symbol, given
+    the layout versions of the `VALI_DEBUG_STATES_*` symbols it does have."""
+    message = "no %s symbol; this extension supports layout %d" % (
+        STATE_SYMBOL, DEBUG_VERSION)
+    if found:
+        return "%s, and the host has layout %s: use that Vali's extension" % (
+            message, ", ".join(sorted(found)))
+    return ("%s. This is not a Vali host, or its symbols were stripped (keep "
+            "that symbol, or build with full debug information)" % message)
+
+
+def current_state(target, head, thread=0):
+    """The innermost Scheme frame's `fp` and `pc`, from the VM's records.
+
+    `head` is the value of the exported `VALI_DEBUG_STATES_<DEBUG_VERSION>`: the first of a
+    list of records, one per isolate. The VM keeps a record's `fp` and `pc`
+    current before every call that can leave the interpreter's loop
+    (Rust procedures, raising errors, growing the stack), and clears `fp` while the
+    isolate is not running Scheme code. `thread` is the debugger's id for
+    the selected thread, matched with the one the VM stored; 0 if unknown.
+    Raises LookupError if there is no running isolate to show.
+    """
+    running = []
+    state = head
+    visited = 0
+    while state:
+        visited += 1
+        if visited > MAX_STATES:
+            raise LookupError(
+                "the list of the VM's debug records looks corrupt: it has "
+                "more than %d records, or loops" % MAX_STATES)
+        def field(name):
+            return target.u64(state + STATE_FIELDS[name])
+        version = target.u32(state + STATE_FIELDS["version"])
+        if version != DEBUG_VERSION:
+            raise LookupError(
+                "the VM's debug records are version %d; this extension reads "
+                "version %d" % (version, DEBUG_VERSION))
+        if field("fp"):
+            running.append((field("thread"), field("fp"), field("pc")))
+        state = field("next")
+    if not running:
+        raise LookupError("no isolate is running Scheme code")
+    if thread:
+        mine = [r for r in running if r[0] == thread]
+        if mine:
+            return mine[0][1], mine[0][2]
+        # A VM that cannot tell its thread stored 0: take the only one.
+        if len(running) == 1 and running[0][0] == 0:
+            return running[0][1], running[0][2]
+        raise LookupError("no isolate is running Scheme code on this thread")
+    if len(running) > 1:
+        raise LookupError(
+            "%d isolates are running Scheme code and the debugger gave no "
+            "thread to choose by" % len(running))
+    return running[0][1], running[0][2]
 
 
 def function_of(target, closure):

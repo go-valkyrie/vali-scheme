@@ -154,10 +154,24 @@ unsafe extern "C-unwind" fn body<S: Strategy>(state: *mut c_void) {
     // duration.
     let cx = unsafe { &mut *state.cx };
     let (entry, limit, argc) = (state.entry, state.limit, state.argc);
+    // Tell debuggers this thread runs Scheme code now, and not any more
+    // once it stops, even by a panic (`interpret` keeps `fp` and `pc` there
+    // current from then on).
+    let debug = cx.debug.state();
+    // SAFETY: the record lives as long as `cx`, which outlives this call.
+    unsafe {
+        (*debug)
+            .thread
+            .store(crate::debug::thread_id(), Ordering::Relaxed);
+        (*debug).pc.store(0, Ordering::Relaxed);
+        (*debug).fp.store(entry as u64, Ordering::Relaxed);
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: `execute` set up the entry frame.
         unsafe { cx.interpret(&link, entry, limit, argc) }
     }));
+    // SAFETY: as above.
+    unsafe { (*debug).fp.store(0, Ordering::Relaxed) };
     // SAFETY: as above; the trampoline pops these when it returns.
     unsafe {
         *record = link.host_fp;
@@ -1677,6 +1691,20 @@ impl<S: Strategy> Cx<S> {
         Ok(())
     }
 
+    /// Records where the interpreter is, for a debugger's extensions to read
+    /// (`crate::debug`). Called only on the paths that leave the loop and
+    /// can stop in native code, never in an instruction's fast path, so the
+    /// loop keeps `fp` and `pc` in registers.
+    #[inline]
+    fn debug_at(&self, fp: *mut u64, pc: usize) {
+        let debug = self.debug.state();
+        // SAFETY: the record lives as long as `self`.
+        unsafe {
+            (*debug).fp.store(fp as u64, Ordering::Relaxed);
+            (*debug).pc.store(pc as u64, Ordering::Relaxed);
+        }
+    }
+
     /// Calls a Rust procedure with the `argc` arguments in slots `first`
     /// and up of the frame at `fp`. Up to eight arguments are passed from a
     /// buffer on the Rust stack, without allocating.
@@ -1997,6 +2025,7 @@ impl<S: Strategy> Cx<S> {
                             }
                         } else {
                             // Failing to find room ends the run.
+                            self.debug_at(fp, pc);
                             let (new_top, new_limit) = self.push_segment(needed + 4)?;
                             callee_fp = new_top.sub(3);
                             limit = new_limit;
@@ -2017,6 +2046,7 @@ impl<S: Strategy> Cx<S> {
                         switch_to!(code);
                     }
                     Next::Raise(error) => {
+                        self.debug_at(fp, pc);
                         // Unwind to the innermost `%catch` and call its
                         // handler with the condition in place of the `%catch`
                         // call; with none, or for an exit, return the error
@@ -2179,6 +2209,8 @@ impl<S: Strategy> Cx<S> {
                                 debug_assert!(
                                     resume == ENTRY || resume & (CAPTURE | UNDERFLOW) == 0
                                 );
+                                // A debugger can stop in the Rust procedure.
+                                self.debug_at(fp, pc);
                                 let result = attempt!(self.call_native(callee, fp, base + 4, argc));
                                 if let Some((procedure, args)) = self.task.tail_call.take() {
                                     // The Rust procedure asked for a tail
@@ -2233,7 +2265,10 @@ impl<S: Strategy> Cx<S> {
                                 if !fits(callee_fp, needed, limit) {
                                     // Chain a segment, and move the
                                     // procedure and arguments into it.
-                                    let (top, new_limit) = attempt!(self.push_segment(needed + 4));
+                                    let (top, new_limit) = {
+                                        self.debug_at(fp, pc);
+                                        attempt!(self.push_segment(needed + 4))
+                                    };
                                     // The bottom frame keeps the host's
                                     // stack pointer in the word above its
                                     // header.
@@ -2389,6 +2424,7 @@ impl<S: Strategy> Cx<S> {
                                 continue;
                             }
                             Kind::Native(_) | Kind::Bridge(_) => {
+                                self.debug_at(fp, pc);
                                 let result = attempt!(self.call_native(callee, fp, 1, argc));
                                 if let Some((procedure, args)) = self.task.tail_call.take() {
                                     if !fits(fp, args.len() + 2, limit) {
@@ -2460,7 +2496,10 @@ impl<S: Strategy> Cx<S> {
                                             | BOUNDARY
                                             | (old & CATCH)
                                     };
-                                    let (top, new_limit) = attempt!(self.push_segment(needed + 4));
+                                    let (top, new_limit) = {
+                                        self.debug_at(fp, pc);
+                                        attempt!(self.push_segment(needed + 4))
+                                    };
                                     fp = top.sub(if position == ENTRY { 4 } else { 3 });
                                     limit = new_limit;
                                     *fp = saved;

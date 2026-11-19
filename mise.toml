@@ -36,9 +36,11 @@ run = [
 ]
 
 [tasks.test-debugger-optimised]
-description = "Run the native debugger tests on an optimised build with full debug info, where the interpreter's locals are hardest to read (needs gdb and lldb on Linux)"
-env = { CARGO_PROFILE_RELEASE_DEBUG = "2" }
-run = "cargo test -p vali-runtime --release --features native-frames --test debugger"
+description = "Run the native debugger tests on an optimised build, with full debug info, where the interpreter's locals are hardest to read, and with line tables only, where there are none (needs gdb and lldb on Linux)"
+run = [
+    "CARGO_PROFILE_RELEASE_DEBUG=2 cargo test -p vali-runtime --release --features native-frames --test debugger",
+    "CARGO_PROFILE_RELEASE_DEBUG=line-tables-only VALI_TEST_DEBUG_INFO=line-tables cargo test -p vali-runtime --release --features native-frames --test debugger",
+]
 
 [tasks.lint]
 description = "Check formatting and run Clippy with warnings as errors"

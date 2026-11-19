@@ -67,6 +67,8 @@ pub struct Cx<S: Strategy> {
     pub(crate) natives: Vec<Box<Code<S>>>,
     /// The task running, or to run next: its stack and dynamic state.
     pub(crate) task: Task,
+    /// Where debuggers find this isolate's interpreter (`crate::debug`).
+    pub(crate) debug: crate::debug::Registered,
     /// The most words a task's stack may take.
     pub(crate) max_stack_words: usize,
     /// Whether Scheme code is running, which forbids re-entering it.
@@ -200,6 +202,7 @@ impl<S: Strategy> Cx<S> {
             keywords: HashMap::new(),
             natives: Vec::new(),
             task: Task::new(),
+            debug: crate::debug::Registered::new(),
             max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
             poisoned: None,

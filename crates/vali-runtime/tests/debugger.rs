@@ -268,6 +268,85 @@ fn check_scheme_frames(text: &str) {
     );
     assert!(text.contains("slot 5 = #<procedure f>"), "{text}");
 }
+/// Whether the host has line tables only: no types, and no locals. The
+/// optimised debugger tests (`mise run test-debugger-optimised`) build it
+/// that way as well, and say so here.
+#[cfg(target_os = "linux")]
+fn line_tables_only() -> bool {
+    std::env::var("VALI_TEST_DEBUG_INFO").is_ok_and(|v| v == "line-tables")
+}
+
+/// A copy of this test binary with its symbols stripped except `keep`, in a
+/// directory of its own, or `None` where `strip` is not installed.
+#[cfg(target_os = "linux")]
+fn stripped(tag: &str, keep: &[&str]) -> Option<std::path::PathBuf> {
+    if !available("strip") {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("vali-debugger-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("host");
+    std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    let mut strip = std::process::Command::new("strip");
+    strip.arg("--strip-all");
+    for symbol in keep {
+        strip.arg(format!("--keep-symbol={symbol}"));
+    }
+    let status = strip.arg(&copy).status().unwrap();
+    assert!(status.success(), "strip failed");
+    Some(copy)
+}
+
+/// What gdb printed running `commands` once stopped at the breakpoint in
+/// `exe`, with the extension loaded; reading the VM's records only if
+/// `records_only`.
+#[cfg(target_os = "linux")]
+fn gdb(exe: &std::path::Path, records_only: bool, commands: &[&str]) -> String {
+    let mut gdb = std::process::Command::new("gdb");
+    gdb.args(["-batch", "-nx", "-ex"])
+        .arg(format!("source {}", extension("vali_gdb.py")))
+        .args(["-ex", "break vali_test_breakpoint", "-ex", "run"]);
+    for command in commands {
+        gdb.args(["-ex", command]);
+    }
+    gdb.arg("--args")
+        .arg(exe)
+        .args(["--exact", "debugger_child", "--test-threads=1"])
+        .env(CHILD, "1");
+    if records_only {
+        gdb.env("VALI_DEBUGGER_NO_DWARF", "1");
+    }
+    transcript(&gdb.output().unwrap())
+}
+
+/// As [`gdb`], for lldb.
+#[cfg(target_os = "linux")]
+fn lldb(exe: &std::path::Path, records_only: bool, commands: &[&str]) -> String {
+    let mut lldb = std::process::Command::new("lldb");
+    lldb.args(["--batch", "-o"])
+        .arg(format!(
+            "command script import {}",
+            extension("vali_lldb.py")
+        ))
+        .args([
+            "-o",
+            "breakpoint set -n vali_test_breakpoint",
+            "-o",
+            "process launch -- --exact debugger_child --test-threads=1",
+        ]);
+    for command in commands {
+        lldb.args(["-o", command]);
+    }
+    lldb.arg(exe).env(CHILD, "1");
+    if records_only {
+        lldb.env("VALI_DEBUGGER_NO_DWARF", "1");
+    }
+    transcript(&lldb.output().unwrap())
+}
+
+/// What the extensions need no types for.
+#[cfg(target_os = "linux")]
+const UNTYPED: [&str; 4] = ["vali-bt", "vali-frame 0", "vali-frame 3", "vali-print 0x17"];
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -275,34 +354,26 @@ fn gdb_shows_scheme_frames() {
     if !available("gdb") {
         return;
     }
-    let output = std::process::Command::new("gdb")
-        .args(["-batch", "-nx", "-ex"])
-        .arg(format!("source {}", extension("vali_gdb.py")))
-        .args([
-            "-ex",
-            "break vali_test_breakpoint",
-            "-ex",
-            "run",
-            "-ex",
+    let exe = std::env::current_exe().unwrap();
+    if line_tables_only() {
+        // Nothing here names types or locals, so no `Value` printing.
+        let text = gdb(&exe, false, &UNTYPED);
+        check_scheme_frames(&text);
+        assert!(text.contains("\n()\n"), "{text}");
+        return;
+    }
+    let text = gdb(
+        &exe,
+        false,
+        &[
             "vali-bt",
-            "-ex",
             "vali-frame 0",
-            "-ex",
             "vali-frame 3",
-            "-ex",
             "frame function debugger::stop",
-            "-ex",
             "print args[0]",
-            "-ex",
             "vali-print 0x17",
-            "--args",
-        ])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", "debugger_child", "--test-threads=1"])
-        .env(CHILD, "1")
-        .output()
-        .unwrap();
-    let text = transcript(&output);
+        ],
+    );
     check_scheme_frames(&text);
     // The pretty-printer shows the value `stop` was called with, and
     // `vali-print` decodes a raw word: 0x17 is the empty list.
@@ -316,36 +387,105 @@ fn lldb_shows_scheme_frames() {
     if !available("lldb") {
         return;
     }
-    let output = std::process::Command::new("lldb")
-        .args(["--batch", "-o"])
-        .arg(format!(
-            "command script import {}",
-            extension("vali_lldb.py")
-        ))
-        .args([
-            "-o",
-            "breakpoint set -n vali_test_breakpoint",
-            "-o",
-            "process launch -- --exact debugger_child --test-threads=1",
-            "-o",
+    let exe = std::env::current_exe().unwrap();
+    if line_tables_only() {
+        let text = lldb(&exe, false, &UNTYPED);
+        check_scheme_frames(&text);
+        assert!(text.contains("\n()\n"), "{text}");
+        return;
+    }
+    let text = lldb(
+        &exe,
+        false,
+        &[
             "vali-bt",
-            "-o",
             "vali-frame 0",
-            "-o",
             "vali-frame 3",
-            "-o",
             "up",
-            "-o",
             "frame variable args.data_ptr[0]",
-            "-o",
             "vali-print 0x17",
-        ])
-        .arg(std::env::current_exe().unwrap())
-        .env(CHILD, "1")
-        .output()
-        .unwrap();
-    let text = transcript(&output);
+        ],
+    );
     check_scheme_frames(&text);
     assert!(text.contains("args.data_ptr[0] = 0"), "{text}");
     assert!(text.contains("\n()\n"), "{text}");
+}
+
+/// The records alone, without reading the interpreter's locals, are enough
+/// to show the frames.
+#[test]
+#[cfg(target_os = "linux")]
+fn gdb_shows_scheme_frames_from_records() {
+    if !available("gdb") {
+        return;
+    }
+    let text = gdb(&std::env::current_exe().unwrap(), true, &UNTYPED);
+    check_scheme_frames(&text);
+    assert!(text.contains("\n()\n"), "{text}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn lldb_shows_scheme_frames_from_records() {
+    if !available("lldb") {
+        return;
+    }
+    let text = lldb(&std::env::current_exe().unwrap(), true, &UNTYPED);
+    check_scheme_frames(&text);
+    assert!(text.contains("\n()\n"), "{text}");
+}
+
+/// With every symbol stripped but the one the records are found by (and
+/// the one the test stops at), the frames are still shown.
+#[test]
+#[cfg(target_os = "linux")]
+fn gdb_shows_scheme_frames_without_symbols() {
+    if !available("gdb") {
+        return;
+    }
+    let Some(exe) = stripped("gdb-kept", &["vali_test_breakpoint", "VALI_DEBUG_STATES_3"]) else {
+        return;
+    };
+    let text = gdb(&exe, false, &UNTYPED);
+    check_scheme_frames(&text);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn lldb_shows_scheme_frames_without_symbols() {
+    if !available("lldb") {
+        return;
+    }
+    let Some(exe) = stripped(
+        "lldb-kept",
+        &["vali_test_breakpoint", "VALI_DEBUG_STATES_3"],
+    ) else {
+        return;
+    };
+    let text = lldb(&exe, false, &UNTYPED);
+    check_scheme_frames(&text);
+}
+
+/// Without that symbol nothing finds the records, and the extensions say
+/// so instead of guessing.
+#[test]
+#[cfg(target_os = "linux")]
+fn extensions_explain_a_stripped_symbol() {
+    for (name, run) in [
+        ("gdb", gdb as fn(&std::path::Path, bool, &[&str]) -> String),
+        ("lldb", lldb),
+    ] {
+        if !available(name) {
+            continue;
+        }
+        let Some(exe) = stripped(&format!("{name}-gone"), &["vali_test_breakpoint"]) else {
+            return;
+        };
+        let text = run(&exe, false, &["vali-bt"]);
+        assert!(
+            text.contains("no VALI_DEBUG_STATES_3 symbol"),
+            "{name}: {text}"
+        );
+        assert!(!text.contains("#0 f ("), "{name}: {text}");
+    }
 }
