@@ -2,13 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-17
-- **Amended:** 2026-11-17, the builder takes owned parameters and a borrowed receiver; borrowed parameters come with the macro (items 4, 5 and 7)
-- **Amended:** 2026-11-17, how a native library is compiled: as a generated library form (item 8)
-- **Amended:** 2026-11-17, Vali's own native libraries work at expansion time; ports start with string and bytevector backends (items 8 and 10)
-- **Amended:** 2026-11-17, the macros as built, and expansion-safe marks (items 5 and 8)
-- **Amended:** 2026-11-18, a panic in a core primitive poisons the isolate instead of becoming a condition (item 9)
-- **Amended:** 2026-11-18, a native library's module links to its functions as it loads; there is no `%native-procedure` (item 8)
-- **Amended:** 2026-11-18, raw values cannot be forged or handed to the VM from safe Rust (item 4)
 - **Related:** 0002 (the Port and Rust-object heap types), 0003 (handles, freeing), 0004 (Rust never in the middle of a Scheme stack), 0007 #5 (bridges declare Rust types), 0008 (isolates are `Send`), 0009 (loaders, expansion-safe bridges)
 
 ## Context

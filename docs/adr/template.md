@@ -1,8 +1,7 @@
 # NNNN. Title
 
-- **Status:** Proposed
-- **Date:** YYYY-MM-DD
-- **Amended:** YYYY-MM-DD, what changed (only once amended; one line per amendment)
+- **Status:** Proposed (or Accepted, Accepted, partly built, Accepted, not built, Rejected, Superseded by NNNN)
+- **Date:** YYYY-MM-DD, the day the record was first written
 - **Related:** ADRs this one depends on or affects
 
 ## Context
@@ -32,6 +31,6 @@ Only while Proposed.
 
 ## Left open
 
-For an Accepted record: details this record does not settle. Each needs a later record.
+For an Accepted record: details this record does not settle. Settling one is an edit to this record.
 
 ## References

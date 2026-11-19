@@ -2,9 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Amended:** 2026-11-16, no native code in artifacts; native code reaches disk only through `vali build` (ADR 0006)
-- **Amended:** 2026-11-16, debug information is self-contained: usable without the source files
-- **Amended:** 2026-11-18, optimisation across libraries moves to link time, so distribution code depends on no other library's implementation: per-binding facts shrink to what code names, the consent rule for inlining is dropped, and each dependency's ABI version is recorded (items 2, 6, 7, 10 and 11; ADRs 0017 and 0018)
 - **Related:** 0001 (artifacts, fingerprints), 0005 (run-time bytecode), 0006 (code generation), 0009 (loaders, trust), 0010 (contracts), 0017 (the IR, link-time optimisation), 0018 (library ABI versions)
 
 ## Context
@@ -35,7 +32,7 @@ The JVM and the CLR solve the same problem with two levels. They ship a stable b
 
    When the artifact is loaded, each recorded fact and version is checked against the dependency actually present, as ADR 0018 #6 says. A dependency can change anything its users did not rely on, including adding exports, without breaking them. A mismatch refuses the load with an error naming both libraries and the binding.
 
-   **As built, before artifacts:** an isolate reuses a library it has already loaded only if it is the same compiled module the program was compiled against; another under the same identity is an error, not a silent link to the old instance.
+   An isolate reuses a library it has already loaded only if it is the same compiled module the program was compiled against; another under the same identity is an error, not a silent link to the old instance.
 7. **Distribution code never inlines across libraries.** Inlining another library's procedures, folding its constants and resolving its generic functions happen at link time, against the versions actually present (ADR 0017 #11). No implementation is frozen into anyone else's artifact, so no library needs to consent to being inlined.
 8. **Versioning.** Each artifact carries a format version and lists the format features it uses. Optional sections, such as debug information, can be ignored by a loader that doesn't know them. A Vali release reads every earlier format version. A loader refuses an artifact that needs a feature it does not know, naming the feature. An artifact built by a newer Vali that uses no new features still loads on an older one.
 9. **Interfaces are claims, and untrusted ones are enforced.** Distribution code is validated on load and is memory-safe however it was produced, as in ADR 0005. Its interface may still claim more than its code delivers, for example "returns an integer". Unless the host trusts the artifact's source (ADR 0009), Vali enforces those claims on the library's side: checked entry points check declared results as well as arguments, and constancy claims are checked when the library is linked.

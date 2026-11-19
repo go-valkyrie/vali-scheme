@@ -16,7 +16,7 @@ The caps for 1 and 2 must hold under every memory strategy, `NoCollection` inclu
 
 ## Decision
 
-1. **One configuration type holds every limit.** The type is `HeapConfig`, which the host already passes to `Isolate::new`, `Cx::new` and `Repl::new`, and the `vali` facade re-exports. Its name predates the caps, and a rename can come later. Each field is an `Option`, and `None` means unlimited, except where a default already exists.
+1. **One configuration type holds every limit.** The type is `HeapConfig`, which the host passes to `Isolate::new`, `Cx::new` and `Repl::new`, and the `vali` facade re-exports. Its name predates the caps, and a rename can come later. Each field is an `Option`, and `None` means unlimited, except where a default already exists.
 
    | Field | Bounds | Default |
    |---|---|---|
@@ -45,12 +45,12 @@ The caps for 1 and 2 must hold under every memory strategy, `NoCollection` inclu
 
 ## Consequences
 
-- `max_bytes` now counts the Rust-side estimates as well as the pages, so a host tuned close to its usage can reach `OutOfMemory` sooner than before.
+- `max_bytes` counts the Rust-side estimates as well as the pages, so a host tuned close to its usage can reach `OutOfMemory` sooner.
 - The runtime interns the few names of its own error-object type outside `max_symbols`, so a handler can always be given the error a cap raised.
 - `cx.syntaxes` is a slab: when the strategy frees a syntax object's heap object, the finalize hook empties its slot for reuse, as it does for Rust objects (#44), and so does cycle collection, through the same finalize function. Under `NoCollection` nothing is freed, so the cap is the bound there.
 - A host that interns untrusted input can bound it under every strategy.
 - `HeapConfig` gains fields, so code that builds one with a struct literal and no `..Default::default()` stops compiling.
-- `intern` and `keyword_raw` can now fail with an error that is not `OutOfMemory`, so loading a module that interns past the cap fails the load with that error.
+- `intern` and `keyword_raw` can fail with an error that is not `OutOfMemory`, so loading a module that interns past the cap fails the load with that error.
 - The Rust-side charge is an estimate. A host that needs exact accounting of those tables has none.
 
 ## Alternatives considered

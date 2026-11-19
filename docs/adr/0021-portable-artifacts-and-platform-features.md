@@ -2,7 +2,7 @@
 
 - **Status:** Accepted, not built
 - **Date:** 2026-11-19
-- **Related:** 0001 (amended by this record: cache validity, feature identifiers), 0009 (capabilities), 0012 (distribution artifacts), 0015 (phases, expansion), 0022 (the lint framework, which carries this record's warning)
+- **Related:** 0001 (cache validity, feature identifiers), 0009 (capabilities), 0012 (distribution artifacts), 0015 (phases, expansion), 0022 (the lint framework, which carries this record's warning)
 
 ## Context
 
@@ -54,7 +54,7 @@ ADR 0001 left "features tested by `cond-expand` in a library body" open, and ite
 - The expander gains one hook, on the source of feature values, and one set of observations per unit. Both are cheap.
 - A platform-specific library is still possible and visible: it carries a non-empty record, and its source says `(allow platform-features)`.
 - The record leaves the build-identifier features pinned by the stamp. If a build identifier ever varies between builds that share a stamp, it needs to move into the platform set.
-- Vali's own libraries may now use `cond-expand` on `srfi-N`, and the loader test that forbade every `cond-expand` goes away.
+- Vali's own libraries may use `cond-expand` on `srfi-N`, and the loader test that forbids every `cond-expand` goes away.
 
 ## Alternatives considered
 

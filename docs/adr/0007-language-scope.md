@@ -2,9 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Amended:** 2026-11-16, decided: the full numeric tower, SRFI 125 with SRFI 128, partial `(rnrs …)` aliases, SRFI 226; adds the Rust interface to numbers
-- **Amended:** 2026-11-17, standard libraries as embedded sources; programs without imports see `(scheme base)` (item 11)
-- **Amended:** 2026-11-18, the internal library of primitives is Vali's own: no program, host library or `eval` environment can import it, and a program with no imports sees only `(scheme base)` (item 11)
 - **Related:** 0001 (libraries and phasing), 0002 (tags), 0004 (continuations), 0008 (tasks), 0009 (capabilities), 0011 (licences of dependencies)
 
 ## Context
