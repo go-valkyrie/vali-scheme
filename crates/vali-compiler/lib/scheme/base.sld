@@ -19,10 +19,10 @@
   (export
    ;; Core forms.
    quote quote-syntax quasiquote unquote unquote-splicing if begin lambda
-   let letrec letrec* set! define
+   let let* letrec letrec* set! define
    define-syntax let-syntax letrec-syntax syntax-rules syntax-case syntax
    ;; Derived forms, below.
-   and or when unless let* cond case do with-syntax
+   and or when unless cond case do with-syntax
    define-record-type let-values let*-values define-values syntax-error
    ;; Auxiliary syntax, bound so that literals match by binding.
    else => _ ...
@@ -103,14 +103,6 @@
       (syntax-rules ()
         ((_ test result1 result2 ...)
          (if test (if #f #f) (begin result1 result2 ...)))))
-
-    (define-syntax let*
-      (syntax-rules ()
-        ((_ () body1 body2 ...)
-         (let () body1 body2 ...))
-        ((_ ((name1 val1) (name2 val2) ...) body1 body2 ...)
-         (let ((name1 val1))
-           (let* ((name2 val2) ...) body1 body2 ...)))))
 
     (define-syntax cond
       (syntax-rules (else =>)
