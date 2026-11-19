@@ -116,7 +116,7 @@ So the whole question of sharing reduces to symbols (and keywords, which follow 
 | 1 | `set-car`, `set-cdr` instructions | `vm.rs` | Yes |
 | 2 | `vector-set!` instruction | `vm.rs`, the `VectorSet` arm (checks bounds and type; gains the check) | Yes |
 | 3 | `set-car!`, `set-cdr!` primitives | `primitives.rs` | Yes: not inlined, `apply`, procedure values, SRFI 1 re-exports. `list-set!` goes through them |
-| 4 | `vector-set!`, `vector-fill!`, `vector-copy!` (destination), `vector-sort!`, `vector-merge!` and the other vector mutators | `primitives.rs`, `base.sld`, `srfi/132.sld`; #66 adds `%check-mutable-vector` | Yes |
+| 4 | `vector-set!`, `vector-fill!`, `vector-copy!` (destination), `vector-sort!`, `vector-merge!` and the other vector mutators | `primitives.rs`, `base.sld`, `srfi/132.sld`, `srfi/133.sld`; #66 adds `%check-mutable-vector` | Yes |
 | 5 | `string-set!`, `string-fill!`, `string-copy!` (destination) | `strings.rs` `mutable_string` | Yes |
 | 6 | `bytevector-u8-set!`, `bytevector-copy!` (destination) | `strings.rs` `mutable_bytevector` | Yes |
 | 7 | Host `Handle::set_car`, `set_cdr`, `vector_set` | `cx.rs` | Yes: a host can hold a constant it got from Scheme. Needs an error to return |
