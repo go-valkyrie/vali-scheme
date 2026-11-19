@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "bda2c5b5_c247a8c1",
+        "filename": "docs/adr/0021-portable-artifacts-and-platform-features.md",
+        "patchSetId": 5
+      },
+      "lineNbr": 41,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:46Z",
+      "side": 1,
+      "message": "Rebuilding on a mismatch makes a cache shared between platforms recover, but it can thrash. Take a non-portable library used from both a Linux and a macOS host through one cache. Each host refuses the other\u0027s artifact, rebuilds it and replaces the entry, so every run on either side compiles from source.\n\nPatch set 3 listed this as an open question (\"Whether a cache with one slot per library can hold the artifacts of several platforms at once\"), and patch set 5 dropped it. The new paragraph settles correctness but not this cost. It\u0027s worth keeping the question under Left open, or keying a non-portable entry by its recorded platform values so both versions can stay in the cache side by side.",
+      "revId": "6ad1fe15b4a2935e1312af905bc9f436806cf646",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
