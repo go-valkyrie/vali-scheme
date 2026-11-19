@@ -4,7 +4,7 @@ Vali is a Scheme (R7RS-small plus SRFIs and some R6RS names) built to be embedde
 
 ## Commands
 
-Tasks live in `mise.toml` and run through `bin/mise`, which downloads a pinned mise on first use (`bin/mise install` sets up the toolchain and cargo-deny).
+Tasks live in `mise.toml` and run through `bin/mise`, which downloads a pinned mise on first use (`bin/mise install` sets up the toolchain and cargo-deny). `mise.toml` holds only hk; the Rust toolchain and the other development tools are in the `development` environment, `mise.development.toml`, which `.miserc.toml` turns on by default. CI's commit-message check sets `MISE_ENV` empty to install hk alone.
 
 - `bin/mise run check`: everything CI runs (`lint`, `test`, `docs`, `deny`).
 - `bin/mise run test`: `cargo test --workspace`, plus five more passes. The native debugger tests run with `--features native-frames`, the library tests run with `VALI_ROUND_TRIP=1`, the library and bridge tests run with `VALI_NO_OPT=1`, and so do the regressions and the conformance suites.
@@ -63,6 +63,6 @@ Install the hooks once per machine with `hk install --global --mise` (Git 2.54 o
 
 ## CI
 
-Changes under review are checked by `.github/workflows/gerrit-verify.yml`. The gerrithub-ci Worker (https://github.com/go-valkyrie/gerrithub-ci) starts it for each new patch set from a trusted uploader, and for anyone else's once a trusted reviewer comments `recheck`. It runs the lint, test and docs checks and hk's commit-message checks on the patch set, then votes `Verified` on the change.
+Changes under review are checked by `.github/workflows/gerrit-verify.yml`. The gerrithub-ci Worker (https://github.com/go-valkyrie/gerrithub-ci) starts it for each new patch set from a trusted uploader, and for anyone else's once a trusted reviewer comments `recheck`. It runs the lint, test and docs checks and hk's commit-message checks on the patch set, then votes `Verified` on the change. A patch set that only touches the files `check.yml` skips gets only the commit-message checks.
 
 `.github/workflows/check.yml` runs the parts of `bin/mise run check` (lint, test, docs and deny) and the benchmarks as parallel jobs on PRs and pushes to `main`. It skips changes that only touch `docs/`, `*.md`, `.claude/`, `.jouet/` or `fuzz/`. `fuzz/` is a workspace of its own that needs nightly, and `fuzz.yml` runs it on a schedule.

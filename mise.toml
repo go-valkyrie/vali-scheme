@@ -1,17 +1,15 @@
 # Development tools and tasks. Run `bin/mise install` to set up, and
 # `bin/mise run check` before pushing. bin/mise downloads a pinned mise
 # on first use, so contributors don't need to install it.
-
-[settings]
-# Read the Rust version from rust-toolchain.toml, so it is pinned in one place.
-idiomatic_version_file_enable_tools = ["rust"]
+#
+# This file holds the tools every use needs: hk, which checks commit
+# messages. The Rust toolchain and the other development tools are in the
+# development environment, mise.development.toml, which .miserc.toml turns
+# on. With MISE_ENV set empty, as CI's commit-message check runs, mise
+# installs hk alone.
 
 [tools]
 hk = "2.13.0"
-# Installed on first use (`git review`), not by `mise install`, so CI skips it.
-"pipx:git-review" = { version = "2.5.0", lazy = true, lazy_bins = ["git-review"] }
-"aqua:EmbarkStudios/cargo-deny" = "0.21.0"
-jouet = { version = "latest", workflow = "release.yml@refs/heads/main" }
 
 [tasks.build]
 description = "Build every crate"

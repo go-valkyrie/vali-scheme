@@ -1,0 +1,13 @@
+# The development environment: the Rust toolchain and the tools that build,
+# check and review Vali, on top of mise.toml's. .miserc.toml turns it on, so
+# `bin/mise install` sets all of it up.
+
+[settings]
+# Read the Rust version from rust-toolchain.toml, so it is pinned in one place.
+idiomatic_version_file_enable_tools = ["rust"]
+
+[tools]
+# Installed on first use (`git review`), not by `mise install`, so CI skips it.
+"pipx:git-review" = { version = "2.5.0", lazy = true, lazy_bins = ["git-review"] }
+"aqua:EmbarkStudios/cargo-deny" = "0.21.0"
+jouet = { version = "latest", workflow = "release.yml@refs/heads/main" }

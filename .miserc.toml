@@ -1,0 +1,4 @@
+# Read before mise loads any config file, so it can choose which ones load.
+# The development environment (mise.development.toml) is on unless MISE_ENV
+# says otherwise; CI sets it empty where only hk is needed.
+env = ["development"]

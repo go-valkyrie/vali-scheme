@@ -11,7 +11,9 @@
 #
 # A change only to files the check never reads skips it: prose, agent
 # settings, and the fuzz targets, which fuzz.yml builds. Anything else,
-# including a new directory, runs it. The two lists must stay the same.
+# including a new directory, runs it. The two lists must stay the same,
+# and so must the one in gerrit-verify.yml's changes job, which has no
+# path filters to use and applies the same list itself.
 name: check
 
 on:
