@@ -16,6 +16,10 @@
 //! - `host`: the same, in the host fixture `host:` names. `in-memory-loader`
 //!   also serves `(regression virtual)` from memory; `expansion-reads-scoped`
 //!   lets expansion read the test's `data/` directory and nothing else.
+//!   `library-path` serves libraries from the test's `lib/` directory, as
+//!   `lib/a/b.sld` for `(a b)`, and lets them include files from the
+//!   test's own directory. The conformance suites use it for the shims
+//!   that stand in for an upstream suite's test library.
 //! - `performance`: the file defines `(program n)`, returning a program as
 //!   data. Compiling `(program (* 4 n))` must take at most twice as long
 //!   as linear growth would, eight times as long as `(program n)` for an
@@ -115,6 +119,10 @@ impl Backend for Evaluate {
             (Kind::Host, Some("in-memory-loader")) => host.in_memory = true,
             (Kind::Host, Some("expansion-reads-scoped")) => {
                 host.readable = file.path.parent().map(|dir| dir.join("data"));
+            }
+            (Kind::Host, Some("library-path")) => {
+                host.libraries = file.path.parent().map(|dir| dir.join("lib"));
+                host.readable = file.path.parent().map(Path::to_path_buf);
             }
             (Kind::Host, Some(other)) => {
                 return Outcome::Unsupported(format!("no host fixture named {other}"));
@@ -363,6 +371,8 @@ struct TestHost {
     dir: PathBuf,
     /// The directory expansion may read, if any.
     readable: Option<PathBuf>,
+    /// A directory of `.sld` files to serve libraries from, if any.
+    libraries: Option<PathBuf>,
 }
 
 /// What the `in-memory-loader` fixture serves, with no file behind it.
@@ -406,6 +416,7 @@ impl TestHost {
                 .map(Path::to_path_buf)
                 .unwrap_or_default(),
             readable: None,
+            libraries: None,
         }
     }
 }
@@ -433,6 +444,30 @@ impl vali_compiler::Loader for TestHost {
                     Identity::new("memory:regression/virtual"),
                     VIRTUAL,
                 ))
+            } else if let Some(libraries) = &self.libraries {
+                // Plain names only, so a name can't climb out of the directory.
+                let parts: Option<Vec<&str>> = name
+                    .0
+                    .iter()
+                    .map(|part| match part {
+                        vali_compiler::NamePart::Symbol(s)
+                            if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
+                        {
+                            Some(s.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut path = libraries.clone();
+                path.extend(parts.unwrap_or_default());
+                path.set_extension("sld");
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => Some(Source::scheme(
+                        Identity::new(&format!("library-path:{}", path.display())),
+                        &text,
+                    )),
+                    Err(_) => None,
+                }
             } else {
                 None
             },
