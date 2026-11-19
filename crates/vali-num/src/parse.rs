@@ -433,7 +433,13 @@ impl<'a> Parser<'a> {
     }
 
     /// `re + im·i`. Exact only if both parts are, and `#i` was not given.
+    /// An exact zero imaginary part makes the number real (R7RS 6.2.6:
+    /// `(real? -2.5+0i)` is true), so `-2.5+0i` is `-2.5`; `-2.5+0.0i`
+    /// keeps its inexact zero and stays complex.
     fn rectangular(&self, re: Real, im: Real) -> Result<Number, ParseError> {
+        if im.is_exact_zero() {
+            return Ok(self.finish_real(re));
+        }
         Ok(match (re, im, self.exactness) {
             (Real::Exact(re), Real::Exact(im), Exactness::Default | Exactness::Exact) => {
                 Complex::exact(re, im)

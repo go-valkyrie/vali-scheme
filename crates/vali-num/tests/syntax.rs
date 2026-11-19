@@ -141,8 +141,16 @@ fn rectangular_complex() {
     // An exact zero imaginary part leaves a real; an inexact zero does not.
     reads_as("1+0i", "1");
     assert!(read("1+0i").is_real());
-    reads_as("1.0+0i", "1.0+0.0i");
-    assert!(!read("1.0+0i").is_real());
+    // This holds when the real part is inexact too (R7RS 6.2.6).
+    reads_as("1.0+0i", "1.0");
+    assert!(read("1.0+0i").is_real());
+    reads_as("-2.5+0i", "-2.5");
+    assert!(read("-2.5+0i").is_real());
+    reads_as("1/2-0i", "1/2");
+    reads_as("+inf.0+0i", "+inf.0");
+    reads_as("#i1+0i", "1.0");
+    reads_as("-2.5+0.0i", "-2.5+0.0i");
+    assert!(!read("-2.5+0.0i").is_real());
     reads_as("1-0.0i", "1.0-0.0i");
 }
 
