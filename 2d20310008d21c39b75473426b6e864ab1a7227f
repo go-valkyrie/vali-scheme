@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "8ba043bc_c68abb30",
+        "filename": "docs/adr/0022-lint-framework.md",
+        "patchSetId": 5
+      },
+      "lineNbr": 21,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:47Z",
+      "side": 1,
+      "message": "R7RS leaves `cond-expand` unspecified when no clause matches and there is no `else` (4.2.1, and 5.6.1 for library declarations). So the portable form to show is `(cond-expand (vali (lint ...)) (else))`, which every implementation has to accept.",
+      "revId": "2d20310008d21c39b75473426b6e864ab1a7227f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "5d7d6326_7757c195",
+        "filename": "docs/adr/0022-lint-framework.md",
+        "patchSetId": 5
+      },
+      "lineNbr": 23,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:47Z",
+      "side": 1,
+      "message": "\"The libraries being built\" needs a definition. It can\u0027t mean the libraries compiled from source in this run, because then a cold build and a cached one would report at different levels, which this item rules out.\n\nWith no project yet, one reading is that the program and the libraries named on the command line get full levels, and everything else is capped, including the user\u0027s own libraries found on the library path. Under that reading, a `deny` in a user\u0027s library fails `vali lint` on that library but not `vali run` of a program that imports it. Whichever is meant, it\u0027s worth saying here or listing under Left open next to the configuration question.",
+      "revId": "2d20310008d21c39b75473426b6e864ab1a7227f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
