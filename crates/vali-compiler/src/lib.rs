@@ -399,7 +399,7 @@ fn expand_all(
         }
         let identity = library.identity.as_str();
         let module = match artifacts.get(identity) {
-            Some(bytes) => expander.load_library(identity, bytes, library.own)?,
+            Some(bytes) => expander.load_library(identity, bytes, library.own, library.source)?,
             None => compile_library(expander, library)?,
         };
         libraries.push((library.identity.clone(), module));
@@ -512,15 +512,15 @@ pub(crate) fn compile_library(
     let identity = library.identity.as_str();
     if library.own
         && let Some(bytes) = prebuilt::artifact(identity)
-        && let Ok(module) = expander.load_library(identity, bytes, true)
+        && let Ok(module) = expander.load_library(identity, bytes, true, library.source)
     {
         return Ok(module);
     }
     match &library.form {
-        Some(form) => expander.library(identity, form, library.own),
+        Some(form) => expander.library(identity, form, library.own, library.source),
         None => {
             let form = loader::standard_form(&library.name, &mut expander.sources)?;
-            expander.library(identity, &form, library.own)
+            expander.library(identity, &form, library.own, None)
         }
     }
 }

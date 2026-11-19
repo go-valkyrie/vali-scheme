@@ -14,9 +14,10 @@ use crate::bytes::{DecodeError, Reader, Writer};
 pub const MAGIC: &[u8; 8] = b"\0VALI\0A\n";
 
 /// The format version this Vali writes.
-pub const FORMAT_VERSION: u32 = 1;
+/// Version 2 encodes primitives by name and records fingerprints.
+pub const FORMAT_VERSION: u32 = 2;
 
-/// The format features this Vali knows. None yet: version 1 is the base.
+/// The format features this Vali knows. None yet: version 2 is the base.
 pub const KNOWN_FEATURES: &[&str] = &[];
 
 /// One section of an artifact.

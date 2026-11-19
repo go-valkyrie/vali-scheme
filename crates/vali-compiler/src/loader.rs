@@ -13,6 +13,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use vali_dist::{Digest, Hasher};
 use vali_syntax::{Datum, DatumKind, Span};
 
 use crate::CompileError;
@@ -374,7 +375,7 @@ pub(crate) fn standard_form(
         sources,
     ));
     match future.poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(result) => result,
+        Poll::Ready(result) => result.map(|(form, _)| form),
         Poll::Pending => unreachable!("a synchronous loader never waits"),
     }
 }

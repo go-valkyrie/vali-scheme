@@ -64,8 +64,9 @@ pub(crate) fn depends(identity: &str) -> Option<&'static [String]> {
         .get_or_init(|| {
             crate::expand::decode_library_artifact(bytes)
                 .ok()
-                .map(|(_, needed)| {
-                    needed
+                .map(|(_, depends)| {
+                    depends
+                        .imports
                         .into_iter()
                         .map(|(dependency, _)| dependency)
                         .collect()

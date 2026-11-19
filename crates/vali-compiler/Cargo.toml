@@ -17,5 +17,8 @@ vali-num.workspace = true
 vali-runtime.workspace = true
 vali-syntax.workspace = true
 
+[build-dependencies]
+vali-dist.workspace = true
+
 [lints]
 workspace = true

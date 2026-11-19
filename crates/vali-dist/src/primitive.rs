@@ -75,8 +75,8 @@ macro_rules! primitives {
     ($($name:ident = $spelling:literal, $arity:literal, $effects:expr;)*) => {
         /// An operation on values that the format defines. Each takes a
         /// fixed number of operands; the compiler writes a call with more,
-        /// such as `(+ a b c)`, as a chain. Each is encoded as its place in
-        /// this list, so new ones only ever go at the end.
+        /// such as `(+ a b c)`, as a chain. Each is encoded by its name, so
+        /// the order of this list is not part of the format.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Primitive {
             $(
@@ -102,19 +102,6 @@ macro_rules! primitives {
                     $($spelling => Some(Primitive::$name),)*
                     _ => None,
                 }
-            }
-
-            /// Its number in the encoding.
-            pub fn code(self) -> u8 {
-                Primitive::ALL
-                    .iter()
-                    .position(|&p| p == self)
-                    .expect("every primitive is listed") as u8
-            }
-
-            /// The primitive numbered `code`, if there is one.
-            pub fn from_code(code: u8) -> Option<Primitive> {
-                Primitive::ALL.get(usize::from(code)).copied()
             }
 
             /// How many operands it takes.

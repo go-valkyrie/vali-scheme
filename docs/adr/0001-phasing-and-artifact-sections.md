@@ -10,6 +10,7 @@
 - **Amended:** 2026-11-18, as-built notes: fresh expansion-time instances per unit and phase, and numbering and scope contexts per unit (items 2 and 4)
 - **Amended:** 2026-11-18, as built: library artifacts, their sections, how syntax is stored, and the validity they check so far (items 5 to 8)
 - **Amended:** 2026-11-18, as built: the import graph of Vali's own libraries is read from their prebuilt artifacts, not their sources (item 5)
+- **Amended:** 2026-11-18, as built: source fingerprints, per-build stamps, SHA-256 hashes and expansion-time dependencies in artifacts; primitives are encoded by name (items 7 and 8)
 - **Related:** 0006 (native code), 0009 (loaders and expansion-time access), 0010 (contracts in interfaces), 0017 (link-time optimisation), 0018 (library ABI versions)
 
 ## Context
@@ -57,7 +58,18 @@ R6RS lets an import say at which phase it is needed (`(import (for (lib) expand)
 6. **Visit sections load lazily.** The expander reads one only when it meets one of that library's macros. A warm run reads only invoke sections. Artifacts never hold native code: JIT-compiled code is not cached between runs, and native code reaches disk only through `vali build` (ADRs 0006 and 0013).
 7. **Syntax objects keep stable scope identities when stored.** Syntax objects in visit sections and static information are serialised with stable scope identities, which are remapped to fresh scopes on load.
 
-   **As built (items 5 to 8):** a library's artifact has five required sections: `build` (the compiler and format versions that wrote it), `library` (its identity, imports and interface), `syntax` (its syntax export), `invoke` (its module as distribution code) and `depends` (each import's identity and a hash of that import's `library` and `syntax` sections). Visit code is in `syntax`, with each transformer written in Scheme as distribution code; it is read whole, not lazily. The syntax export is stored as an importer would see it: remapped into a fresh context, so only the scopes it reaches are written, numbered in the order they are met, with the text of every source its spans point into. Loading checks the build, that each import is loaded with the same hash, and every reference in the bytes; a library that is not one of Vali's own may not link the internal `%` primitives, whatever its artifact says. Fingerprints of files read during expansion, features tested, and per-binding facts (ADR 0012 #6) are not recorded yet: these artifacts are Vali's own, rebuilt with it. Writing an artifact again from one loaded gives the same bytes. Setting `VALI_ROUND_TRIP` writes, drops and reloads every library as it is compiled, so the test suite can run on what artifacts hold.
+   **As built (items 5 to 8):** a library's artifact has six required sections: `build` (the stamp of the build that wrote it), `source` (a hash of what was read to compile it, or none), `library` (its identity, imports and interface), `syntax` (its syntax export), `invoke` (its module as distribution code) and `depends` (see below). Visit code is in `syntax`, with each transformer written in Scheme as distribution code; it is read whole, not lazily. The syntax export is stored as an importer would see it: remapped into a fresh context, so only the scopes it reaches are written, numbered in the order they are met, with the text of every source its spans point into. A library that is not one of Vali's own may not link the internal `%` primitives, whatever its artifact says.
+
+   The checks made at load time are these, and a library that fails one is refused with an error naming it, never used:
+   - **The build stamp** must equal this build's. It holds the compiler's version, the distribution format version, the runtime ABI version (`vali-abi`), and a hash of the source files of the compiler and the crates beneath it (reader, optimiser, format, bytecode, runtime, numbers) and of Vali's own Scheme libraries. The compiler's build script computes it from sorted, workspace-relative paths, so identical sources give the same stamp on any machine, and any edit to them gives another. A compiler built outside this workspace, where those sources are not beside it, is stamped by its own sources and version alone.
+   - **The source hash**, when the caller has read the source: a SHA-256 of the library's text, each file its declarations include (in order, with the path), what its declaration-level `cond-expand`s found about libraries, and each file its body includes (sorted by path). A library whose source was not read, which is a standard library loaded from its prebuilt artifact, is vouched for by the build stamp instead, since that hashes the sources the artifact was built from. An artifact that records no source is refused when a source was read.
+   - **The `depends` section** has two lists, each entry an identity and a SHA-256. The first is each import and a hash of that import's `library` and `syntax` sections. The second is each library whose code ran while this one was expanded (instantiated at any phase), and a hash of that library's whole artifact, which covers what it relied on in turn. Every entry must name a library that is loaded, with the same hash. The first list must also name exactly the libraries the `library` section says are imported, in the same order.
+
+   Features tested by `cond-expand` in a body, and library availability tested there, are not recorded yet, nor are per-binding facts (ADR 0012 #6). Expansion-time reads through capabilities (ADR 0009) do not exist yet, so there is nothing to record for them.
+
+   The distribution format's version is 2: it encodes each primitive by its name, not by its place in `Primitive::ALL`, so the order of that list is not part of the format, and removing a primitive makes old artifacts fail to decode with its name in the error. Hashes are SHA-256, written out in `vali-dist` to keep the format's dependencies at none; item 9's content hashes are these.
+
+   Writing an artifact again from one loaded gives the same bytes. Setting `VALI_ROUND_TRIP` writes, drops and reloads every library as it is compiled, so the test suite can run on what artifacts hold.
 
    A library's `syntax` section holds only its own macros and compiled syntax, and the bindings they reach; its imports' macros come from their own exports, which importing it imports too. Without this, every library that imports `(scheme base)` carried a copy of base's macros and of `base.sld`, about 82 KB each, and loading one cost more than compiling it.
 
@@ -96,7 +108,7 @@ Items 8 and 9 refine the design overview's cache key (source, each dependency's 
 
 ## Left open
 
-- The artifact file format and hash algorithm. The bytecode inside is ADR 0005.
+- Whether the artifact file format needs more than its version and named sections. The bytecode inside is ADR 0005.
 - Whether visit and invoke sections can be stored and fetched separately, which would help hosts that fetch artifacts over a network.
 - How static information is declared in source.
 

@@ -28,15 +28,22 @@ fn prebuilt(identity: &str) -> &'static [u8] {
 /// `bytes`, an artifact, as if compiled against another version of each
 /// library it imports: it reads well, but does not fit.
 fn compiled_against_another(bytes: &[u8]) -> Vec<u8> {
-    let sections = ["build", "library", "syntax", "invoke", "depends"];
+    let sections = ["build", "source", "library", "syntax", "invoke", "depends"];
     let mut artifact = vali_dist::Artifact::decode(bytes, &sections).expect("an artifact");
     let mut depends = vali_dist::Reader::new(artifact.section("depends").expect("depends"));
     let mut changed = vali_dist::Writer::new();
-    let n = depends.count(2).expect("a count");
-    changed.usize(n);
-    for _ in 0..n {
-        changed.str(depends.str().expect("an identity"));
-        changed.uint(depends.uint().expect("a hash") ^ 1);
+    // What it imports, then what ran while it was expanded.
+    for list in 0..2 {
+        let n = depends.count(33).expect("a count");
+        changed.usize(n);
+        for _ in 0..n {
+            changed.str(depends.str().expect("an identity"));
+            let mut hash: [u8; 32] = depends.raw(32).expect("a hash").try_into().unwrap();
+            if list == 0 {
+                hash[0] ^= 1;
+            }
+            changed.raw(&hash);
+        }
     }
     artifact.insert("depends", true, changed.finish());
     artifact.encode()
