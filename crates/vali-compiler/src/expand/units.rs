@@ -564,6 +564,11 @@ impl Expander {
                 "it links {name}, which only Vali's own libraries may"
             )));
         }
+        if let Some(name) = links_repl(&ir) {
+            return Err(fail(format!(
+                "it links {name}, an isolate global, which only a REPL's input may"
+            )));
+        }
         let module = converted(&ir)?;
         // The unit goes in first: what it exports names it.
         let index = self.units.len();
@@ -648,7 +653,19 @@ impl Expander {
             ));
         }
         // A transformer runs in the expander's isolate, so what its code
-        // links is held to what a library's own may.
+        // links is held to what a library's own may, and it may not touch
+        // the isolate's globals.
+        for m in syntax.macros.values() {
+            if let Transformer::Procedure(p) = &m.transformer
+                && let Some(name) = links_repl(&p.ir)
+            {
+                return Err(format!(
+                    "the transformer {} links {name}, an isolate global, which only a \
+                     REPL's input may",
+                    m.name
+                ));
+            }
+        }
         if !own {
             let mut allowed = vec![QUOTE_SYNTAX, SYNTAX_MATCH, SYNTAX_BUILD];
             allowed.extend(MACRO_PRIMITIVES);
@@ -663,11 +680,67 @@ impl Expander {
                 }
             }
         }
-        let bindings = record
-            .interface
-            .values()
-            .chain(syntax.table.entries().map(|(_, _, _, binding)| binding));
-        for binding in bindings {
+        // The variables of another library this export may name: what that
+        // library's interface exports, and, in the syntax export only, what
+        // came in when this library imported it, which a macro's template
+        // may need (see `reproduces`). Its other variables are its own: no
+        // export of another library reaches them.
+        let exported_by = |owner: usize| -> HashSet<&str> {
+            self.units.get(owner).map_or_else(HashSet::new, |u| {
+                u.interface
+                    .values()
+                    .filter_map(|b| match b {
+                        Binding::Variable(o, n) if *o == owner => Some(n.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        };
+        let mut exported: HashMap<usize, HashSet<&str>> = HashMap::new();
+        let mut remaps: HashMap<usize, HashMap<Scope, Scope>> = HashMap::new();
+        let own_scopes = own_scopes(syntax, index);
+        let interface = record.interface.values().map(|b| (None, b));
+        let table = syntax
+            .table
+            .entries()
+            .map(|(symbol, set, _, binding)| (Some((symbol, set)), binding));
+        for (entry, binding) in interface.chain(table) {
+            match binding {
+                Binding::Global(name) => {
+                    return Err(format!(
+                        "it binds {name}, an isolate global, which only a REPL's input may"
+                    ));
+                }
+                Binding::Variable(owner, name) if *owner != index => {
+                    let unit = self.units.get(*owner).filter(|u| !u.repl).ok_or_else(|| {
+                        format!("it binds {name} of a library that is not loaded")
+                    })?;
+                    let names = exported
+                        .entry(*owner)
+                        .or_insert_with(|| exported_by(*owner));
+                    if names.contains(name.as_str()) {
+                        continue;
+                    }
+                    let kept = entry.is_some_and(|(symbol, set)| {
+                        reproduces(
+                            (*owner, unit),
+                            syntax,
+                            &own_scopes,
+                            remaps.entry(*owner).or_default(),
+                            symbol,
+                            set,
+                            name,
+                        )
+                    });
+                    if !kept {
+                        return Err(format!(
+                            "it binds {name} of {}, which does not export it",
+                            unit.identity
+                        ));
+                    }
+                }
+                _ => {}
+            }
             match binding {
                 Binding::Macro(id) => {
                     let defined = |syntax: &ContextState| syntax.macros.contains_key(id);
@@ -1083,4 +1156,112 @@ fn links_internal(ir: &vali_dist::Module, allowed: &[&str]) -> Option<String> {
                 || matches!(g.link, vali_dist::GlobalLink::Native(_))
         })
         .map(|g| g.name.to_string())
+}
+
+/// The first of `ir`'s globals that is an isolate global, a REPL's variable:
+/// no library's code may link one, since it would read or assign what the
+/// host and other code keep there.
+fn links_repl(ir: &vali_dist::Module) -> Option<String> {
+    ir.globals
+        .iter()
+        .find(|g| matches!(g.link, vali_dist::GlobalLink::Repl))
+        .map(|g| g.name.to_string())
+}
+
+/// The scopes `syntax` binds its own definitions and macros under, other
+/// than the core forms': what a library's own identifiers carry, which
+/// what it imported never does.
+fn own_scopes(syntax: &ContextState, index: usize) -> HashSet<Scope> {
+    let mut scopes = HashSet::new();
+    for (_, set, _, binding) in syntax.table.entries() {
+        let own = match binding {
+            Binding::Variable(owner, _) => *owner == index,
+            Binding::Macro(id) => id.unit as usize == index,
+            _ => false,
+        };
+        if own {
+            scopes.extend(syntax.context.scopes(set).iter().copied());
+        }
+    }
+    scopes.remove(&syntax.core_scope);
+    scopes
+}
+
+/// Whether `symbol` bound under `set` in `syntax` to the variable `name` of
+/// `owner`, one it does not export, is what importing `owner` brought in:
+/// `owner`'s own syntax export binds that name to that variable under
+/// scopes that this one's map onto, one to one, by kind, with the core
+/// forms' scope the same (`remap_export`). `remap` is the mapping so far,
+/// from `owner`'s scopes to this one's; the scopes a library's own
+/// definitions are bound under are not a mapping of anyone's.
+fn reproduces(
+    (owner_index, owner): (usize, &Unit),
+    syntax: &ContextState,
+    own_scopes: &HashSet<Scope>,
+    remap: &mut HashMap<Scope, Scope>,
+    symbol: &str,
+    set: ScopeSetId,
+    name: &str,
+) -> bool {
+    let Some(theirs) = owner.syntax.as_deref() else {
+        return false;
+    };
+    if remap.is_empty() {
+        remap.insert(theirs.core_scope, syntax.core_scope);
+    }
+    let here = syntax.context.scopes(set);
+    if here.iter().any(|s| own_scopes.contains(s)) {
+        return false;
+    }
+    for (their_symbol, their_set, _, binding) in theirs.table.entries() {
+        if their_symbol != symbol
+            || !matches!(binding, Binding::Variable(o, n) if n == name && *o == owner_index)
+        {
+            continue;
+        }
+        let there = theirs.context.scopes(their_set);
+        if there.len() != here.len() {
+            continue;
+        }
+        // Each of theirs is already mapped to one of ours in `here`, or
+        // is matched to a scope of the same kind that nothing is mapped to.
+        let mut trial = remap.clone();
+        let mut free: Vec<Scope> = here.to_vec();
+        let mut unmapped = Vec::new();
+        let mut fits = true;
+        for &s in there {
+            match trial.get(&s) {
+                Some(mapped) => match free.iter().position(|f| f == mapped) {
+                    Some(at) => {
+                        free.swap_remove(at);
+                    }
+                    None => {
+                        fits = false;
+                        break;
+                    }
+                },
+                None => unmapped.push(s),
+            }
+        }
+        if !fits {
+            continue;
+        }
+        let taken: HashSet<Scope> = trial.values().copied().collect();
+        for s in unmapped {
+            let kind = theirs.context.kind(s);
+            let Some(at) = free
+                .iter()
+                .position(|f| syntax.context.kind(*f) == kind && !taken.contains(f))
+            else {
+                fits = false;
+                break;
+            };
+            trial.insert(s, free.swap_remove(at));
+        }
+        if fits {
+            *remap = trial;
+            return true;
+        }
+    }
+    false
 }

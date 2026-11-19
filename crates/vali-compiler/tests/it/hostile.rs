@@ -60,6 +60,24 @@ fn libraries() -> Map {
                 .to_owned(),
         ),
         (
+            "(test shout)",
+            "(define-library (test shout)
+               (import (scheme base))
+               (export shout)
+               (begin
+                 (define (loud x) (string-append x \"!\"))
+                 (define-syntax shout
+                   (syntax-rules () ((_ e) (loud e))))))"
+                .to_owned(),
+        ),
+        (
+            "(test relay)",
+            "(define-library (test relay)
+               (import (scheme base) (test shout))
+               (export shout))"
+                .to_owned(),
+        ),
+        (
             "(test evil)",
             "(define-library (test evil) (import (scheme base))
                (export dummy) (begin (define dummy 1)))"
@@ -174,7 +192,13 @@ fn attempt(case: &str, program: &str, set: &Set) -> String {
 /// greet's artifact with its library record's interface replaced by
 /// `count` entries, `entries` in all.
 fn greet_interface(set: &Set, count: u64, entries: &[u8]) -> Set {
-    let bytes = find(set, GREET);
+    library_interface(set, GREET, count, entries)
+}
+
+/// `identity`'s artifact with its library record's interface replaced by
+/// `count` entries, `entries` in all.
+fn library_interface(set: &Set, identity: &str, count: u64, entries: &[u8]) -> Set {
+    let bytes = find(set, identity);
     let library = section(bytes, "library");
     let fields = walk_library(&library);
     let at = fields
@@ -185,7 +209,7 @@ fn greet_interface(set: &Set, count: u64, entries: &[u8]) -> Set {
     let mut new = library[..at].to_vec();
     new.extend(uint(count));
     new.extend_from_slice(entries);
-    with(set, GREET, replace_section(bytes, "library", new))
+    with(set, identity, replace_section(bytes, "library", new))
 }
 
 /// greet's artifact with the syntax-section field `pick` finds replaced.
@@ -579,6 +603,176 @@ fn a_library_cannot_supply_another_librarys_compiled_syntax() {
     assert!(r.contains("not its own key"), "{r}");
 }
 
+/// `(test evil)`'s interface with one entry, `peek`, bound by `binding`.
+fn evil_peeks(binding: impl FnOnce(&mut Writer)) -> Set {
+    let set = written("(import (scheme base) (test greet) (test evil)) dummy");
+    let mut w = Writer::new();
+    w.str("peek");
+    binding(&mut w);
+    library_interface(&set, EVIL, 1, &w.finish())
+}
+
+const PEEKS: &str = "(import (scheme base) (test greet) (test evil)) (peek \"x\")";
+
+#[test]
+fn an_interface_cannot_export_another_librarys_private_variable() {
+    // `helper` is (test greet)'s own and not exported; (test evil)
+    // exporting it as `peek` would read it through a name it does not own.
+    let set = evil_peeks(|w| {
+        w.byte(1); // a variable
+        w.uint(0); // of the unit named next
+        w.str(GREET);
+        w.str("helper");
+    });
+    let r = attempt("a private variable of another library", PEEKS, &set);
+    assert!(r.starts_with("refused"), "{r}");
+    assert!(r.contains("does not export"), "{r}");
+    // `greet` is exported, so exporting it again is a re-export.
+    let set = evil_peeks(|w| {
+        w.byte(1);
+        w.uint(0);
+        w.str(GREET);
+        w.str("greet");
+    });
+    let r = attempt("a re-export", PEEKS, &set);
+    assert!(r.starts_with("ran"), "{r}");
+}
+
+/// `(test evil)`'s syntax export with two scopes, the core forms' and the
+/// library's own, and two sets, `{core}` and `{core, library}`, then
+/// whatever `body` writes for the macros, compiled syntax and bindings.
+fn evil_library_export(body: impl FnOnce(&mut Writer)) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.uint(2); // scopes
+    w.byte(3); // the core forms' scope, a library scope
+    w.byte(3); // and the library's own
+    w.uint(2); // sets
+    w.uint(1);
+    w.uint(0); // {core}
+    w.uint(2);
+    w.uint(0);
+    w.uint(1); // {core, library}
+    w.uint(0); // the core forms' scope
+    w.uint(0); // and set
+    w.uint(0); // the next macro
+    w.uint(0); // imported units
+    body(&mut w);
+    w.finish()
+}
+
+/// A binding of `symbol` in a syntax export, under set `set`, to the
+/// variable `name` of the library `identity`.
+fn table_variable(w: &mut Writer, symbol: &str, set: u64, identity: &str, name: &str) {
+    w.str(symbol);
+    w.uint(set);
+    w.byte(0); // in every phase
+    w.byte(1); // a variable
+    w.uint(0); // of the unit named next
+    w.str(identity);
+    w.str(name);
+}
+
+#[test]
+fn a_syntax_export_cannot_bind_another_librarys_private_variable() {
+    // (test evil) binds `peek`, under its own scopes, to (test greet)'s
+    // private `helper`, as its macros' templates could then name it. What
+    // importing (test greet) brings in carries that library's scopes, not
+    // the importer's own.
+    let set = written("(import (scheme base) (test greet) (test evil)) dummy");
+    let export = evil_library_export(|w| {
+        w.uint(0); // macros
+        w.uint(0); // compiled syntax
+        w.uint(2); // bindings
+        table_variable(w, "dummy", 1, EVIL, "dummy");
+        table_variable(w, "peek", 1, GREET, "helper");
+    });
+    let evil = replace_section(find(&set, EVIL), "syntax", export);
+    let set = with(&set, EVIL, evil);
+    let r = attempt("a private variable in a syntax export", PEEKS, &set);
+    assert!(r.starts_with("refused"), "{r}");
+    assert!(r.contains("does not export"), "{r}");
+    // Under the name the owner binds it by, but still under this
+    // library's own scopes, it is refused too.
+    let export = evil_library_export(|w| {
+        w.uint(0);
+        w.uint(0);
+        w.uint(2);
+        table_variable(w, "dummy", 1, EVIL, "dummy");
+        table_variable(w, "helper", 1, GREET, "helper");
+    });
+    let evil = replace_section(find(&set, EVIL), "syntax", export);
+    let r = attempt("the same name", PEEKS, &with(&set, EVIL, evil));
+    assert!(r.contains("does not export"), "{r}");
+}
+
+#[test]
+fn a_macro_may_reach_its_librarys_private_helper_through_a_reexport() {
+    // `shout` expands to a call of (test shout)'s private `loud`. (test
+    // relay) re-exports the macro, and its syntax export holds the
+    // binding of `loud` it brought in, which names a variable it does not
+    // own and (test shout) does not export.
+    let program = "(import (scheme base) (test relay)) (shout \"hi\")";
+    let set = written(program);
+    let r = attempt("a re-exported macro", program, &set);
+    assert!(r.starts_with("ran: \"hi!\""), "{r}");
+}
+
+#[test]
+fn an_interface_cannot_name_a_variable_of_a_library_that_is_not_loaded() {
+    let set = evil_peeks(|w| {
+        w.byte(1);
+        w.uint(0);
+        w.str("lib:(test nowhere)");
+        w.str("x");
+    });
+    let r = attempt("a variable of an unknown library", PEEKS, &set);
+    assert!(r.starts_with("refused"), "{r}");
+}
+
+#[test]
+fn an_interface_cannot_export_an_internal_primitive() {
+    let set = evil_peeks(|w| {
+        w.byte(2); // a primitive
+        w.str("%record?");
+    });
+    let r = attempt("a re-exported internal primitive", PEEKS, &set);
+    assert!(r.contains("an internal primitive"), "{r}");
+}
+
+#[test]
+fn a_library_artifact_cannot_bind_an_isolate_global() {
+    // A `Binding::Global` is a REPL's variable: bound late, to the
+    // isolate's global of that name, which a program could then assign.
+    let set = evil_peeks(|w| {
+        w.byte(4); // a global
+        w.str("peek");
+    });
+    let r = attempt(
+        "an isolate global in an interface",
+        "(import (scheme base) (test evil)) (set! peek 1) peek",
+        &set,
+    );
+    assert!(r.starts_with("refused"), "{r}");
+    assert!(r.contains("isolate global"), "{r}");
+}
+
+#[test]
+fn a_librarys_code_may_not_link_an_isolate_global() {
+    // The same through the module's code: a global that links the
+    // isolate's variable of that name, as a REPL's input does.
+    let set = written(PROGRAM);
+    let bytes = find(&set, GREET);
+    let mut ir = vali_dist::decode(&section(bytes, "invoke")).unwrap();
+    ir.globals.push(vali_dist::Global {
+        name: "secret".into(),
+        link: vali_dist::GlobalLink::Repl,
+    });
+    let invoke = vali_dist::encode(&ir).unwrap();
+    let hostile = with(&set, GREET, replace_section(bytes, "invoke", invoke));
+    let r = attempt("an isolate global in the code", PROGRAM, &hostile);
+    assert!(r.contains("an isolate global"), "{r}");
+}
+
 #[test]
 fn a_transformer_may_not_link_an_internal_primitive() {
     let set = written(PROGRAM);
@@ -603,6 +797,27 @@ fn a_transformer_may_not_link_an_internal_primitive() {
     assert!(r.contains("links %exit"), "{r}");
     // As it is, it links what syntax-case does, and loads.
     assert!(attempt("the transformer as it is", PROGRAM, &set).starts_with("ran"));
+}
+
+#[test]
+fn a_transformer_may_not_link_an_isolate_global() {
+    let set = written(PROGRAM);
+    let bytes = find(&set, GREET);
+    let syntax = section(bytes, "syntax");
+    let fields = walk_syntax(&syntax);
+    let f = fields.iter().find(|f| f.what == "macro.ir").unwrap();
+    let ir_bytes = Reader::new(&syntax[f.at..]).bytes().unwrap().to_vec();
+    let mut ir = vali_dist::decode(&ir_bytes).unwrap();
+    ir.globals.push(vali_dist::Global {
+        name: "secret".into(),
+        link: vali_dist::GlobalLink::Repl,
+    });
+    let mut w = Writer::new();
+    w.bytes(&vali_dist::encode(&ir).unwrap());
+    let patched = splice(&syntax, f.at, f.len, &w.finish());
+    let hostile = with(&set, GREET, replace_section(bytes, "syntax", patched));
+    let r = attempt("a transformer linking an isolate global", PROGRAM, &hostile);
+    assert!(r.contains("an isolate global"), "{r}");
 }
 
 #[test]
