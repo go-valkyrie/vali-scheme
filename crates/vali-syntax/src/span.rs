@@ -72,6 +72,9 @@ impl Source {
 #[derive(Clone, Debug, Default)]
 pub struct Sources {
     sources: Vec<std::sync::Arc<Source>>,
+    /// Where each identity and text pair first is in `sources`, so finding
+    /// a source does not scan the others.
+    index: std::collections::HashMap<(std::sync::Arc<str>, std::sync::Arc<str>), usize>,
 }
 
 impl Sources {
@@ -87,14 +90,15 @@ impl Sources {
         let id = |i: usize| SourceId(u32::try_from(i + 1).expect("fewer than 2^32 sources"));
         let mut map = std::collections::HashMap::new();
         for (i, source) in other.sources.iter().enumerate() {
-            let at = match self
-                .sources
-                .iter()
-                .position(|s| s.identity == source.identity && s.text == source.text)
-            {
-                Some(at) => at,
+            let key = (
+                std::sync::Arc::clone(&source.identity),
+                std::sync::Arc::clone(&source.text),
+            );
+            let at = match self.index.get(&key) {
+                Some(&at) => at,
                 None => {
                     self.sources.push(std::sync::Arc::clone(source));
+                    self.index.insert(key, self.sources.len() - 1);
                     self.sources.len() - 1
                 }
             };
@@ -114,12 +118,8 @@ impl Sources {
     /// The id of the source `identity` with `text`, adding it unless it is
     /// held already.
     pub fn intern(&mut self, identity: &str, text: &str) -> SourceId {
-        match self
-            .sources
-            .iter()
-            .position(|s| &*s.identity == identity && &*s.text == text)
-        {
-            Some(at) => SourceId(u32::try_from(at + 1).expect("fewer than 2^32 sources")),
+        match self.index.get(&(identity.into(), text.into())) {
+            Some(&at) => SourceId(u32::try_from(at + 1).expect("fewer than 2^32 sources")),
             None => self.add(identity, text),
         }
     }
@@ -141,12 +141,19 @@ impl Sources {
                 (u32::try_from(at).expect("a source under 4 GiB"), extra)
             })
             .collect();
-        self.sources.push(std::sync::Arc::new(Source {
+        let source = std::sync::Arc::new(Source {
             identity: identity.into(),
             text: text.into(),
             line_starts,
             wide,
-        }));
+        });
+        self.index
+            .entry((
+                std::sync::Arc::clone(&source.identity),
+                std::sync::Arc::clone(&source.text),
+            ))
+            .or_insert(self.sources.len());
+        self.sources.push(source);
         SourceId(u32::try_from(self.sources.len()).expect("fewer than 2^32 sources"))
     }
 
@@ -238,5 +245,30 @@ mod tests {
         }
         // Not a character boundary: inside `é`.
         assert_eq!(sources.sources[0].chars(5, 6), 0);
+    }
+
+    /// Finding a source among many is not a scan of them all: 16,000 took
+    /// 2.2 s that way in a debug build.
+    #[test]
+    fn many_sources_are_interned_in_linear_time() {
+        let start = std::time::Instant::now();
+        let mut sources = Sources::new();
+        let n = 80_000u32;
+        for i in 0..n {
+            assert_eq!(sources.intern(&format!("s{i}"), "x"), SourceId(i + 1));
+        }
+        // Again: all found.
+        for i in 0..n {
+            assert_eq!(sources.intern(&format!("s{i}"), "x"), SourceId(i + 1));
+        }
+        // The same identity with other text is another source.
+        assert_eq!(sources.intern("s0", "y"), SourceId(n + 1));
+        let mut other = Sources::new();
+        other.intern("s5", "x");
+        other.intern("fresh", "x");
+        let map = sources.absorb(&other);
+        assert_eq!(map[&SourceId(1)], SourceId(6));
+        assert_eq!(map[&SourceId(2)], SourceId(n + 2));
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
     }
 }

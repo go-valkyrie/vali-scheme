@@ -58,6 +58,31 @@ use crate::phase::{self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, Sha
 /// deep.
 const MAX_MACRO_DEPTH: usize = 10_000;
 
+/// The internal primitives that Vali's own exported macros expand into, so
+/// that code a user's library gets from them links them. Only these, besides
+/// the primitives syntax-case uses in a transformer, may a library that is
+/// not Vali's own link (a test checks that the macros in `lib/` emit no
+/// others). `define-record-type` in `lib/scheme/base.sld` is the macro that
+/// emits them. Each checks all of its arguments, since an artifact can call
+/// them directly.
+#[doc(hidden)]
+pub const MACRO_PRIMITIVES: &[&str] = &[
+    "%make-record-type",
+    "%record-constructor-indices",
+    "%make-record",
+    "%record?",
+    "%record-field-index",
+    "%record-ref",
+    "%record-set!",
+];
+
+/// The highest phase a transformer written in Scheme may run at: how many
+/// transformers may be nested in each other's code. A phase has an isolate
+/// of its own, made when it is first used, so a phase that artifact bytes
+/// name is not trusted to be anything near what memory allows. Real macros
+/// reach phase 1 or 2.
+pub(crate) const MAX_PHASE: usize = 16;
+
 type Result<T> = std::result::Result<T, CompileError>;
 
 /// When less stack than this is left, recursion moves to a new segment of

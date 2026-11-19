@@ -23,6 +23,8 @@ mod phase;
 pub mod prebuilt;
 mod repl;
 
+#[doc(hidden)]
+pub use expand::MACRO_PRIMITIVES;
 pub use library::{LibraryName, NamePart};
 pub use loader::{AsyncLoader, Identity, LoadError, Loader, Source};
 pub use repl::Repl;

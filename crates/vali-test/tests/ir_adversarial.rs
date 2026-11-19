@@ -638,6 +638,235 @@ fn slot_allocation_is_not_a_scan_of_the_slots() {
     assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
 }
 
+/// The record primitives that `define-record-type` expands into, which a
+/// library's artifact may link and so call directly with anything: each
+/// raises an error for an argument of the wrong type or range, under every
+/// strategy, and reads none of them unchecked.
+#[test]
+fn record_primitives_reject_bad_arguments() {
+    const NAMES: [&str; 7] = [
+        "%make-record-type",
+        "%record-constructor-indices",
+        "%make-record",
+        "%record-ref",
+        "%record-set!",
+        "%record-field-index",
+        "%record?",
+    ];
+    let prim = |name: &str| NAMES.iter().position(|n| *n == name).unwrap() as u32;
+    let sym = |s: &str| Constant::Symbol(s.into());
+    let list = |items: Vec<Constant>| {
+        items
+            .into_iter()
+            .rev()
+            .fold(Constant::EmptyList, |rest, c| {
+                Constant::Pair(Box::new(c), Box::new(rest))
+            })
+    };
+    let ints = |ns: &[i64]| Constant::Vector(ns.iter().map(|&n| Constant::Integer(n)).collect());
+    let constants = vec![
+        sym("point"),                                           // 0
+        list(vec![sym("x"), sym("y")]),                         // 1
+        Constant::Integer(5),                                   // 2
+        Constant::Integer(0),                                   // 3
+        Constant::Integer(2),                                   // 4
+        Constant::Integer(-1),                                  // 5
+        sym("x"),                                               // 6
+        sym("z"),                                               // 7
+        Constant::Flonum(1.5),                                  // 8
+        Constant::Boolean(false),                               // 9
+        ints(&[7, 9]),                                          // 10
+        ints(&[-1, 0]),                                         // 11
+        Constant::Vector(vec![sym("x"), Constant::Integer(0)]), // 12
+        ints(&[0]),                                             // 13
+        Constant::Integer(1),                                   // 14
+        list(vec![sym("z")]),                                   // 15
+    ];
+    let (point, fields, five, zero, two, neg, x, z, flo, no, bad, negs, syms, short, one, zs) = (
+        c(0),
+        c(1),
+        c(2),
+        c(3),
+        c(4),
+        c(5),
+        c(6),
+        c(7),
+        c(8),
+        c(9),
+        c(10),
+        c(11),
+        c(12),
+        c(13),
+        c(14),
+        c(15),
+    );
+    // A type, another, the constructor indices, and a record of the first.
+    type Case = Box<dyn Fn(Operand, Operand, Operand, Operand) -> (&'static str, Vec<Operand>)>;
+    let cases: Vec<(&str, Case)> = vec![
+        (
+            "ref of a non-type",
+            Box::new(move |_, _, _, _| ("%record-ref", vec![five, five, zero])),
+        ),
+        (
+            "ref with a non-type",
+            Box::new(move |_, _, _, p| ("%record-ref", vec![p, five, zero])),
+        ),
+        (
+            "ref with a symbol",
+            Box::new(move |_, _, _, p| ("%record-ref", vec![p, point, zero])),
+        ),
+        (
+            "set with a non-type",
+            Box::new(move |_, _, _, p| ("%record-set!", vec![p, five, zero, one])),
+        ),
+        (
+            "set of a non-record",
+            Box::new(move |_, _, _, _| ("%record-set!", vec![five, five, zero, one])),
+        ),
+        (
+            "field index of a non-type",
+            Box::new(move |_, _, _, _| ("%record-field-index", vec![five, x])),
+        ),
+        (
+            "indices of a non-type",
+            Box::new(move |_, _, _, _| ("%record-constructor-indices", vec![five, fields])),
+        ),
+        (
+            "make with a non-type",
+            Box::new(move |_, _, i, _| ("%make-record", vec![five, i, one, two])),
+        ),
+        (
+            "make a type of a non-symbol",
+            Box::new(move |_, _, _, _| ("%make-record-type", vec![five, fields])),
+        ),
+        (
+            "ref of a non-record",
+            Box::new(move |r, _, _, _| ("%record-ref", vec![five, r, zero])),
+        ),
+        (
+            "ref with the wrong type",
+            Box::new(move |_, o, _, p| ("%record-ref", vec![p, o, zero])),
+        ),
+        (
+            "set of a non-record",
+            Box::new(move |r, _, _, _| ("%record-set!", vec![five, r, zero, one])),
+        ),
+        (
+            "set with the wrong type",
+            Box::new(move |_, o, _, p| ("%record-set!", vec![p, o, zero, one])),
+        ),
+        (
+            "ref past the fields",
+            Box::new(move |r, _, _, p| ("%record-ref", vec![p, r, two])),
+        ),
+        (
+            "ref at a negative index",
+            Box::new(move |r, _, _, p| ("%record-ref", vec![p, r, neg])),
+        ),
+        (
+            "ref at a symbol",
+            Box::new(move |r, _, _, p| ("%record-ref", vec![p, r, x])),
+        ),
+        (
+            "ref at a flonum",
+            Box::new(move |r, _, _, p| ("%record-ref", vec![p, r, flo])),
+        ),
+        (
+            "set past the fields",
+            Box::new(move |r, _, _, p| ("%record-set!", vec![p, r, two, one])),
+        ),
+        (
+            "set at false",
+            Box::new(move |r, _, _, p| ("%record-set!", vec![p, r, no, one])),
+        ),
+        (
+            "a field that is not there",
+            Box::new(move |r, _, _, _| ("%record-field-index", vec![r, z])),
+        ),
+        (
+            "indices of a missing field",
+            Box::new(move |r, _, _, _| ("%record-constructor-indices", vec![r, zs])),
+        ),
+        (
+            "make with indices that are not a vector",
+            Box::new(move |r, _, _, _| ("%make-record", vec![r, five, one, two])),
+        ),
+        (
+            "make with indices out of range",
+            Box::new(move |r, _, _, _| ("%make-record", vec![r, bad, one, two])),
+        ),
+        (
+            "make with negative indices",
+            Box::new(move |r, _, _, _| ("%make-record", vec![r, negs, one, two])),
+        ),
+        (
+            "make with symbol indices",
+            Box::new(move |r, _, _, _| ("%make-record", vec![r, syms, one, two])),
+        ),
+        (
+            "make with too few indices",
+            Box::new(move |r, _, _, _| ("%make-record", vec![r, short, one, two])),
+        ),
+    ];
+    let build = |name: &str, bad_call: Option<&Case>| {
+        let mut fb = FB::default();
+        let (rtd, other, idx, p, result) = (fb.var(), fb.var(), fb.var(), fb.var(), fb.var());
+        let (v_rtd, v_other, v_idx, v_p) = (v(rtd), v(other), v(idx), v(p));
+        let (last_name, last_args) = match bad_call {
+            Some(case) => case(v_rtd, v_other, v_idx, v_p),
+            None => ("%record-ref", vec![v_p, v_rtd, zero]),
+        };
+        let mut steps: Vec<(Var, &str, Vec<Operand>)> = vec![
+            (rtd, "%make-record-type", vec![point, fields]),
+            (other, "%make-record-type", vec![point, fields]),
+            (idx, "%record-constructor-indices", vec![v_rtd, fields]),
+            (p, "%make-record", vec![v_rtd, v_idx, one, two]),
+        ];
+        steps.push((result, last_name, last_args));
+        let mut t = fb.push(Term::Return(v(result)));
+        for (var, prim_name, args) in steps.into_iter().rev() {
+            let callee = fb.var();
+            let call = let_(
+                &mut fb,
+                var,
+                Value::Call {
+                    callee: v(callee),
+                    args,
+                },
+                t,
+            );
+            t = let_(
+                &mut fb,
+                callee,
+                Value::Global(GlobalId(prim(prim_name))),
+                call,
+            );
+        }
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+        let globals = NAMES
+            .iter()
+            .map(|n| Global {
+                name: (*n).into(),
+                link: GlobalLink::Primitive,
+            })
+            .collect();
+        let m = module(constants.clone(), globals, vec![f0]);
+        (name.to_owned(), convert_checked(&m).unwrap())
+    };
+    // Called properly, the primitives work.
+    let (name, ok) = build("control", None);
+    for (strategy, r) in run_all(&ok) {
+        assert_eq!(r.as_deref(), Ok("1"), "{name} under {strategy}");
+    }
+    for (name, case) in &cases {
+        let (name, bytecode) = build(name, Some(case));
+        for (strategy, r) in run_all(&bytecode) {
+            let e = r.expect_err(&format!("{name} under {strategy} should raise"));
+            assert!(e.starts_with("error:"), "{name} under {strategy}: {e}");
+        }
+    }
+}
+
 /// The widest calls that fit: every argument a distinct live variable.
 #[test]
 fn widest_calls_that_fit() {

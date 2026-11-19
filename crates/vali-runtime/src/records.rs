@@ -206,6 +206,9 @@ pub(crate) fn is_record<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<V
 
 /// The field index `i` of a record of type `rtd`, after checking `v` is one.
 fn checked<S: Strategy>(cx: &Cx<S>, v: Value, rtd: Value, i: Value) -> Result<i32, Error> {
+    // The type is an argument too: a program, or an artifact, may call these
+    // directly with anything, so it is checked before it is read.
+    let rtd = rtd_arg(cx, "record field", rtd)?;
     if !is_record_of(cx, v, rtd) {
         // SAFETY: valid values.
         let type_name = unsafe { cx.record_type_name(rtd) }.unwrap_or("?");

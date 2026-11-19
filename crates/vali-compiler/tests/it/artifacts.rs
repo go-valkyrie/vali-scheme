@@ -446,3 +446,152 @@ fn an_artifact_is_refused_when_code_that_ran_at_expansion_changed() {
         "(6 6)"
     );
 }
+
+/// A user library's artifacts, written and then read: the program must give
+/// the same answer both ways.
+fn round_trips(library: &str, name: &str, program: &str, expected: &str) {
+    let loader = Map(vec![(
+        match name {
+            "(test probe)" => "(test probe)",
+            _ => unreachable!("one library here"),
+        },
+        library.to_owned(),
+    )]);
+    let compile = |artifacts: &Artifacts| {
+        compile_program_with(program, &Identity::new("main"), &loader, artifacts)
+            .map_err(|e| e.message)
+    };
+    let mut written = compile(&writing()).unwrap();
+    let artifacts = std::mem::take(&mut written.artifacts);
+    assert_eq!(run(written), expected);
+    let set = only(artifacts, &format!("lib:{name}"));
+    assert_eq!(set.len(), 1);
+    let read = compile(&reading(&set)).unwrap_or_else(|e| panic!("{name} from its artifact: {e}"));
+    assert_eq!(run(read), expected);
+}
+
+#[test]
+fn a_user_library_with_a_record_type_loads_from_its_artifact() {
+    // `define-record-type` expands into calls of internal primitives in the
+    // library's own code: at phase 0 here, and in a transformer below.
+    round_trips(
+        "(define-library (test probe) (import (scheme base)) (export px)
+           (begin
+             (define-record-type point (make-point x) point? (x point-x set-point-x!))
+             (define (px) (let ((p (make-point 7))) (set-point-x! p 8) (list (point? p) (point-x p))))))",
+        "(test probe)",
+        "(import (scheme base) (test probe)) (px)",
+        "(#t 8)",
+    );
+    round_trips(
+        "(define-library (test probe) (import (scheme base)) (export probe-m)
+           (begin
+             (define-syntax probe-m
+               (lambda (stx)
+                 (define-record-type pt (mk-pt a) pt? (a pt-a))
+                 (datum->syntax stx (pt-a (mk-pt 5)))))))",
+        "(test probe)",
+        "(import (scheme base) (test probe)) (probe-m)",
+        "5",
+    );
+}
+
+/// The `%` names in the bodies of the macros in `lib/`, other than what
+/// each file defines itself: what a user's code can link by using them.
+fn primitives_macros_emit() -> std::collections::BTreeSet<String> {
+    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "sld") {
+                out.push(path);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    files(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib"),
+        &mut paths,
+    );
+    let is_name_char = |c: char| !c.is_whitespace() && !"()'`,\"".contains(c);
+    let names = |s: &str| -> Vec<String> {
+        s.split(|c: char| !is_name_char(c))
+            .filter(|t| t.starts_with('%') && t.len() > 1)
+            .map(str::to_owned)
+            .collect()
+    };
+    let texts: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|l| l.split(';').next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect();
+    // What any library in `lib/` defines, as a procedure or a macro: those
+    // names are Scheme's, linked as variables of their libraries, not
+    // primitives.
+    let defined: std::collections::BTreeSet<String> = texts
+        .iter()
+        .flat_map(|text| {
+            ["(define ", "(define-syntax "]
+                .into_iter()
+                .flat_map(|form| text.match_indices(form))
+                .flat_map(|(at, m)| {
+                    let rest = text[at + m.len()..].trim_start_matches('(');
+                    names(rest.split(|c: char| !is_name_char(c)).next().unwrap_or(""))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut found = std::collections::BTreeSet::new();
+    for text in &texts {
+        for (at, _) in text.match_indices("(define-syntax ") {
+            // The form, to its closing parenthesis.
+            let mut depth = 0;
+            let mut end = text.len();
+            for (i, c) in text[at..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for name in names(&text[at..end]) {
+                if !defined.contains(&name) {
+                    found.insert(name);
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn vali_s_macros_emit_no_internal_primitive_that_user_libraries_may_not_link() {
+    let allowed: std::collections::BTreeSet<String> = vali_compiler::MACRO_PRIMITIVES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let found = primitives_macros_emit();
+    assert!(
+        found.is_superset(&allowed),
+        "MACRO_PRIMITIVES names primitives no macro emits: {:?}",
+        allowed.difference(&found).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        found.difference(&allowed).collect::<Vec<_>>(),
+        Vec::<&String>::new(),
+        "macros in lib/ emit primitives that are not in MACRO_PRIMITIVES"
+    );
+}
