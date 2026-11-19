@@ -38,12 +38,21 @@ impl fmt::Display for OutOfMemory {
 
 impl std::error::Error for OutOfMemory {}
 
-/// How a heap is set up.
+/// How a heap is set up, and the resource limits of the isolate that owns
+/// it: one configuration type for all of them (ADR 0023). `None` is
+/// unlimited.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeapConfig {
     /// The most memory the heap may take from the system, in bytes, counting
     /// whole pages and large objects.
     pub max_bytes: Option<usize>,
+    /// The most symbols and keywords together an isolate may intern. A
+    /// symbol counts for as long as the isolate lives, so a long-lived
+    /// isolate that interns without bound reaches this for good (ADR 0023).
+    pub max_symbols: Option<usize>,
+    /// The most runtime syntax objects an isolate may hold at once, counting
+    /// the ones whose heap object has not been freed (ADR 0023).
+    pub max_syntaxes: Option<usize>,
 }
 
 /// Hands out pages and large objects, counts them against the heap's limit,
