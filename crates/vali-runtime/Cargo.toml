@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+caseless = "0.2.2"
 vali-abi.workspace = true
 vali-bytecode.workspace = true
 vali-macros.workspace = true
