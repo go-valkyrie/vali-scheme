@@ -47,6 +47,18 @@ The standard libraries' Scheme sources are in `crates/vali-compiler/lib/` (`sche
 - `docs/adr/`: one record per design decision, indexed in `docs/adr/README.md`, which also states how records are amended or superseded. Read the relevant ADR before changing a design. New records start from `docs/adr/template.md`.
 - `docs/bytecode.md`: the run-format instruction set.
 
+## Commits and review
+
+Changes are reviewed on GerritHub (`ssh://gerrithub.io:29418/go-valkyrie/vali-scheme`), which replicates to GitHub. One change is one commit: push it with `git push gerrit HEAD:refs/for/main`, and answer review by amending the commit and pushing again, not by adding commits.
+
+Commit messages are Conventional Commits, and `hk.pkl` checks them:
+
+- **Subject:** `type(scope): description`, where `type` is one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `security`, `style` or `test`. `scope` is optional and must be one of the scopes listed in `hk.pkl`: the crate without its `vali-` prefix, or `adr`, `bench`, `debugger`, `fuzz` or `mise`. Add a scope there when a new crate or area appears. Start the description lower-case (acronyms such as ADR or IR are fine), and don't end it with a full stop.
+- **Body:** wrap at 72 characters. URLs, indented or fenced code, and trailers may run longer.
+- **Trailers:** only `Co-Authored-By`, plus the `Change-Id` the hook adds.
+
+Install the hooks once per machine with `hk install --global --mise` (Git 2.54 or later), or `hk install --mise` in this clone. They run rustfmt before a commit, then check the message and add the `Change-Id` Gerrit needs.
+
 ## CI
 
 `.github/workflows/check.yml` runs the parts of `bin/mise run check` (lint, test, docs and deny) and the benchmarks as parallel jobs on PRs and pushes to `main`. It skips changes that only touch `docs/`, `*.md`, `.claude/`, `.jouet/` or `fuzz/`. `fuzz/` is a workspace of its own that needs nightly, and `fuzz.yml` runs it on a schedule.

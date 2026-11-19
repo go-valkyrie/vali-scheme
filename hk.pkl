@@ -1,0 +1,40 @@
+amends "package://github.com/jdx/hk/releases/download/v2.13.0/hk@2.13.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.13.0/hk@2.13.0#/Builtins.pkl"
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps {
+      // Clippy and the tests are too slow for a hook; `bin/mise run lint`
+      // and CI run them.
+      ["rustfmt"] = Builtins.rustfmt
+    }
+  }
+
+  ["commit-msg"] {
+    steps {
+      // Conventional Commits, with scopes limited to the crates and areas
+      // the history uses. Add a scope here when a new crate or area appears.
+      ["conventional-commit"] = (Builtins.check_conventional_commit) {
+        allowed_scopes = List(
+          "abi", "adr", "bench", "bytecode", "cli", "compiler", "debugger",
+          "dist", "fuzz", "macros", "mise", "num", "opt", "runtime", "stdlib",
+          "syntax", "test", "vali"
+        )
+      }
+      // What the builtin leaves alone: a lower-case description with no
+      // full stop, and body lines of at most 72 characters (Gerrit warns
+      // about longer ones).
+      ["commit-message"] {
+        check = "sh tools/hooks/check-commit-message {{commit_msg_file}}"
+      }
+      // Gerrit's commit-msg hook adds the Change-Id trailer every change
+      // pushed for review needs. It runs last, after the checks pass.
+      ["gerrit-change-id"] {
+        exclusive = true
+        check = "sh tools/hooks/gerrit-change-id {{commit_msg_file}}"
+      }
+    }
+  }
+}

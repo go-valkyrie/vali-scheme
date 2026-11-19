@@ -7,6 +7,7 @@
 idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
+hk = "2.13.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.21.0"
 jouet = { version = "latest", workflow = "release.yml@refs/heads/main" }
 

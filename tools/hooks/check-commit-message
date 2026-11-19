@@ -1,0 +1,63 @@
+#!/bin/sh
+# Checks what hk's Conventional Commits builtin leaves alone:
+#
+# - the subject's description starts lower-case (an acronym such as ADR, IR
+#   or R7RS is fine) and doesn't end with a full stop;
+# - no body line is over 72 characters, which Gerrit flags on push. Lines that
+#   can't be wrapped are allowed: ones holding a URL, indented or fenced code,
+#   and the trailer block (Key: value lines at the end).
+#
+# Comment lines git strips (#) are ignored.
+#
+# Usage: check-commit-message MESSAGE-FILE
+
+set -eu
+file=$1
+limit=72
+
+awk -v limit="$limit" '
+  /^#/ { next }
+  { lines[++n] = $0 }
+  END {
+    bad = 0
+
+    # The subject: "type(scope)!: description".
+    subject = lines[1]
+    desc = subject
+    sub(/^[^:]*: */, "", desc)
+    word = desc
+    sub(/[ ].*$/, "", word)
+    sub(/[^A-Za-z0-9]+$/, "", word)      # trailing punctuation
+    sub(/'"'"'s$/, "", word)               # possessive: CI'"'"'s
+    if (word ~ /^[A-Z]/ && word ~ /[a-z]/) {
+      printf "subject: start the description lower-case, not \"%s\" (acronyms are fine)\n", word
+      bad = 1
+    }
+    if (subject ~ /\.$/) {
+      print "subject: don'"'"'t end it with a full stop"
+      bad = 1
+    }
+
+    # The trailer block: the last paragraph, if every line in it is Key: value.
+    end = n
+    while (end > 0 && lines[end] == "") end--
+    start = end
+    while (start > 0 && lines[start] != "") start--
+    trailers = (end > 1 && start > 0)
+    for (i = start + 1; i <= end; i++)
+      if (lines[i] !~ /^[A-Za-z][A-Za-z0-9-]*: /) trailers = 0
+    if (!trailers) start = end
+
+    fenced = 0
+    for (i = 3; i <= start; i++) {   # line 1 is the subject, line 2 blank
+      l = lines[i]
+      if (l ~ /^```/) { fenced = !fenced; continue }
+      if (fenced || l ~ /^(    |\t)/ || l ~ /[a-z]+:\/\//) continue
+      if (length(l) > limit) {
+        printf "line %d is %d characters (wrap at %d): %s\n", i, length(l), limit, l
+        bad = 1
+      }
+    }
+    exit bad
+  }
+' "$file"
