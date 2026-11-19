@@ -26,6 +26,13 @@ use crate::value::Value;
 pub enum Error {
     /// Allocation failed.
     OutOfMemory,
+    /// The isolate reached a cap the host set in its [`HeapConfig`], such as
+    /// the number of symbols it may intern (ADR 0023). Nothing was
+    /// allocated, so the isolate is as it was, and Scheme code can catch
+    /// this.
+    ///
+    /// [`HeapConfig`]: crate::HeapConfig
+    LimitExceeded(Limit),
     /// The handle belongs to another isolate. Values move between isolates
     /// by being sent through a channel, which copies them (ADR 0008).
     WrongIsolate,
@@ -52,6 +59,25 @@ pub enum Error {
     /// Scheme code raised an error. Until Scheme has conditions, errors
     /// unwind to the host with a backtrace.
     Scheme(Box<SchemeError>),
+}
+
+/// Which cap an [`Error::LimitExceeded`] reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Limit {
+    /// `HeapConfig::max_symbols`: symbols and keywords interned.
+    Symbols,
+    /// `HeapConfig::max_syntaxes`: runtime syntax objects alive.
+    Syntaxes,
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Limit::Symbols => "symbols",
+            Limit::Syntaxes => "syntax objects",
+        })
+    }
 }
 
 /// Which predicate, besides `error-object?`, accepts the condition a handler
@@ -223,6 +249,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::OutOfMemory => f.write_str("out of memory"),
+            Error::LimitExceeded(limit) => {
+                write!(f, "resource limit reached: too many {limit}")
+            }
             Error::WrongIsolate => f.write_str(
                 "this handle belongs to another isolate; send the value through a channel to copy it",
             ),

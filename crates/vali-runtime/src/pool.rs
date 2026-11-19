@@ -654,6 +654,7 @@ mod tests {
     fn the_pool_is_charged_to_the_limit() {
         let mut cx = Cx::<NoCollection>::new(&HeapConfig {
             max_bytes: Some(2 * PAGE_BYTES),
+            ..Default::default()
         });
         assert_eq!(cx.bytes_used(), 0);
         cx.pool_constant(&list(10)).unwrap();

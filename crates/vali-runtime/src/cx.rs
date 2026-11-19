@@ -83,6 +83,9 @@ pub struct Cx<S: Strategy> {
     pub(crate) fuel_limit: Option<u64>,
     /// The syntax objects that heap objects of type `Syntax` index.
     pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
+    /// The limits the host set (ADR 0023), and the Rust-side bytes of
+    /// symbols, keywords and syntax objects charged against `max_bytes`.
+    pub(crate) limits: Limits,
     /// Data the host keeps here for its Rust procedures to reach.
     pub(crate) host_data: Option<Box<dyn std::any::Any + Send>>,
     /// The expander's data, for the syntax procedures: its scopes and
@@ -112,6 +115,39 @@ pub struct Cx<S: Strategy> {
     /// native functions run (ADR 0009 #17).
     pub(crate) expanding: bool,
 }
+
+/// An isolate's limits besides the heap's own, and what it has charged
+/// against them (ADR 0023).
+#[derive(Debug)]
+pub(crate) struct Limits {
+    max_bytes: Option<usize>,
+    pub(crate) max_symbols: Option<usize>,
+    pub(crate) max_syntaxes: Option<usize>,
+    /// Rust-side bytes the heap does not see: table entries of symbols,
+    /// keywords and syntax objects, estimated per entry.
+    rust_bytes: usize,
+}
+
+impl Limits {
+    fn new(config: &HeapConfig) -> Limits {
+        Limits {
+            max_bytes: config.max_bytes,
+            max_symbols: config.max_symbols,
+            max_syntaxes: config.max_syntaxes,
+            rust_bytes: 0,
+        }
+    }
+}
+
+/// What one interned name costs on the Rust side: its bytes, the key's box,
+/// the value and a control byte of the table.
+pub(crate) fn name_entry_bytes(name: &str) -> usize {
+    name.len() + std::mem::size_of::<(Box<str>, Value)>() + 1
+}
+
+/// What one runtime syntax object costs on the Rust side besides the
+/// syntax's own allocations: its slot in the table.
+pub(crate) const SYNTAX_SLOT_BYTES: usize = std::mem::size_of::<vali_syntax::Syntax>();
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -177,6 +213,7 @@ impl<S: Strategy> Cx<S> {
             counters: crate::Counters::default(),
             fuel_limit: None,
             syntaxes: Vec::new(),
+            limits: Limits::new(config),
             host_data: None,
             expander_data: None,
             evaluator: None,
@@ -234,9 +271,55 @@ impl<S: Strategy> Cx<S> {
         self.instances.slots()
     }
 
+    /// How many symbols and keywords are interned.
+    #[doc(hidden)]
+    pub fn interned_symbols(&self) -> usize {
+        self.symbols.len() + self.keywords.len()
+    }
+
+    /// How many runtime syntax objects the isolate holds.
+    #[doc(hidden)]
+    pub fn live_syntaxes(&self) -> usize {
+        self.syntaxes.len()
+    }
+
     /// How many bytes the heap has taken from the system.
     pub fn bytes_used(&self) -> usize {
         S::bytes_used(&self.heap)
+    }
+
+    /// Whether `bytes` more of Rust-side memory fit the memory limit
+    /// together with the heap and what is already charged (ADR 0023).
+    pub(crate) fn check_rust_bytes(&self, bytes: usize) -> Result<(), crate::Error> {
+        match self.limits.max_bytes {
+            Some(max)
+                if self
+                    .bytes_used()
+                    .saturating_add(self.limits.rust_bytes)
+                    .saturating_add(bytes)
+                    > max =>
+            {
+                Err(crate::Error::OutOfMemory)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether a symbol or keyword named `name`, not interned yet, fits
+    /// the limits (ADR 0023): its count and its Rust-side bytes.
+    pub(crate) fn check_new_name(&self, name: &str) -> Result<(), crate::Error> {
+        if let Some(max) = self.limits.max_symbols
+            && self.symbols.len() + self.keywords.len() >= max
+        {
+            return Err(crate::Error::LimitExceeded(crate::Limit::Symbols));
+        }
+        self.check_rust_bytes(name_entry_bytes(name))
+    }
+
+    /// Charges `bytes` of Rust-side memory, which `check_rust_bytes`
+    /// allowed, against the memory limit.
+    pub(crate) fn charge_rust_bytes(&mut self, bytes: usize) {
+        self.limits.rust_bytes += bytes;
     }
 
     /// A new object of type `t` with `fields` words after its header, the
@@ -791,5 +874,30 @@ impl Handle {
             cx.vector_set(v, i, x);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NoCollection;
+
+    /// The Rust-side bytes of symbols and syntax objects count against the
+    /// memory limit together with the heap's pages (ADR 0023).
+    #[test]
+    fn rust_bytes_share_the_memory_limit() {
+        let mut cx = Cx::<NoCollection>::new(&HeapConfig {
+            max_bytes: Some(1000),
+            ..Default::default()
+        });
+        assert_eq!(cx.check_rust_bytes(1000), Ok(()));
+        assert_eq!(cx.check_rust_bytes(1001), Err(crate::Error::OutOfMemory));
+        cx.charge_rust_bytes(990);
+        assert_eq!(cx.check_rust_bytes(10), Ok(()));
+        assert_eq!(cx.check_rust_bytes(11), Err(crate::Error::OutOfMemory));
+        // Without a memory limit nothing is refused.
+        let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+        cx.charge_rust_bytes(usize::MAX / 2);
+        assert_eq!(cx.check_rust_bytes(usize::MAX / 2), Ok(()));
     }
 }

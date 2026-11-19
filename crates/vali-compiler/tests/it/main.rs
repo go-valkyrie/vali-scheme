@@ -6,5 +6,6 @@ mod artifacts;
 mod bridges;
 mod compile;
 mod libraries;
+mod limits;
 mod lower;
 mod repl;

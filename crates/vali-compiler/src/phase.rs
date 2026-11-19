@@ -251,7 +251,7 @@ fn datum_to_syntax<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value,
     let made = unsafe { cx.value_syntax(args[1], context.scopes(), context.span()) }
         .ok_or_else(|| Error::scheme("datum->syntax: expected a datum"))?
         .with_origin(context.origin().cloned());
-    Ok(cx.syntax_raw(made)?)
+    cx.syntax_raw(made)
 }
 
 fn is_identifier<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -301,7 +301,7 @@ fn quote_syntax<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Er
             .cloned()
             .ok_or_else(|| Error::scheme("quote-syntax: no such syntax"))
     })?;
-    Ok(cx.syntax_raw(quoted)?)
+    cx.syntax_raw(quoted)
 }
 
 /// Each unit's compiled syntax, by the unit's identity. Code names its own
@@ -335,7 +335,7 @@ fn number(v: Value, name: &str) -> Result<usize, Error> {
 /// What a pattern variable matched, as a value.
 fn match_value<S: Strategy>(cx: &mut Cx<S>, m: Match) -> Result<Value, Error> {
     match m {
-        Match::One(syntax) => Ok(cx.syntax_raw(syntax)?),
+        Match::One(syntax) => cx.syntax_raw(syntax),
         Match::Many(matches) => {
             let values = matches
                 .into_iter()
@@ -437,7 +437,7 @@ fn syntax_build<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Er
             .build(template, &mut binds)
             .map_err(|e| Error::scheme(format!("{name}: {}", e.message)))
     })?;
-    Ok(cx.syntax_raw(built)?)
+    cx.syntax_raw(built)
 }
 
 /// `(generate-temporaries list)`: as many fresh identifiers as `list` has
