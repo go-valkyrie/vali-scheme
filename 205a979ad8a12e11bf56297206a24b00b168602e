@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "053bb113_d87d9827",
+        "filename": "crates/vali-test/src/lib.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 462,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:43:07Z",
+      "side": 1,
+      "message": "Done in patch set 2. `library_path_source` returns `None` as soon as a part isn\u0027t a plain symbol, so a rejected name is never mapped to `lib.sld`.",
+      "parentUuid": "a56d2ef3_3e56d6a2",
+      "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "52e5c731_4f6140e0",
         "filename": "tests/conformance/r7rs/known-failures.scm",
         "patchSetId": 1
@@ -48,6 +66,24 @@
       "writtenOn": "2026-11-19T13:51:54Z",
       "side": 1,
       "message": "The verdict only exists if the run reaches the outermost `test-end`. If it ends without getting there, the program finishes with status 0 and the test passes, with every failure it recorded unreported. That happens if an upstream update adds a `test-begin` without its `test-end`, or a `skipped-lines.txt` entry blanks one.\n\nA cheap guard: have `conformance.rs` require the summary line in the output, or have the shim exit non-zero unless it was printed (for instance `(exit 2)` as the file\u0027s last form, which a correct run never reaches because `test-end` exits first). Requiring a minimum number of passed cases would also catch a suite that silently shrank.",
+      "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "2ae51203_913fc250",
+        "filename": "tests/conformance/r7rs/lib/chibi/test.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 105,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:43:07Z",
+      "side": 1,
+      "message": "Done in patch set 2. `run` in `vali-test` fails a `library-path` test whose output has no `summary: ` line. The shim also exits 1 when fewer than `minimum-passed` cases pass.",
+      "parentUuid": "09280cc4_dbf0d0f7",
       "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
