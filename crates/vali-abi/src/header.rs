@@ -61,11 +61,14 @@ pub enum TypeCode {
     /// A syntax object: an index into its context's table of them (ADR
     /// 0015 #13).
     Syntax = 45,
+    /// An immutable pair (SRFI 116): its `icar` and `icdr`, laid out as a
+    /// pair's `car` and `cdr` after a header, whatever the strategy.
+    Ipair = 47,
 }
 
 impl TypeCode {
     /// Every type code, in numeric order.
-    pub const ALL: [TypeCode; 23] = [
+    pub const ALL: [TypeCode; 24] = [
         TypeCode::Pair,
         TypeCode::Flonum,
         TypeCode::Closure,
@@ -89,6 +92,7 @@ impl TypeCode {
         TypeCode::Port,
         TypeCode::RustObject,
         TypeCode::Syntax,
+        TypeCode::Ipair,
     ];
 
     /// The type code numbered `n`, if there is one.

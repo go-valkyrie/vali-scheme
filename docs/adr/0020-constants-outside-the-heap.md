@@ -106,6 +106,7 @@ So the whole question of sharing reduces to symbols (and keywords, which follow 
 - **`eq?` of literals.** One literal is one object per module, as #61 pins: a `quote` always yields the same pool object, and two equal literals in one module are distinct objects. If the pool is shared, the object is the same word in every isolate. That is not observable: isolates exchange only copies (ADR 0008 #5), and a copy of a constant is a new, mutable object. Equal constants in two different modules stay distinct, as R7RS allows. A later pass could merge equal immutable constants across modules; it is not needed.
 - **`read`, `syntax->datum`, quasiquote, `list-copy`** make fresh mutable objects, as above. A macro that builds a pair at phase 1 and quotes it produces a *copy* in the module's pool; the phase-1 original stays mutable.
 - **Strings.** A pool string is read-only by location, and every mutator already refuses an immutable string. The bytes of a pool string are a pool bytevector, so replacing them (`set_string_text`) is never reached.
+- **Immutable pairs (SRFI 116).** An `Ipair` (ADR 0002 #14) is immutable by construction: no operation writes to it, so it needs neither the frozen page nor the `IMMUTABLE` flag. It is not a pool constant, because source has no literal syntax for one, so the pool builder never makes one; `(iq ...)` of `(srfi 116)` allocates at run time.
 - **Artifacts and the round trip.** Unchanged: the format stores `Constant`s, and the pool is built from them at load.
 
 ### 7. Every mutation path that must check

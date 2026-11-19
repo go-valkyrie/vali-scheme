@@ -19,7 +19,7 @@
 //!   identity, through [`References::identity_hash`](crate::References).
 //!   No strategy moves objects today, so that is the address; a strategy that
 //!   moves them stores a hash in the object instead (ADR 0003).
-//! - **Pairs and vectors** hash by content in `equal-hash`. The walk is
+//! - **Pairs, immutable pairs and vectors** hash by content in `equal-hash`. The walk is
 //!   iterative and visits at most [`NODE_BUDGET`] nodes in a fixed
 //!   pre-order, so a deep or circular structure costs a bounded amount and
 //!   never overflows the stack. The budget is spent in the order of the
@@ -179,7 +179,11 @@ impl<S: Strategy> Cx<S> {
     /// `equal?`'s hash of `v`, over at most [`NODE_BUDGET`] objects.
     fn equal_hash(&self, v: Value) -> u64 {
         // SAFETY: a live value.
-        let compound = v.is_pair() || unsafe { self.header_type(v) } == Some(TypeCode::Vector);
+        let compound = v.is_pair()
+            || matches!(
+                unsafe { self.header_type(v) },
+                Some(TypeCode::Vector | TypeCode::Ipair)
+            );
         if !compound {
             // A string, a number, a symbol hash as `string-hash`,
             // `number-hash` and `symbol-hash` do, which `default-hash`
@@ -199,6 +203,11 @@ impl<S: Strategy> Cx<S> {
                     h = combine(h, 0x11);
                     work.push(self.cdr(v));
                     work.push(self.car(v));
+                } else if self.header_type(v) == Some(TypeCode::Ipair) {
+                    // Its own seed: an ipair is never `equal?` to a pair.
+                    h = combine(h, 0x33);
+                    work.push(self.icdr(v));
+                    work.push(self.icar(v));
                 } else if self.header_type(v) == Some(TypeCode::Vector) {
                     let n = self.vector_length(v);
                     h = combine(combine(h, 0x22), n as u64);

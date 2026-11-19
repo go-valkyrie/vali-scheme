@@ -14,7 +14,7 @@ use crate::records;
 use crate::strategy::Strategy;
 use crate::strings::mutable_vector;
 use crate::value::Value;
-use crate::vm::type_error;
+use crate::vm::{type_error, wrong_type};
 
 const fn at_least(n: u8) -> Arity {
     Arity {
@@ -29,17 +29,17 @@ fn cons<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     Ok(unsafe { cx.cons_raw(args[0], args[1])? })
 }
 
-fn pair_arg(name: &str, v: Value) -> Result<Value, Error> {
+fn pair_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value, Error> {
     if v.is_pair() {
         Ok(v)
     } else {
-        Err(type_error(name, "a pair", v))
+        Err(wrong_type(cx, name, "a pair", v))
     }
 }
 
 /// A pair `name` changes: an error if it is not a pair, or is a constant.
 fn mutable_pair_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value, Error> {
-    let pair = pair_arg(name, v)?;
+    let pair = pair_arg(cx, name, v)?;
     // SAFETY: a live pair.
     if unsafe { Cx::<S>::pair_is_frozen(pair) } {
         return Err(cx.immutable_pair(name, pair));
@@ -47,14 +47,43 @@ fn mutable_pair_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Val
     Ok(pair)
 }
 
+fn ipair<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    // SAFETY: arguments are valid values.
+    Ok(unsafe { cx.ipair_raw(args[0], args[1])? })
+}
+
+fn ipair_arg<S: Strategy>(cx: &Cx<S>, name: &str, v: Value) -> Result<Value, Error> {
+    if cx.is_ipair(v) {
+        Ok(v)
+    } else {
+        Err(wrong_type(cx, name, "an immutable pair", v))
+    }
+}
+
+fn icar<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let pair = ipair_arg(cx, "icar", args[0])?;
+    // SAFETY: a live immutable pair.
+    Ok(unsafe { cx.icar(pair) })
+}
+
+fn icdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    let pair = ipair_arg(cx, "icdr", args[0])?;
+    // SAFETY: a live immutable pair.
+    Ok(unsafe { cx.icdr(pair) })
+}
+
+fn is_ipair<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(cx.is_ipair(args[0])))
+}
+
 fn car<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let pair = pair_arg("car", args[0])?;
+    let pair = pair_arg(cx, "car", args[0])?;
     // SAFETY: a live pair.
     Ok(unsafe { cx.car(pair) })
 }
 
 fn cdr<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let pair = pair_arg("cdr", args[0])?;
+    let pair = pair_arg(cx, "cdr", args[0])?;
     // SAFETY: a live pair.
     Ok(unsafe { cx.cdr(pair) })
 }
@@ -203,7 +232,7 @@ fn eqv<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     Ok(Value::boolean(eqv_values(cx, args[0], args[1])))
 }
 
-/// `equal?`: structural equality over pairs, vectors, strings and
+/// `equal?`: structural equality over pairs, immutable pairs, vectors, strings and
 /// bytevectors, `eqv?` otherwise. A pair of objects already being compared
 /// counts as equal, so circular structure terminates.
 fn equal<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
@@ -228,6 +257,11 @@ fn equal_values<S: Strategy>(cx: &Cx<S>, a: Value, b: Value) -> bool {
                 cx.string_str(a) == cx.string_str(b)
             } else {
                 match (cx.header_type(a), cx.header_type(b)) {
+                    (Some(TypeCode::Ipair), Some(TypeCode::Ipair)) => {
+                        work.push((cx.icdr(a), cx.icdr(b)));
+                        work.push((cx.icar(a), cx.icar(b)));
+                        true
+                    }
                     (Some(TypeCode::Vector), Some(TypeCode::Vector)) => {
                         let n = cx.vector_length(a);
                         if n == cx.vector_length(b) {
@@ -414,7 +448,7 @@ fn list_tail<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error
 
 fn list_ref<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let tail = tail_at(cx, "list-ref", args[0], args[1])?;
-    let pair = pair_arg("list-ref", tail)?;
+    let pair = pair_arg(cx, "list-ref", tail)?;
     // SAFETY: a live pair.
     Ok(unsafe { cx.car(pair) })
 }
@@ -558,6 +592,10 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("append", at_least(0), append),
         ("null?", Arity::exactly(1), is_null),
         ("pair?", Arity::exactly(1), is_pair),
+        ("ipair", Arity::exactly(2), ipair),
+        ("icar", Arity::exactly(1), icar),
+        ("icdr", Arity::exactly(1), icdr),
+        ("ipair?", Arity::exactly(1), is_ipair),
         ("not", Arity::exactly(1), not),
         ("eq?", Arity::exactly(2), eq),
         ("eqv?", Arity::exactly(2), eqv),

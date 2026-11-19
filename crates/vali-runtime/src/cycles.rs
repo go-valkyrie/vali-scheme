@@ -92,6 +92,7 @@ pub(crate) fn may_cycle(v: Value) -> bool {
                         | TypeCode::Record
                         | TypeCode::Box
                         | TypeCode::RecordType
+                        | TypeCode::Ipair
                         | TypeCode::Continuation
                         | TypeCode::Code
                 )
