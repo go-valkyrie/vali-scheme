@@ -38,8 +38,20 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+thread_local! {
+    static VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has called [`validate`]: for tests that a
+/// module is validated once per load.
+#[doc(hidden)]
+pub fn validations() -> usize {
+    VALIDATIONS.with(std::cell::Cell::get)
+}
+
 /// Checks `module`; see the module documentation for what that guarantees.
 pub fn validate(module: &Module) -> Result<(), ValidationError> {
+    VALIDATIONS.with(|count| count.set(count.get() + 1));
     let fail = |function: Option<u32>, pc: Option<usize>, message: String| {
         Err(ValidationError {
             function,
