@@ -30,6 +30,8 @@ pub enum ArithError {
     Domain(&'static str),
     /// `exact` of an infinity or a NaN, which have no exact value.
     NoExactValue,
+    /// An exact result too large to build, such as `(expt 2 (expt 10 10))`.
+    TooLarge,
 }
 
 impl std::fmt::Display for ArithError {
@@ -38,6 +40,7 @@ impl std::fmt::Display for ArithError {
             ArithError::DivisionByZero => f.write_str("division by zero"),
             ArithError::Domain(expected) => write!(f, "expected {expected}"),
             ArithError::NoExactValue => f.write_str("no exact value"),
+            ArithError::TooLarge => f.write_str("result too large"),
         }
     }
 }
@@ -524,6 +527,62 @@ fn rational_sqrt(r: &RBig) -> Option<RBig> {
     (nr.is_zero() && dr.is_zero()).then(|| RBig::from_parts(IBig::from(n), d))
 }
 
+/// `x · 2^e`, without an intermediate overflow or underflow when the result
+/// is in range.
+fn ldexp(mut x: f64, mut e: i64) -> f64 {
+    while e > 1000 {
+        x *= 2f64.powi(1000);
+        e -= 1000;
+    }
+    while e < -1000 {
+        x *= 2f64.powi(-1000);
+        e += 1000;
+    }
+    x * 2f64.powi(e as i32)
+}
+
+/// `r / 2^e`, exactly.
+fn scale_down(r: &RBig, e: i64) -> RBig {
+    let (n, d) = (r.numerator().clone(), r.denominator().clone());
+    let shift = e.unsigned_abs() as usize;
+    if e >= 0 {
+        RBig::from_parts(n, d << shift)
+    } else {
+        RBig::from_parts(n << shift, d)
+    }
+}
+
+/// `r` as a flonum, when that is a normal, finite, non-zero number.
+fn plain_f64(r: &RBig) -> Option<f64> {
+    let x = r.to_f64().value();
+    (x.is_finite() && x >= f64::MIN_POSITIVE).then_some(x)
+}
+
+/// The base-2 exponent of a positive rational, to within one.
+fn exponent2(r: &RBig) -> i64 {
+    r.numerator().unsigned_abs().bit_len() as i64 - r.denominator().bit_len() as i64
+}
+
+/// The square root of a positive exact rational as a flonum, scaling by an
+/// even power of two when the value is outside the flonum range.
+fn sqrt_exact(r: &RBig) -> f64 {
+    if let Some(x) = plain_f64(r) {
+        return x.sqrt();
+    }
+    let e = exponent2(r).div_euclid(2) * 2;
+    ldexp(scale_down(r, e).to_f64().value().sqrt(), e / 2)
+}
+
+/// The natural logarithm of a positive exact rational as a flonum, as
+/// `k·ln 2 + ln m` when the value is outside the flonum range.
+fn ln_exact(r: &RBig) -> f64 {
+    if let Some(x) = plain_f64(r) {
+        return x.ln();
+    }
+    let e = exponent2(r);
+    e as f64 * std::f64::consts::LN_2 + scale_down(r, e).to_f64().value().ln()
+}
+
 /// `sqrt`: exact when the argument is exact and its root is too; the
 /// principal root otherwise, complex for a negative real.
 pub fn sqrt(n: &Number) -> Number {
@@ -533,12 +592,12 @@ pub fn sqrt(n: &Number) -> Number {
                 unreachable!()
             };
             if r >= RBig::ZERO {
-                rational_sqrt(&r).map_or_else(|| Number::Real(r.to_f64().value().sqrt()), exact)
+                rational_sqrt(&r).map_or_else(|| Number::Real(sqrt_exact(&r)), exact)
             } else {
                 let r = -r;
                 match rational_sqrt(&r) {
                     Some(s) => Complex::exact(RBig::ZERO, s),
-                    None => Complex::inexact(0.0, r.to_f64().value().sqrt()),
+                    None => Complex::inexact(0.0, sqrt_exact(&r)),
                 }
             }
         }
@@ -563,7 +622,13 @@ fn exact_complex_sqrt(re: &RBig, im: &RBig) -> Option<Number> {
     Some(Complex::exact(a, b))
 }
 
-/// `expt`: exact for an exact base and an exact integer exponent.
+/// The most bits an exact `expt` result may have, much as the reader caps
+/// exact exponents.
+pub const MAX_EXACT_EXPT_BITS: u64 = 1 << 25;
+
+/// `expt`: exact for an exact base and an exact integer exponent. A zero
+/// exponent gives 1 (inexact when the exponent is), and an inexact integral
+/// exponent on a negative real base gives a real result.
 pub fn expt(base: &Number, exponent: &Number) -> Result<Number> {
     if let Number::Integer(k) = exponent {
         if k.is_zero() {
@@ -581,6 +646,12 @@ pub fn expt(base: &Number, exponent: &Number) -> Result<Number> {
         }
         return Ok(parts(base).inexact().powi(&k.0).number());
     }
+    if matches!(exponent, Number::Real(x) if *x == 0.0) {
+        return Ok(Number::Real(1.0));
+    }
+    if base.is_exact() && is_one_half(exponent) {
+        return Ok(sqrt(base));
+    }
     if is_zero(base) {
         let positive = match parts(exponent) {
             Parts::Exact(re, _) => re > RBig::ZERO,
@@ -597,17 +668,45 @@ pub fn expt(base: &Number, exponent: &Number) -> Result<Number> {
         };
     }
     if let (Some(b), Some(x)) = (Real::of(base), Real::of(exponent)) {
-        let b = b.to_f64();
-        if b >= 0.0 {
-            return Ok(Number::Real(b.powf(x.to_f64())));
+        let (b, x) = (b.to_f64(), x.to_f64());
+        // A negative base has a real power only for an integral exponent;
+        // exp(x·log b) would leave a rounding error in the imaginary part.
+        if b >= 0.0 || x.is_nan() || x.is_infinite() || x.fract() == 0.0 {
+            return Ok(Number::Real(b.powf(x)));
         }
     }
     let (b, z) = (parts(base).inexact(), parts(exponent).inexact());
     Ok(z.mul(b.ln()).exp().number())
 }
 
+fn is_one_half(n: &Number) -> bool {
+    matches!(n, Number::Rational(r) if r.0 == RBig::from_parts(IBig::ONE, UBig::from(2u8)))
+}
+
+/// Whether an exact `base` to the power `k` stays within
+/// [`MAX_EXACT_EXPT_BITS`]. |base|^k has about k·(bits - 1)/2 bits, where
+/// bits is the size of the larger of |base|²'s numerator and denominator.
+fn expt_fits(base: &Number, k: &IBig) -> bool {
+    let m = match parts(base) {
+        Parts::Exact(re, im) => &re * &re + &im * &im,
+        Parts::Inexact(..) => return true,
+    };
+    let bits = m
+        .numerator()
+        .unsigned_abs()
+        .bit_len()
+        .max(m.denominator().bit_len());
+    if bits <= 1 {
+        return true;
+    }
+    k.unsigned_abs() * UBig::from(bits - 1) <= UBig::from(MAX_EXACT_EXPT_BITS) * UBig::from(2u8)
+}
+
 /// An exact number to an exact integer power, by repeated squaring.
 fn exact_power(base: &Number, k: &IBig) -> Result<Number> {
+    if !expt_fits(base, k) {
+        return Err(ArithError::TooLarge);
+    }
     if *k < IBig::ZERO {
         if is_zero(base) {
             return Err(ArithError::DivisionByZero);
@@ -644,6 +743,14 @@ pub fn exp(z: &Number) -> Number {
 pub fn log(z: &Number) -> Number {
     if exact_one(z) {
         return Number::from(0);
+    }
+    if let Some(Real::Exact(r)) = Real::of(z) {
+        if r > RBig::ZERO {
+            return Number::Real(ln_exact(&r));
+        }
+        if r < RBig::ZERO {
+            return Complex::inexact(ln_exact(&-r), PI);
+        }
     }
     match Real::of(z) {
         Some(x) => {
@@ -1100,6 +1207,92 @@ mod tests {
             panic!("inexact parts")
         };
         assert!((re - 1.0).abs() < 1e-12 && (im - 3f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn expt_edges() {
+        assert_eq!(show(expt(&n("0.0"), &n("0.0")).unwrap()), "1.0");
+        assert_eq!(show(expt(&n("0"), &n("0.0")).unwrap()), "1.0");
+        assert_eq!(show(expt(&n("0"), &n("0")).unwrap()), "1");
+        assert_eq!(show(expt(&n("0.0"), &n("0")).unwrap()), "1.0");
+        assert_eq!(show(expt(&n("-2.0"), &n("3.0")).unwrap()), "-8.0");
+        assert_eq!(show(expt(&n("-2"), &n("2.0")).unwrap()), "4.0");
+        assert_eq!(show(expt(&n("-1/2"), &n("-3.0")).unwrap()), "-8.0");
+        assert_eq!(show(expt(&n("-2.0"), &n("+inf.0")).unwrap()), "+inf.0");
+        assert!(matches!(
+            expt(&n("-2.0"), &n("0.5")).unwrap(),
+            Number::Complex(_)
+        ));
+        assert_eq!(show(expt(&n("4"), &n("1/2")).unwrap()), "2");
+        assert_eq!(show(expt(&n("-4"), &n("1/2")).unwrap()), "0+2i");
+        assert_eq!(
+            show(expt(&n("1"), &n("123456789012345678901234567890")).unwrap()),
+            "1"
+        );
+        assert_eq!(
+            show(expt(&n("-1"), &n("123456789012345678901234567891")).unwrap()),
+            "-1"
+        );
+        assert_eq!(
+            show(expt(&n("+i"), &n("1000000000000000000001")).unwrap()),
+            "0+1i"
+        );
+        assert_eq!(
+            expt(&n("2"), &n("10000000000")).unwrap_err(),
+            ArithError::TooLarge
+        );
+        assert_eq!(
+            expt(&n("1/2"), &n("-10000000000")).unwrap_err(),
+            ArithError::TooLarge
+        );
+        assert_eq!(
+            expt(&n("1+i"), &n("100000000000")).unwrap_err(),
+            ArithError::TooLarge
+        );
+        assert_eq!(show(expt(&n("2"), &n("1000000")).unwrap()).len(), 301030);
+    }
+
+    #[test]
+    fn large_exact_arguments() {
+        let big = add(&expt(&n("10"), &n("400")).unwrap(), &n("1"));
+        let Number::Real(root) = sqrt(&big) else {
+            panic!("inexact root")
+        };
+        assert!((root / 1e200 - 1.0).abs() < 1e-15, "{root}");
+        let Number::Real(ln) = log(&big) else {
+            panic!("inexact log")
+        };
+        assert!((ln - 400.0 * std::f64::consts::LN_10).abs() < 1e-12, "{ln}");
+        // Beyond the flonum range even after halving.
+        let huge = add(&expt(&n("10"), &n("700")).unwrap(), &n("1"));
+        assert_eq!(show(sqrt(&huge)), "+inf.0");
+        // Negative, and tiny.
+        let tiny = div(&n("1"), &big).unwrap();
+        let Number::Real(root) = sqrt(&tiny) else {
+            panic!()
+        };
+        assert!((root * 1e200 - 1.0).abs() < 1e-15, "{root}");
+        let Number::Real(ln) = log(&tiny) else {
+            panic!()
+        };
+        assert!((ln + 400.0 * std::f64::consts::LN_10).abs() < 1e-12, "{ln}");
+        let Number::Complex(c) = log(&negate(&big)) else {
+            panic!("complex log")
+        };
+        let Number::Real(re) = c.real_part() else {
+            panic!()
+        };
+        assert!((re - 400.0 * std::f64::consts::LN_10).abs() < 1e-12);
+        assert_eq!(show(c.imag_part()), "3.141592653589793");
+        let Number::Complex(c) = sqrt(&negate(&big)) else {
+            panic!("complex root")
+        };
+        let Number::Real(im) = c.imag_part() else {
+            panic!()
+        };
+        assert!((im / 1e200 - 1.0).abs() < 1e-15);
+        // In-range arguments still round as before.
+        assert_eq!(show(log(&n("10"))), "2.302585092994046");
     }
 
     #[test]
