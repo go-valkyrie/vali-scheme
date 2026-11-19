@@ -16,6 +16,24 @@
       "message": "\"The two never grow past the limit between them\" only holds in one order. A page is refused when the pages plus the charges would pass `max_bytes`, but a charge is refused only when the charges alone would. So once the heap has taken its pages, the charges can add up to `max_bytes` more. Pages are never given back, so this covers a heap that was full once and has since been emptied.\n\nMeasured on 1260691 patch set 3 with an 8-page limit (262,144 bytes), under all four counting strategies:\n\n1. Fill the heap, drop everything and call `collect_garbage()`.\n2. Intern 1,000-character names until one is refused.\n\n186 symbols went in, all in the reused pages, before `OutOfMemory`. That\u0027s 262,144 bytes of pages plus at least 186,000 bytes of name charges, 1.71 times the limit, and more once the per-entry overhead is counted.\n\nIf 1260690 makes the heap give back empty pages when a charge needs room, this sentence holds as written, and the one before it (\"never gets pages back\") changes. Otherwise the bound to state is \"up to twice `max_bytes`\".",
       "revId": "c7eac16448243ffef29940895485622881034de4",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "47959613_3772d769",
+        "filename": "docs/adr/0023-resource-limits.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 34,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T15:16:19Z",
+      "side": 1,
+      "message": "Done in patch set 4. A charge is now checked against the pages and the other charges together, as a page is, and a counting heap gives empty pages back to make room. So the sentence holds as written, and the text describes how the bound holds in both orders.",
+      "parentUuid": "d275cf4b_e7159aa7",
+      "revId": "c7eac16448243ffef29940895485622881034de4",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
