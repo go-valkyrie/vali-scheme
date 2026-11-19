@@ -176,37 +176,92 @@ fn number_constant(n: &Number) -> Constant {
     }
 }
 
-/// A datum as a constant.
+/// A datum as a constant, built iteratively so that deep data cannot
+/// overflow the stack.
+///
+/// A datum label becomes a [`Constant::Labelled`], numbered in the order
+/// the walk meets it, and a reference to it a [`Constant::LabelRef`]: the
+/// constant keeps the sharing and cycles the reader produced. A label
+/// defined outside the datum cannot be referred to from inside it.
 fn constant(d: &Datum) -> Result<Constant> {
-    Ok(match &d.kind {
-        DatumKind::Number(n) => number_constant(n),
-        DatumKind::Boolean(b) => Constant::Boolean(*b),
-        DatumKind::Character(c) => Constant::Character(*c),
-        DatumKind::String(s) => Constant::String(s.as_str().into()),
-        DatumKind::Symbol(s) => Constant::Symbol(s.as_str().into()),
-        DatumKind::List { items, tail } => {
-            let mut list = match tail {
-                Some(t) => constant(t)?,
-                None => Constant::EmptyList,
-            };
-            for item in items.iter().rev() {
-                list = Constant::Pair(Box::new(constant(item)?), Box::new(list));
+    enum Task<'a> {
+        Visit(&'a Datum),
+        List { items: usize, dotted: bool },
+        Vector(usize),
+        Label(u32),
+    }
+    // The number each datum label stands for, and how many are numbered.
+    let mut labels: HashMap<u64, u32> = HashMap::new();
+    let mut numbered = 0u32;
+    let mut tasks = vec![Task::Visit(d)];
+    let mut out: Vec<Constant> = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(d) => out.push(match &d.kind {
+                DatumKind::Number(n) => number_constant(n),
+                DatumKind::Boolean(b) => Constant::Boolean(*b),
+                DatumKind::Character(c) => Constant::Character(*c),
+                DatumKind::String(s) => Constant::String(s.as_str().into()),
+                DatumKind::Symbol(s) => Constant::Symbol(s.as_str().into()),
+                DatumKind::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
+                DatumKind::Keyword(k) => Constant::Keyword(k.as_str().into()),
+                DatumKind::List { items, tail } => {
+                    tasks.push(Task::List {
+                        items: items.len(),
+                        dotted: tail.is_some(),
+                    });
+                    tasks.extend(tail.iter().map(|tail| Task::Visit(tail)));
+                    tasks.extend(items.iter().rev().map(Task::Visit));
+                    continue;
+                }
+                DatumKind::Vector(items) => {
+                    tasks.push(Task::Vector(items.len()));
+                    tasks.extend(items.iter().rev().map(Task::Visit));
+                    continue;
+                }
+                DatumKind::Labelled(label, inner) => {
+                    let id = numbered;
+                    numbered += 1;
+                    // Defined before its datum is walked, so the datum may
+                    // refer to it.
+                    labels.insert(*label, id);
+                    tasks.push(Task::Label(id));
+                    tasks.push(Task::Visit(inner));
+                    continue;
+                }
+                DatumKind::LabelRef(label) => match labels.get(label) {
+                    Some(&id) => Constant::LabelRef(id),
+                    None => {
+                        return Err(error(
+                            "a datum label refers to a datum outside the constant",
+                            Some(d.span),
+                        ));
+                    }
+                },
+                _ => return Err(error("unsupported constant", Some(d.span))),
+            }),
+            Task::List { items, dotted } => {
+                let mut list = if dotted {
+                    out.pop().expect("a tail")
+                } else {
+                    Constant::EmptyList
+                };
+                for item in out.split_off(out.len() - items).into_iter().rev() {
+                    list = Constant::Pair(Box::new(item), Box::new(list));
+                }
+                out.push(list);
             }
-            list
+            Task::Vector(n) => {
+                let items = out.split_off(out.len() - n);
+                out.push(Constant::Vector(items));
+            }
+            Task::Label(id) => {
+                let inner = out.pop().expect("a labelled datum");
+                out.push(Constant::Labelled(id, Box::new(inner)));
+            }
         }
-        DatumKind::Vector(items) => {
-            Constant::Vector(items.iter().map(constant).collect::<Result<_>>()?)
-        }
-        DatumKind::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
-        DatumKind::Keyword(k) => Constant::Keyword(k.as_str().into()),
-        DatumKind::Labelled(..) | DatumKind::LabelRef(_) => {
-            return Err(error(
-                "datum labels in constants are not supported yet",
-                Some(d.span),
-            ));
-        }
-        _ => return Err(error("unsupported constant", Some(d.span))),
-    })
+    }
+    Ok(out.pop().expect("a constant"))
 }
 
 /// Whether a call to the `(vali primitive)` procedure `name` with `argc`

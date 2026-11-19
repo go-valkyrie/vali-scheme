@@ -14,7 +14,7 @@ use crate::bytes::{DecodeError, Reader, Writer};
 pub const MAGIC: &[u8; 8] = b"\0VALI\0A\n";
 
 /// The format version this Vali writes.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The format features this Vali knows. None yet: version 1 is the base.
 pub const KNOWN_FEATURES: &[&str] = &[];

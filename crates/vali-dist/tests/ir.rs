@@ -304,6 +304,75 @@ fn constants_must_be_canonical() {
     validate(&module).unwrap();
 }
 
+/// `#0=(a #1=(b) #1# . #0#)`: a list that contains a shared sublist and
+/// is its own tail.
+fn labelled() -> Constant {
+    let sym = |s: &str| Box::new(Constant::Symbol(s.into()));
+    Constant::Labelled(
+        0,
+        Box::new(Constant::Pair(
+            sym("a"),
+            Box::new(Constant::Pair(
+                Box::new(Constant::Labelled(
+                    1,
+                    Box::new(Constant::Pair(sym("b"), Box::new(Constant::EmptyList))),
+                )),
+                Box::new(Constant::Pair(
+                    Box::new(Constant::LabelRef(1)),
+                    Box::new(Constant::LabelRef(0)),
+                )),
+            )),
+        )),
+    )
+}
+
+#[test]
+fn labels_must_be_defined_in_order() {
+    let pair = |a, b| Constant::Pair(Box::new(a), Box::new(b));
+    let label = |n, c| Constant::Labelled(n, Box::new(c));
+    let nil = || Constant::EmptyList;
+    validate(&{
+        let mut module = sum();
+        module.constants.push(labelled());
+        module
+    })
+    .unwrap();
+    let cases = [
+        (
+            pair(Constant::LabelRef(0), nil()),
+            "label 0 is referred to before it is defined",
+        ),
+        (
+            pair(label(0, nil()), pair(Constant::LabelRef(1), nil())),
+            "label 1 is referred to before it is defined",
+        ),
+        (
+            pair(pair(Constant::LabelRef(0), nil()), label(0, nil())),
+            "label 0 is referred to before it is defined",
+        ),
+        (
+            pair(label(1, nil()), nil()),
+            "label 1 is out of order: expected label 0",
+        ),
+        (
+            pair(label(0, nil()), label(0, nil())),
+            "label 0 is out of order: expected label 1",
+        ),
+        (
+            label(0, Constant::LabelRef(0)),
+            "label 0 stands for nothing but itself",
+        ),
+        (
+            label(0, label(1, Constant::LabelRef(0))),
+            "label 0 stands for nothing but itself",
+        ),
+    ];
+    for (constant, why) in cases {
+        let error = broken(|m| m.constants.push(constant.clone()));
+        assert_eq!(error, format!("constant c1: {why}"), "{constant}");
+    }
+}
+
 #[test]
 fn constants_print_as_data() {
     let list = Constant::Pair(
@@ -317,6 +386,7 @@ fn constants_print_as_data() {
         )),
     );
     assert_eq!(list.to_string(), r#"(a #(1 "x\n") . #\x20)"#);
+    assert_eq!(labelled().to_string(), "#0=(a #1=(b) #1# . #0#)");
     assert_eq!(Constant::Flonum(f64::NAN).to_string(), "+nan.0");
     assert_eq!(
         Constant::Ratio(
@@ -433,6 +503,22 @@ mod encoding {
         ]);
         let decoded = decode(&encode(&module).unwrap()).unwrap();
         assert_eq!(decoded.constants, module.constants);
+    }
+
+    #[test]
+    fn labelled_constants_survive_encoding() {
+        let mut module = sum();
+        module.constants.extend([
+            labelled(),
+            Constant::Vector(vec![
+                Constant::Labelled(0, Box::new(Constant::String("s".into()))),
+                Constant::LabelRef(0),
+            ]),
+        ]);
+        let bytes = encode(&module).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.constants, module.constants);
+        assert_eq!(encode(&decoded).unwrap(), bytes);
     }
 
     #[test]

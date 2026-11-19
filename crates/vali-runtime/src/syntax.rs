@@ -7,7 +7,7 @@
 //! pending changes. The table only grows: nothing is collected yet.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use vali_abi::{Tag, TypeCode};
 use vali_syntax::{Datum, DatumKind, ScopeSetId, Span, Syntax};
@@ -89,6 +89,21 @@ impl<S: Strategy> Cx<S> {
             Tag::String => datum(DatumKind::String(unsafe { self.string_str(v) }.to_owned())),
             Tag::Symbol => datum(DatumKind::Symbol(unsafe { self.symbol_name(v) }.to_owned())),
             Tag::Pair => {
+                // The datum of a `(quote datum)` is a constant, which may
+                // share parts and be circular.
+                // SAFETY: `v` is a live pair.
+                if let Some(operand) = unsafe { self.quoted_operand(v) } {
+                    let quote = Datum {
+                        kind: DatumKind::Symbol("quote".to_owned()),
+                        span,
+                    };
+                    // SAFETY: a field of a live pair.
+                    let operand = unsafe { self.quoted_datum(operand, span) }?;
+                    return datum(DatumKind::List {
+                        items: vec![quote, operand],
+                        tail: None,
+                    });
+                }
                 // Lists are walked along their spine; a pair met again on
                 // the way is a cycle, which no datum can be.
                 let mut items = Vec::new();
@@ -137,6 +152,146 @@ impl<S: Strategy> Cx<S> {
                 datum(DatumKind::Vector(items))
             }
             _ => None,
+        }
+    }
+
+    /// The datum of `v`, if it is `(quote datum)` with `quote` the symbol.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live pair.
+    unsafe fn quoted_operand(&self, v: Value) -> Option<Value> {
+        // SAFETY: `v` is a live pair, and so is each one tested before it
+        // is read.
+        unsafe {
+            let head = self.car(v);
+            if head.tag() != Tag::Symbol || self.symbol_name(head) != "quote" {
+                return None;
+            }
+            let rest = self.cdr(v);
+            if !rest.is_pair() || self.cdr(rest) != Value::EMPTY_LIST {
+                return None;
+            }
+            Some(self.car(rest))
+        }
+    }
+
+    /// Whether `v` is an object with an identity that `eq?` can tell: what
+    /// a datum label can stand for.
+    fn has_identity(&self, v: Value) -> bool {
+        v.is_pair()
+            || v.tag() == Tag::String
+            || self.is_other(v, TypeCode::Vector)
+            || self.is_other(v, TypeCode::Bytevector)
+    }
+
+    /// The datum of the constant `root`, as `quote` takes it: a pair,
+    /// vector, string or bytevector that is reached more than once, by
+    /// sharing or by a cycle, is labelled where it is first met and
+    /// referred to after, so the constant keeps its structure.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be a valid value.
+    unsafe fn quoted_datum(&self, root: Value, span: Span) -> Option<Datum> {
+        // First, which objects are reached twice. Each is entered once, so
+        // a cycle ends the walk.
+        let mut seen = HashSet::new();
+        let mut shared = HashSet::new();
+        let mut pending = vec![root];
+        while let Some(v) = pending.pop() {
+            if !self.has_identity(v) {
+                continue;
+            }
+            if !seen.insert(v.address()) {
+                shared.insert(v.address());
+                continue;
+            }
+            // SAFETY: live objects, whose fields are valid values.
+            unsafe {
+                if v.is_pair() {
+                    pending.push(self.cdr(v));
+                    pending.push(self.car(v));
+                } else if self.is_other(v, TypeCode::Vector) {
+                    pending.extend((0..self.vector_length(v)).map(|i| self.vector_ref(v, i)));
+                }
+            }
+        }
+        // SAFETY: passed on to the caller.
+        unsafe { self.labelled_of(root, span, &shared, &mut HashMap::new()) }
+    }
+
+    /// The datum of `v`, labelling the objects in `shared`, which
+    /// `labels` numbers as they are first met.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a valid value.
+    unsafe fn labelled_of(
+        &self,
+        v: Value,
+        span: Span,
+        shared: &HashSet<u64>,
+        labels: &mut HashMap<u64, u64>,
+    ) -> Option<Datum> {
+        let datum = |kind| Some(Datum { kind, span });
+        if !self.has_identity(v) {
+            // SAFETY: passed on to the caller.
+            return unsafe { self.datum_of(v, span, &mut HashSet::new()) };
+        }
+        let labelled = shared.contains(&v.address());
+        let label = if labelled {
+            if let Some(&label) = labels.get(&v.address()) {
+                return datum(DatumKind::LabelRef(label));
+            }
+            let label = labels.len() as u64;
+            labels.insert(v.address(), label);
+            Some(label)
+        } else {
+            None
+        };
+        let inner = if v.is_pair() {
+            // A list is walked along its spine, which ends at a pair that
+            // is labelled, as that one stands for itself.
+            let mut items = Vec::new();
+            let mut rest = v;
+            let tail = loop {
+                // SAFETY: `rest` is a live pair, whose fields are valid.
+                let (car, cdr) = unsafe { (self.car(rest), self.cdr(rest)) };
+                // SAFETY: as above.
+                items.push(unsafe { self.labelled_of(car, span, shared, labels) }?);
+                if cdr.is_pair() && !shared.contains(&cdr.address()) {
+                    rest = cdr;
+                } else if cdr == Value::EMPTY_LIST {
+                    break None;
+                } else {
+                    // SAFETY: as above.
+                    break Some(Box::new(unsafe {
+                        self.labelled_of(cdr, span, shared, labels)
+                    }?));
+                }
+            };
+            Datum {
+                kind: DatumKind::List { items, tail },
+                span,
+            }
+        } else if self.is_other(v, TypeCode::Vector) {
+            // SAFETY: `v` is a live vector, and its elements are valid.
+            let items = (0..unsafe { self.vector_length(v) })
+                .map(|i| unsafe { self.labelled_of(self.vector_ref(v, i), span, shared, labels) })
+                .collect::<Option<Vec<_>>>()?;
+            Datum {
+                kind: DatumKind::Vector(items),
+                span,
+            }
+        } else {
+            // A string or bytevector.
+            // SAFETY: passed on to the caller.
+            unsafe { self.datum_of(v, span, &mut HashSet::new()) }?
+        };
+        match label {
+            Some(label) => datum(DatumKind::Labelled(label, Box::new(inner))),
+            None => Some(inner),
         }
     }
 

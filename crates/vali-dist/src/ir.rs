@@ -104,6 +104,16 @@ pub enum Constant {
     Vector(Vec<Constant>),
     /// An immutable bytevector.
     Bytevector(Vec<u8>),
+    /// A constant that other parts of the same top-level constant refer
+    /// back to, or whose own parts do (`#n=` in source). Labels are
+    /// numbered from 0 in the order they are defined, which is the order
+    /// of a pre-order walk, so a [`Constant::LabelRef`] always follows the
+    /// label it names or sits inside it. Referring back is what keeps
+    /// sharing and cycles: the tree itself never contains a cycle.
+    Labelled(u32, Box<Constant>),
+    /// The constant labelled `n`, defined earlier in the same top-level
+    /// constant (`#n#` in source): the same object, not a copy.
+    LabelRef(u32),
 }
 
 impl Constant {
@@ -113,6 +123,9 @@ impl Constant {
             Constant::Ratio(a, b) | Constant::Complex(a, b) | Constant::Pair(a, b) => {
                 out.push(std::mem::replace(&mut **a, Constant::EmptyList));
                 out.push(std::mem::replace(&mut **b, Constant::EmptyList));
+            }
+            Constant::Labelled(_, inner) => {
+                out.push(std::mem::replace(&mut **inner, Constant::EmptyList));
             }
             Constant::Vector(items) => out.append(items),
             _ => {}
