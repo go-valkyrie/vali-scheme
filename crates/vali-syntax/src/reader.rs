@@ -287,6 +287,11 @@ pub struct DatumSink<'b, B: DatumBuilder> {
     fold_case: bool,
     /// Labels defined so far in the current top-level datum.
     labels: HashSet<u64>,
+    /// The labels in `labels`, in the order they were defined.
+    label_log: Vec<u64>,
+    /// For each open `#;` comment, how many labels were defined when it
+    /// began. The comment's own labels are dropped when it ends.
+    comment_marks: Vec<usize>,
     /// The labels whose datums are still being read.
     open_labels: HashSet<u64>,
 }
@@ -312,6 +317,8 @@ impl<'b, B: DatumBuilder> DatumSink<'b, B> {
             errors: Vec::new(),
             fold_case: false,
             labels: HashSet::new(),
+            label_log: Vec::new(),
+            comment_marks: Vec::new(),
             open_labels: HashSet::new(),
         }
     }
@@ -361,6 +368,7 @@ impl<'b, B: DatumBuilder> DatumSink<'b, B> {
     fn atom(&mut self, kind: SyntaxKind, text: &str, range: TextRange) {
         if self.at_top_level() {
             self.labels.clear();
+            self.label_log.clear();
             self.open_labels.clear();
         }
         if self.top().kind == SyntaxKind::Bytevector {
@@ -448,7 +456,11 @@ impl<B: DatumBuilder> EventSink for DatumSink<'_, B> {
         // Labels are scoped to the top-level datum they appear in.
         if kind != SyntaxKind::CommentedDatum && self.at_top_level() {
             self.labels.clear();
+            self.label_log.clear();
             self.open_labels.clear();
+        }
+        if kind == SyntaxKind::CommentedDatum {
+            self.comment_marks.push(self.label_log.len());
         }
         self.stack.push(Frame::new(kind));
     }
@@ -483,6 +495,7 @@ impl<B: DatumBuilder> EventSink for DatumSink<'_, B> {
                 }
                 Some(label) => {
                     self.labels.insert(label);
+                    self.label_log.push(label);
                     self.open_labels.insert(label);
                     self.top().label = Some(label);
                 }
@@ -497,6 +510,13 @@ impl<B: DatumBuilder> EventSink for DatumSink<'_, B> {
         let frame = self.stack.pop().expect("nodes are balanced");
         if let Some(label) = frame.label {
             self.open_labels.remove(&label);
+        }
+        if frame.kind == SyntaxKind::CommentedDatum {
+            // The commented-out datum does not exist, nor do its labels.
+            let mark = self.comment_marks.pop().expect("marked at start");
+            for label in self.label_log.drain(mark..) {
+                self.labels.remove(&label);
+            }
         }
         if frame.kind == SyntaxKind::Root {
             return;

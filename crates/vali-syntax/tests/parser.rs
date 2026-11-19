@@ -203,6 +203,28 @@ fn labels() {
 }
 
 #[test]
+fn labels_defined_in_a_datum_comment_end_with_it() {
+    for source in [
+        "(#;#0=a #0#)",
+        "(#;(b #0=a) #0#)",
+        "(#;#;#0=a #1=b #0#)",
+        "(#;#;#0=a #1=b #1#)",
+        "(#;(#;#0=a b) #0#)",
+        "#;#0=a #0#",
+    ] {
+        let (_, errors) = read_with_errors(source);
+        assert_eq!(errors.len(), 1, "{source}");
+        assert_eq!(errors[0].0, ReadErrorKind::UndefinedLabel, "{source}");
+    }
+    // A label may be defined again once the comment that defined it ends.
+    assert_eq!(reads("(#;#0=a #0=b #0#)"), ["(#0=b #0#)"]);
+    // Labels from before the comment stay visible inside it and after it.
+    assert_eq!(reads("(#0=a #;#0# #0#)"), ["(#0=a #0#)"]);
+    assert_eq!(reads("(#0=a #;(#1=b #1# #0#) #0#)"), ["(#0=a #0#)"]);
+    assert_eq!(reads("#0=(a #;#0# . #0#)"), ["#0=(a . #0#)"]);
+}
+
+#[test]
 fn a_label_cannot_stand_for_nothing_but_itself() {
     for source in ["#0=#0#", "#0=#1=#0#", "(#0=#0#)", "#0=#;x #0#"] {
         let (datums, errors) = read_with_errors(source);
