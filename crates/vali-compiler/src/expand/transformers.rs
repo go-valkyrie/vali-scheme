@@ -234,6 +234,12 @@ impl Expander {
         cx.run(id)?;
         cx.register_library(&identity, id);
         self.phases[phase].units.insert(unit);
+        // The unit being expanded relies on what this library ran.
+        if let Some(expanding) = self.units.last_mut()
+            && !expanding.instantiated.contains(&unit)
+        {
+            expanding.instantiated.push(unit);
+        }
         Ok(())
     }
 

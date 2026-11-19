@@ -478,7 +478,7 @@ fn encode_value(w: &mut Writer, n: &Numbering, value: &Value) {
         }
         Value::Primitive { op, args } => {
             w.byte(1);
-            w.byte(op.code());
+            w.str(op.name());
             for &x in args {
                 n.operand(w, x);
             }
@@ -596,9 +596,9 @@ impl Decoder {
         Ok(match r.byte()? {
             0 => Value::Operand(self.operand(r)?),
             1 => {
-                let code = r.byte()?;
-                let op = Primitive::from_code(code)
-                    .ok_or_else(|| r.error(format!("unknown primitive {code}")))?;
+                let name = r.str()?;
+                let op = Primitive::named(name)
+                    .ok_or_else(|| r.error(format!("unknown primitive {name}")))?;
                 let args = (0..op.arity())
                     .map(|_| self.operand(r))
                     .collect::<Result<_, _>>()?;

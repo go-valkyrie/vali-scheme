@@ -26,6 +26,7 @@
 mod artifact;
 mod bytes;
 mod encode;
+mod hash;
 mod ir;
 mod primitive;
 mod print;
@@ -34,6 +35,7 @@ mod validate;
 pub use artifact::{Artifact, FORMAT_VERSION, KNOWN_FEATURES, MAGIC, Section};
 pub use bytes::{DecodeError, Reader, Writer};
 pub use encode::{decode, encode};
+pub use hash::{Digest, Hasher};
 
 pub use ir::{
     Arity, Constant, ConstantId, FunId, Function, Global, GlobalId, GlobalLink, Inlined, JoinId,
