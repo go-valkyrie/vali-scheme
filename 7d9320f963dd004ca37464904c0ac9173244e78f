@@ -1,0 +1,72 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "0f32d207_578b4246",
+        "filename": "crates/vali-bytecode/src/convert.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 555,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:02:51Z",
+      "side": 1,
+      "message": "This scan is what makes conversion O(variables × live slots): each variable that needs a slot looks from slot 1 up. With P variables live at once, such as a join\u0027s parameters or long-lived lets, that\u0027s P²/2 checks. A free-slot structure would make it O(log n) per variable: a `BTreeSet` of free slots, or a min-heap with lazy deletion keyed by when each slot frees.",
+      "revId": "7d9320f963dd004ca37464904c0ac9173244e78f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "24baa951_d8765167",
+        "filename": "crates/vali-dist/src/validate.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 113,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:02:51Z",
+      "side": 1,
+      "message": "This rightly compares declared counts with what was bound, but it can\u0027t catch a module whose counts are honest and huge: 65,535 free variables in each of 2,000 functions, or 65,536 parameters per join, none of which cost a byte. The budget has to be enforced where the encoded length is known: `decode`\u0027s `bounded()`, charged module-wide.",
+      "revId": "7d9320f963dd004ca37464904c0ac9173244e78f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "dabf3222_65b6b541",
+        "filename": "crates/vali-test/tests/ir_adversarial.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 345,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:02:51Z",
+      "side": 1,
+      "message": "This and `deep_constant_list_dedup` are still ignored as \"aborts the process with a stack overflow\". A 1,000,000-deep list now goes through decode, convert, the bytecode validator, `fingerprint`, clone and drop on a 2 MB test thread without trouble, at least on the conversion path. They can probably run now.",
+      "revId": "7d9320f963dd004ca37464904c0ac9173244e78f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "9f4bb6e9_2e7943bb",
+        "filename": "docs/adr/0017-intermediate-representation-and-optimisation.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 41,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:02:51Z",
+      "side": 1,
+      "message": "\"Each pass is linear in the function or module\" isn\u0027t true of slot allocation yet (convert.rs), and \"bounded by the module\u0027s size\" holds for its decoded size, not the artifact\u0027s. Until decode charges free variables and join parameters to a budget the input\u0027s length bounds, a 22 KB artifact can still decode to about 500 MB. Either finish both or say what\u0027s left.",
+      "revId": "7d9320f963dd004ca37464904c0ac9173244e78f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
