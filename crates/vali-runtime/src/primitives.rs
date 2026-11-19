@@ -664,6 +664,7 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
     ];
     table.extend(crate::numbers::table());
     table.extend(crate::strings::table());
+    table.extend(crate::hashing::table());
     table.push(("features", Arity::exactly(0), features_primitive));
     table.extend(crate::continuations::dynamic_table());
     table

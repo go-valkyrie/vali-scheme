@@ -612,7 +612,7 @@ fn fold_char(c: char) -> char {
 }
 
 /// Full case folding, as `string-foldcase` does it: `ß` folds to `ss`.
-fn fold_string(text: &str) -> String {
+pub(crate) fn fold_string(text: &str) -> String {
     caseless::default_case_fold_str(text)
 }
 
