@@ -8,7 +8,7 @@
 use vali_abi::TypeCode;
 
 use crate::cx::{Cx, get};
-use crate::handle::Error;
+use crate::handle::{Condition, Error};
 use crate::strategy::Strategy;
 use crate::value::Value;
 use crate::vm::type_error;
@@ -285,16 +285,33 @@ impl<S: Strategy> Cx<S> {
         message: Value,
         irritants: Value,
     ) -> Result<Value, Error> {
+        self.condition_object_raw(Condition::Error, message, irritants)
+    }
+
+    /// An error object that `kind`'s predicate accepts too.
+    pub(crate) fn condition_object_raw(
+        &mut self,
+        kind: Condition,
+        message: Value,
+        irritants: Value,
+    ) -> Result<Value, Error> {
         let rtd = match self.error_object_type {
             Some(rtd) => rtd,
             None => {
-                let rtd = self.internal_type("error-object", &["message", "irritants"])?;
+                let rtd = self.internal_type("error-object", &["message", "irritants", "kind"])?;
                 self.hold(rtd);
                 self.error_object_type = Some(rtd);
                 rtd
             }
         };
-        self.internal_record(rtd, &[message, irritants])
+        let code = Value::fixnum(kind.code()).expect("a small code fits");
+        self.internal_record(rtd, &[message, irritants, code])
+    }
+
+    /// Whether `v` is an error object of kind `kind`.
+    fn is_condition(&self, v: Value, kind: Condition) -> bool {
+        self.internal_field(v, self.error_object_type, 2)
+            .is_some_and(|code| code.as_fixnum() == Some(kind.code()))
     }
 
     /// The message and irritants of `v`, if it is an error object.
@@ -382,6 +399,51 @@ pub(crate) fn error<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value
 
 pub(crate) fn is_error_object<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     Ok(Value::boolean(cx.error_object_parts(args[0]).is_some()))
+}
+
+/// `(file-error? obj)`: whether `obj` is an error object raised for a file
+/// that could not be opened or used.
+pub(crate) fn is_file_error<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(cx.is_condition(args[0], Condition::File)))
+}
+
+/// `(read-error? obj)`: whether `obj` is an error object raised for
+/// malformed input to `read`.
+pub(crate) fn is_read_error<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
+    Ok(Value::boolean(cx.is_condition(args[0], Condition::Read)))
+}
+
+/// Raises an error object of `kind` with the message and irritants in `args`.
+fn raise_kind<S: Strategy>(
+    cx: &mut Cx<S>,
+    kind: Condition,
+    args: &[Value],
+) -> Result<Value, Error> {
+    let mut irritants = Value::EMPTY_LIST;
+    for &irritant in args[1..].iter().rev() {
+        // SAFETY: valid values; nothing is collected meanwhile.
+        irritants = unsafe { cx.cons_raw(irritant, irritants) }?;
+    }
+    let object = cx.condition_object_raw(kind, args[0], irritants)?;
+    Err(raise_value(cx, object))
+}
+
+/// `(%raise-file-error message irritant ...)`: like `error`, but the error
+/// object satisfies `file-error?`. For a host's own (scheme file).
+pub(crate) fn raise_file_error<S: Strategy>(
+    cx: &mut Cx<S>,
+    args: &[Value],
+) -> Result<Value, Error> {
+    raise_kind(cx, Condition::File, args)
+}
+
+/// `(%raise-read-error message irritant ...)`: like `error`, but the error
+/// object satisfies `read-error?`.
+pub(crate) fn raise_read_error<S: Strategy>(
+    cx: &mut Cx<S>,
+    args: &[Value],
+) -> Result<Value, Error> {
+    raise_kind(cx, Condition::Read, args)
 }
 
 pub(crate) fn error_object_message<S: Strategy>(

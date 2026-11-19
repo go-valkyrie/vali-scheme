@@ -1126,7 +1126,7 @@ impl<S: Strategy> Cx<S> {
                 Some(raised) => self.get(&raised),
                 None => {
                     let message = self.string_raw(&e.message, true)?;
-                    Ok(self.error_object_raw(message, Value::EMPTY_LIST)?)
+                    Ok(self.condition_object_raw(e.kind, message, Value::EMPTY_LIST)?)
                 }
             },
             Error::OutOfMemory => Err(Error::OutOfMemory),

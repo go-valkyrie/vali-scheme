@@ -539,6 +539,10 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("error", at_least(1), records::error),
         ("%raise", Arity::exactly(1), records::raise),
         ("error-object?", Arity::exactly(1), records::is_error_object),
+        ("file-error?", Arity::exactly(1), records::is_file_error),
+        ("read-error?", Arity::exactly(1), records::is_read_error),
+        ("%raise-file-error", at_least(1), records::raise_file_error),
+        ("%raise-read-error", at_least(1), records::raise_read_error),
         (
             "error-object-message",
             Arity::exactly(1),

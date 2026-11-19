@@ -74,6 +74,7 @@
    ;; Features and inclusion (R7RS 4.1.7, 4.2.1).
    cond-expand features include include-ci
    guard error-object? error-object-message error-object-irritants
+   file-error? read-error?
    values call-with-values
    ;; The syntax procedures, for transformers.
    syntax->datum datum->syntax identifier? bound-identifier=?

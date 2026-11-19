@@ -527,7 +527,7 @@ pub(crate) fn write_to<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Va
 pub(crate) fn read<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let read = cx
         .with_port("read", args[0], Port::read_datum)?
-        .map_err(|e| Error::scheme(format!("read: {e}")))?;
+        .map_err(|e| Error::read_error(format!("read: {e}")))?;
     match read {
         Read::Value(datum) => cx.datum_raw(&datum),
         Read::Eof => Ok(Value::EOF),

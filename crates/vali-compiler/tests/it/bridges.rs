@@ -48,6 +48,9 @@ fn library() -> NativeLibrary {
                 Err(format!("{n} is odd"))
             }
         })
+        .function("open-missing", |path: String| -> Result<i64, Error> {
+            Err(Error::file_error(format!("cannot open {path}")))
+        })
         .function("byte-count", |b: Bytes| b.0.len())
         .function("both", |a: Obj<Counter>, b: Obj<Counter>| vec![a, b])
         .function("echo", |xs: Vec<Handle>| xs)
@@ -131,6 +134,18 @@ fn functions_and_methods() {
     for (source, expected) in cases {
         assert_eq!(run(source).as_deref(), Ok(expected), "{source}");
     }
+}
+
+#[test]
+fn a_host_raises_file_errors() {
+    assert_eq!(
+        run(
+            r#"(guard (e (#t (list (error-object? e) (file-error? e) (read-error? e)
+                                  (error-object-message e))))
+                 (open-missing "x.txt"))"#
+        ),
+        Ok(r#"(#t #t #f "open-missing: cannot open x.txt")"#.to_owned())
+    );
 }
 
 #[test]

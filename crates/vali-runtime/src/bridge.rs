@@ -645,13 +645,18 @@ unsafe impl<T: IntoScheme> IntoScheme for Option<T> {
     }
 }
 
-/// An error is raised as a condition, its text the message.
+/// An error is raised as a condition, its text the message. An [`Error`] is
+/// raised as it is, so a host can return `Error::file_error(..)`.
 // SAFETY: it returns an immediate, or a value `cx` makes in the call.
-unsafe impl<T: IntoScheme, E: fmt::Display> IntoScheme for Result<T, E> {
+unsafe impl<T: IntoScheme, E: fmt::Display + 'static> IntoScheme for Result<T, E> {
     fn into_scheme(self, cx: &mut dyn Context) -> Result<Value, Error> {
         match self {
             Ok(x) => x.into_scheme(cx),
-            Err(e) => Err(Error::scheme(e.to_string())),
+            // A runtime `Error`, such as `Error::file_error`, keeps its kind.
+            Err(e) => Err((&e as &dyn std::any::Any)
+                .downcast_ref::<Error>()
+                .cloned()
+                .unwrap_or_else(|| Error::scheme(e.to_string()))),
         }
     }
 }
