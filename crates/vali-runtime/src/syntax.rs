@@ -7,7 +7,7 @@
 //! pending changes. The table only grows: nothing is collected yet.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use vali_abi::{Tag, TypeCode};
 use vali_syntax::{Datum, DatumKind, ScopeSetId, Span, Syntax};
@@ -77,6 +77,41 @@ impl<S: Strategy> Cx<S> {
     ///
     /// `v` must be a valid value.
     pub unsafe fn value_datum(&self, v: Value, span: Span) -> Option<Datum> {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            self.convert(
+                v,
+                |v| match self.classify(v) {
+                    // The datum of a `(quote datum)` is a constant, which
+                    // may share parts and be circular.
+                    Shape::Pair => match self.quoted_operand(v) {
+                        Some(operand) => Node::Leaf(self.quote_datum(operand, span)),
+                        None => Node::Pair,
+                    },
+                    Shape::Vector => Node::Vector,
+                    Shape::Atom => Node::Leaf(self.datum_atom(v, span)),
+                },
+                |items, tail| Datum {
+                    kind: DatumKind::List {
+                        items,
+                        tail: tail.map(Box::new),
+                    },
+                    span,
+                },
+                |items| Datum {
+                    kind: DatumKind::Vector(items),
+                    span,
+                },
+            )
+        }
+    }
+
+    /// The datum `v` is, copying shared parts and refusing cycles.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a valid value.
+    unsafe fn plain_datum(&self, v: Value, span: Span) -> Option<Datum> {
         // SAFETY: passed on to the caller.
         unsafe {
             self.convert(
@@ -291,6 +326,255 @@ impl<S: Strategy> Cx<S> {
                         } else {
                             open.remove(&v.address());
                             Step::Return(vector(items))
+                        }
+                    }
+                },
+            };
+        }
+    }
+
+    /// The datum of `v`, if it is `(quote datum)` with `quote` the symbol.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a live pair.
+    unsafe fn quoted_operand(&self, v: Value) -> Option<Value> {
+        // SAFETY: `v` is a live pair, and so is each one tested before it
+        // is read.
+        unsafe {
+            let head = self.car(v);
+            if head.tag() != Tag::Symbol || self.symbol_name(head) != "quote" {
+                return None;
+            }
+            let rest = self.cdr(v);
+            if !rest.is_pair() || self.cdr(rest) != Value::EMPTY_LIST {
+                return None;
+            }
+            Some(self.car(rest))
+        }
+    }
+
+    /// Whether `v` is an object with an identity that `eq?` can tell: what
+    /// a datum label can stand for.
+    fn has_identity(&self, v: Value) -> bool {
+        v.is_pair()
+            || v.tag() == Tag::String
+            || self.is_other(v, TypeCode::Vector)
+            || self.is_other(v, TypeCode::Bytevector)
+    }
+
+    /// The datum of the constant `root`, as `quote` takes it: a pair,
+    /// vector, string or bytevector that is reached more than once, by
+    /// sharing or by a cycle, is labelled where it is first met and
+    /// referred to after, so the constant keeps its structure.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be a valid value.
+    unsafe fn quoted_datum(&self, root: Value, span: Span) -> Option<Datum> {
+        // First, which objects are reached twice. Each is entered once, so
+        // a cycle ends the walk.
+        let mut seen = HashSet::new();
+        let mut shared = HashSet::new();
+        let mut pending = vec![root];
+        while let Some(v) = pending.pop() {
+            if !self.has_identity(v) {
+                continue;
+            }
+            if !seen.insert(v.address()) {
+                shared.insert(v.address());
+                continue;
+            }
+            // SAFETY: live objects, whose fields are valid values.
+            unsafe {
+                if v.is_pair() {
+                    pending.push(self.cdr(v));
+                    pending.push(self.car(v));
+                } else if self.is_other(v, TypeCode::Vector) {
+                    pending.extend((0..self.vector_length(v)).map(|i| self.vector_ref(v, i)));
+                }
+            }
+        }
+        if shared.is_empty() {
+            // Nothing to label: the usual conversion, which keeps to its
+            // own stack.
+            // SAFETY: passed on to the caller.
+            return unsafe { self.plain_datum(root, span) };
+        }
+        // SAFETY: passed on to the caller.
+        unsafe { self.labelled_of(root, span, &shared, &mut HashMap::new()) }
+    }
+
+    /// The datum of `(quote operand)`, whose `operand` may share parts and
+    /// be circular.
+    ///
+    /// # Safety
+    ///
+    /// `operand` must be a valid value.
+    unsafe fn quote_datum(&self, operand: Value, span: Span) -> Option<Datum> {
+        let quote = Datum {
+            kind: DatumKind::Symbol("quote".to_owned()),
+            span,
+        };
+        // SAFETY: passed on to the caller.
+        let operand = unsafe { self.quoted_datum(operand, span) }?;
+        Some(Datum {
+            kind: DatumKind::List {
+                items: vec![quote, operand],
+                tail: None,
+            },
+            span,
+        })
+    }
+
+    /// The datum of `v`, labelling the objects in `shared`, which
+    /// `labels` numbers as they are first met. It keeps a stack of its own,
+    /// so a deeply nested constant cannot overflow the native stack.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be a valid value.
+    unsafe fn labelled_of(
+        &self,
+        v: Value,
+        span: Span,
+        shared: &HashSet<u64>,
+        labels: &mut HashMap<u64, u64>,
+    ) -> Option<Datum> {
+        /// A pair or vector whose parts are being converted, with the label
+        /// it was given, if any.
+        enum Frame {
+            /// A list's elements so far, and what follows the one being
+            /// converted. A list is walked along its spine, which ends at
+            /// a pair that is labelled, as that one stands for itself.
+            List {
+                items: Vec<Datum>,
+                rest: Value,
+                label: Option<u64>,
+            },
+            /// A list's dotted tail is being converted.
+            Tail {
+                items: Vec<Datum>,
+                label: Option<u64>,
+            },
+            /// A vector's elements so far, and the index of the next.
+            Vector {
+                vector: Value,
+                items: Vec<Datum>,
+                next: usize,
+                label: Option<u64>,
+            },
+        }
+        enum Step {
+            Convert(Value),
+            Return(Datum),
+        }
+        let datum = |kind| Datum { kind, span };
+        let wrap = |label: Option<u64>, inner: Datum| match label {
+            Some(label) => datum(DatumKind::Labelled(label, Box::new(inner))),
+            None => inner,
+        };
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut step = Step::Convert(v);
+        loop {
+            step = match step {
+                Step::Convert(v) => {
+                    if !self.has_identity(v) {
+                        // SAFETY: passed on to the caller.
+                        Step::Return(unsafe { self.datum_atom(v, span) }?)
+                    } else {
+                        let mut label = None;
+                        if shared.contains(&v.address()) {
+                            if let Some(&known) = labels.get(&v.address()) {
+                                step = Step::Return(datum(DatumKind::LabelRef(known)));
+                                continue;
+                            }
+                            let new = labels.len() as u64;
+                            labels.insert(v.address(), new);
+                            label = Some(new);
+                        }
+                        if v.is_pair() {
+                            // SAFETY: `v` is a live pair, whose fields are
+                            // valid.
+                            let (car, cdr) = unsafe { (self.car(v), self.cdr(v)) };
+                            stack.push(Frame::List {
+                                items: Vec::new(),
+                                rest: cdr,
+                                label,
+                            });
+                            Step::Convert(car)
+                        } else if self.is_other(v, TypeCode::Vector) {
+                            // SAFETY: `v` is a live vector.
+                            if unsafe { self.vector_length(v) } == 0 {
+                                Step::Return(wrap(label, datum(DatumKind::Vector(Vec::new()))))
+                            } else {
+                                stack.push(Frame::Vector {
+                                    vector: v,
+                                    items: Vec::new(),
+                                    next: 1,
+                                    label,
+                                });
+                                // SAFETY: the vector has an element 0.
+                                Step::Convert(unsafe { self.vector_ref(v, 0) })
+                            }
+                        } else {
+                            // A string or bytevector.
+                            // SAFETY: passed on to the caller.
+                            let atom = unsafe { self.datum_atom(v, span) }?;
+                            Step::Return(wrap(label, atom))
+                        }
+                    }
+                }
+                Step::Return(done) => match stack.pop() {
+                    None => return Some(done),
+                    Some(Frame::List {
+                        mut items,
+                        rest,
+                        label,
+                    }) => {
+                        items.push(done);
+                        if rest.is_pair() && !shared.contains(&rest.address()) {
+                            // SAFETY: `rest` is a live pair.
+                            let (car, cdr) = unsafe { (self.car(rest), self.cdr(rest)) };
+                            stack.push(Frame::List {
+                                items,
+                                rest: cdr,
+                                label,
+                            });
+                            Step::Convert(car)
+                        } else if rest == Value::EMPTY_LIST {
+                            Step::Return(wrap(label, datum(DatumKind::List { items, tail: None })))
+                        } else {
+                            stack.push(Frame::Tail { items, label });
+                            Step::Convert(rest)
+                        }
+                    }
+                    Some(Frame::Tail { items, label }) => Step::Return(wrap(
+                        label,
+                        datum(DatumKind::List {
+                            items,
+                            tail: Some(Box::new(done)),
+                        }),
+                    )),
+                    Some(Frame::Vector {
+                        vector,
+                        mut items,
+                        next,
+                        label,
+                    }) => {
+                        items.push(done);
+                        // SAFETY: `vector` is a live vector.
+                        if next < unsafe { self.vector_length(vector) } {
+                            stack.push(Frame::Vector {
+                                vector,
+                                items,
+                                next: next + 1,
+                                label,
+                            });
+                            // SAFETY: `next` is below the length.
+                            Step::Convert(unsafe { self.vector_ref(vector, next) })
+                        } else {
+                            Step::Return(wrap(label, datum(DatumKind::Vector(items))))
                         }
                     }
                 },
