@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ptr::NonNull;
 
+use crate::asan;
+
 /// The size of a page, which is also its alignment, so an object's page
 /// starts at its address with the low bits cleared.
 pub const PAGE_BYTES: usize = 32 * 1024;
@@ -131,6 +133,7 @@ impl PageSource {
 impl Drop for PageSource {
     fn drop(&mut self) {
         for (block, layout) in self.blocks.drain() {
+            asan::unpoison(block as *const u8, layout.size());
             // SAFETY: each block was allocated with exactly this layout and
             // is freed once.
             unsafe { alloc::dealloc(block as *mut u8, layout) };
@@ -179,9 +182,12 @@ impl Bump {
                 unsafe { std::ptr::write_bytes(page.as_ptr(), 0, self.header) };
                 self.cursor += self.header;
             }
+            // Nothing may touch the rest of the page until it is allocated.
+            asan::poison(self.cursor as *const u8, self.end - self.cursor);
         }
         let object = self.cursor;
         self.cursor += bytes;
+        asan::unpoison(object as *const u8, bytes);
         // SAFETY: `object` lies within a page the source allocated, so it is
         // non-null.
         Ok(unsafe { NonNull::new_unchecked(object as *mut u64) })

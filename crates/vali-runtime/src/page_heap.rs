@@ -19,6 +19,7 @@
 use std::fmt;
 use std::ptr::{self, NonNull};
 
+use crate::asan;
 use crate::page::{LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES, PAGE_HEADER_BYTES, PageSource};
 use crate::strategy::Space;
 
@@ -264,6 +265,7 @@ impl PageHeap {
             } else {
                 return None;
             };
+            asan::unpoison(block, p.block_bytes);
             p.used += 1;
             Some(NonNull::new_unchecked(block))
         }
@@ -286,11 +288,15 @@ impl PageHeap {
         let room = PAGE_BYTES - HEADER_BYTES;
         let capacity = room / (block_bytes + side);
         let base = page as *mut u8;
+        // A page that was emptied holds poisoned blocks.
+        asan::unpoison(base, PAGE_BYTES);
         // SAFETY: the page is `PAGE_BYTES` long and nothing else uses it;
         // the side table and blocks fit after the header by construction.
         unsafe {
             let side_table = base.add(HEADER_BYTES);
             let blocks = side_table.add((capacity * side).next_multiple_of(8));
+            // Nothing may touch the blocks until they are taken.
+            asan::poison(blocks, PAGE_BYTES - (blocks as usize - base as usize));
             ptr::write(
                 page,
                 Page {
@@ -408,6 +414,8 @@ impl PageHeap {
             let p = &mut *page;
             *object.as_ptr() = p.free as u64;
             p.free = object.as_ptr();
+            // Only the link, in the first word, stays readable.
+            asan::poison(object.as_ptr().add(1), p.block_bytes - 8);
             p.used -= 1;
             self.live -= p.block_bytes;
             let class = &mut self.classes[p.space][p.class];

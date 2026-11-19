@@ -16,7 +16,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-vali-test = { path = "../crates/vali-test" }
+vali-test = { path = "../crates/vali-test", features = ["asan"] }
 
 [[bin]]
 name = "bytecode"

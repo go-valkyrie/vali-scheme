@@ -25,6 +25,10 @@ native-frames = []
 # Exact counts of what an isolate does (`Cx::counters`), for benchmarks.
 # Off by default: it costs an increment per instruction.
 counters = []
+# Poison the parts of heap pages and stack segments nothing may touch, so
+# AddressSanitizer sees inside Vali's own allocator. For fuzz builds under
+# `-Zsanitizer=address` only: it needs the sanitizer's runtime to link.
+asan = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

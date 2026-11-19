@@ -1168,12 +1168,19 @@ impl<S: Strategy> Cx<S> {
             return Err(Error::scheme("too many arguments"));
         }
         if self.task.stack.is_empty() {
-            self.push_segment(SEGMENT_WORDS)?;
+            // The entry frame, and 255 arguments after it.
+            self.push_segment(5 + 255)?;
         }
         // Every host call starts in an empty dynamic environment, however
         // the last one ended.
         self.reset_dynamic();
         let segment = &self.task.stack[0];
+        // The entry frame and its arguments: slots 0 to 2, and 3 to 258.
+        crate::asan::unpoison_words(
+            // SAFETY: the segment has room for 5 + 255 words.
+            unsafe { segment.top().sub(5 + 255) },
+            segment.top(),
+        );
         // The entry frame is a pseudo-frame at the top of the segment. The
         // word at its frame pointer will hold the host's stack pointer, for
         // unwinders; its slots 0 to 2 hold the callee's header, slot 3 the
@@ -1239,6 +1246,7 @@ impl<S: Strategy> Cx<S> {
     /// Chains a segment that holds at least `words` words, reusing the
     /// spare if it is big enough, and returns its top and limit.
     fn push_segment(&mut self, words: usize) -> Result<(*mut u64, *mut u64), Error> {
+        let requested = words;
         let words = words.max(SEGMENT_WORDS);
         let segment = match self.task.spare.take() {
             Some(spare) if spare.words() >= words => spare,
@@ -1257,6 +1265,11 @@ impl<S: Strategy> Cx<S> {
             }
         };
         let ends = (segment.top(), segment.limit());
+        // Nothing may touch the segment but the frame about to go at its
+        // top: `enter` unpoisons each frame as it is set up.
+        crate::asan::poison_words(ends.1, ends.0);
+        // SAFETY: `words` fit in the segment, which is at least this long.
+        crate::asan::unpoison_words(unsafe { ends.0.sub(requested) }, ends.0);
         self.task.stack.push(View::whole(segment));
         Ok(ends)
     }
@@ -1315,6 +1328,7 @@ impl<S: Strategy> Cx<S> {
                 flags = BOUNDARY;
             }
             let copy = top.sub(header);
+            crate::asan::unpoison_words(copy.wrapping_sub(slots), copy.add(header));
             if position == ENTRY {
                 // Returning to the host returns to whichever host runs the
                 // VM now.
@@ -1481,6 +1495,31 @@ impl<S: Strategy> Cx<S> {
         self.max_stack_words = bytes / 8;
     }
 
+    /// The lowest word any frame uses, from the frame at `fp` out to the
+    /// outermost one in its segment. A frame's slots overlap its callers'
+    /// where it was called, so a caller's own end may lie above a deeper
+    /// one's: poisoning below it alone would poison slots of a frame
+    /// farther out.
+    ///
+    /// # Safety
+    ///
+    /// `fp` must be a live frame.
+    #[cfg(feature = "asan")]
+    unsafe fn lowest_live(&self, mut fp: *mut u64) -> *mut u64 {
+        let mut lowest = fp;
+        // SAFETY: passed on to the caller; frames link to their callers.
+        unsafe {
+            loop {
+                lowest = lowest.min(fp.wrapping_sub(self.suspended_slots(fp)));
+                let position = *fp.add(2);
+                if position == ENTRY || position & (BOUNDARY | UNDERFLOW) != 0 {
+                    return lowest;
+                }
+                fp = *fp as *mut u64;
+            }
+        }
+    }
+
     /// Debug builds only: checks that the frame at `fp` is intact where
     /// the interpreter is about to call or return from it, for
     /// the fuzzer's sake (`vali_test::fuzz`): bytecode that corrupts the
@@ -1555,6 +1594,9 @@ impl<S: Strategy> Cx<S> {
             )));
         }
         let slots = usize::from(slots);
+        // The frame, and its header, may go where the stack has not been
+        // since the last words there were poisoned.
+        crate::asan::unpoison_words(fp.wrapping_sub(slots.max(argc + 1)), fp.wrapping_add(3));
         let fixed = usize::from(arity.required) + usize::from(arity.optional);
         // SAFETY: every slot written is inside the frame, which the caller
         // made sure fits; arguments beyond the frame were written by the
@@ -1902,6 +1944,12 @@ impl<S: Strategy> Cx<S> {
                         let mut position = position(0, base) | RAISED;
                         let mut callee_fp = fp.sub(base + 3);
                         if fits(callee_fp, needed, limit) {
+                            // Past the innermost frame's slots: nothing has
+                            // used it.
+                            crate::asan::unpoison_words(
+                                callee_fp.wrapping_sub(needed),
+                                callee_fp.wrapping_add(3),
+                            );
                             if S::PRECISE {
                                 self.release_slots(fp, base, base + 3);
                             }
@@ -2098,6 +2146,11 @@ impl<S: Strategy> Cx<S> {
                                             "too many arguments to fit in this stack segment"
                                         ));
                                     }
+                                    // The arguments may reach below the frame.
+                                    crate::asan::unpoison_words(
+                                        fp.wrapping_sub(base + 4 + args.len()),
+                                        fp,
+                                    );
                                     self.store(fp, base + 3, procedure);
                                     for (i, &arg) in args.iter().enumerate() {
                                         self.store(fp, base + 4 + i, arg);
@@ -2301,6 +2354,11 @@ impl<S: Strategy> Cx<S> {
                                             "too many arguments to fit in this stack segment"
                                         ));
                                     }
+                                    // The arguments may reach below the frame.
+                                    crate::asan::unpoison_words(
+                                        fp.wrapping_sub(1 + args.len()),
+                                        fp,
+                                    );
                                     self.store(fp, 0, procedure);
                                     for (i, &arg) in args.iter().enumerate() {
                                         self.store(fp, 1 + i, arg);
@@ -2394,6 +2452,10 @@ impl<S: Strategy> Cx<S> {
                         #[cfg(debug_assertions)]
                         self.check_frame(fp, top, limit, running, "a return");
                         let position = *fp.add(2);
+                        // Where the frame ends, for poisoning what it had once
+                        // it has returned (slot 0 is taken below).
+                        #[cfg(feature = "asan")]
+                        let dead_low = fp.wrapping_sub(self.suspended_slots(fp));
                         if S::PRECISE {
                             // The returning frame's code dropped everything
                             // but its closure, and `value` comes with a
@@ -2435,6 +2497,13 @@ impl<S: Strategy> Cx<S> {
                                 };
                                 continue;
                             }
+                        }
+                        // The frame is dead now it has returned to a caller in
+                        // its own segment: nothing may touch what it had below
+                        // its caller's.
+                        #[cfg(feature = "asan")]
+                        if position & (BOUNDARY | UNDERFLOW) == 0 {
+                            crate::asan::poison_words(dead_low, self.lowest_live(caller));
                         }
                         let base = position_base(position);
                         // The value's reference moves into the slot, where
