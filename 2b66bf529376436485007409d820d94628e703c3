@@ -50,6 +50,24 @@
       "message": "Nit: by the convention in `docs/adr/README.md`, an amendment to an Accepted record gets an **Amended** line in the header. Something like `2026-11-19, (scheme load) and (scheme r5rs) reach files through (scheme file) and need no serving of their own (item 6)`.",
       "revId": "2b66bf529376436485007409d820d94628e703c3",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "3174516f_d0cc8d88",
+        "filename": "docs/adr/0009-loaders-and-capabilities.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 47,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:16:10Z",
+      "side": 1,
+      "message": "Ignore this one if 1260820 lands first: it drops **Amended** lines, so the edit in place is all that\u0027s needed.",
+      "parentUuid": "76ce32b9_06d3faab",
+      "revId": "2b66bf529376436485007409d820d94628e703c3",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
