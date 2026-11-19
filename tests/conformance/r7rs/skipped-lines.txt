@@ -1,13 +1,3 @@
 # Upstream lines the harness blanks out before running, because Vali cannot
 # read them and the read error would end the whole run. Each entry is the
 # upstream line exactly, a tab, then the reason.
-(test-numeric-syntax "1s2" 100.0 "100.0" "100.")	#51: R5RS exponent markers s, f, d and l are not R7RS syntax, and Vali's reader rejects them
-(test-numeric-syntax "1S2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1f2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1F2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1d2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1D2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1l2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1L2" 100.0 "100.0" "100.")	as above
-(test-numeric-syntax "1s2+1.0i" (make-rectangular 100.0 1.0) "100.0+1.0i" "100.+1.i")	as above
-(test-numeric-syntax "1.0+1s2i" (make-rectangular 1.0 100.0) "1.0+100.0i" "1.+100.i")	as above
