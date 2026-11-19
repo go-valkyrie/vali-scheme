@@ -142,17 +142,15 @@ impl<S: Strategy> Cx<S> {
         }
         // A Rust object or a continuation in a garbage cycle drops what it
         // holds in the table as it is freed.
-        let (heap, objects, instances) = self.heap_objects_instances();
-        let mut finalize = |v| {
-            if let Some(i) = Self::retire(v) {
-                objects.remove(i);
-            } else if let Some(i) = Self::retire_module(v) {
-                instances.retire(i);
-            }
-        };
+        let (heap, mut tables) = self.heap_and_tables();
+        let mut emptied = 0;
+        let mut finalize = |v| emptied += Self::finalize_in(&mut tables, v);
         // SAFETY: the stack's references are counted in, and the table is
         // empty.
         unsafe { S::collect_cycles(heap, Self::describe, &mut finalize, force_cycles) };
+        if emptied > 0 {
+            S::release_external(self.heap_mut(), emptied * crate::cx::SYNTAX_SLOT_BYTES);
+        }
         for &v in roots {
             S::release(self.heap_mut(), v);
         }
