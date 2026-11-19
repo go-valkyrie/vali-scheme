@@ -2,15 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Amended:** 2026-11-16, the Scheme-level control API is SRFI 226 (ADR 0007)
-- **Amended:** 2026-11-16, reworked: each task runs on its own stack of runtime-owned segments, with native frames for compiled code, so native debuggers and profilers can unwind it
-- **Amended:** 2026-11-17, a suspended task lets its isolate run another task; the isolate, not the task, is the host's future (ADR 0008)
-- **Amended:** 2026-11-17, tier 0's frames are native frame records with named return addresses, and the interpreter links itself into the chain, so native debuggers and profilers unwind and name interpreted frames too
-- **Amended:** 2026-11-17, as built: a three-word frame header, three kinds of marker stub, signal frames where stacks switch, and the measured cost of keeping the chain current
-- **Amended:** 2026-11-17, continuations as built in tier 0: segments shared between the stack and continuations, an underflow flag that copies one frame at a time, and catches that point into sealed frames (item 8)
-- **Amended:** 2026-11-17, the dynamic environment as built: three registers every host call empties, `dynamic-wind` and parameters in Scheme over them, and errors that call `raise` where they happen (item 8)
-- **Amended:** 2026-11-18, the compiler's IR is A-normal form with join points, which corresponds to CPS; return points become frames when it is converted to bytecode (ADR 0017)
-- **Amended:** 2026-11-18, the trampoline link and named stubs are opt-in, behind the Cargo feature `native-frames`, and Vali ships GDB and LLDB extensions that show Scheme frames either way (item 6)
 - **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit), 0017 (the IR)
 
 ## Context
@@ -50,16 +41,16 @@ How frames are represented decides all of this:
    - reinstating one copies frames back lazily, a chunk at a time, as they are returned through;
    - one-shot uses (async suspension, generators, exceptions) only switch stacks.
 
-   **As built in tier 0:**
+   Tier 0 does this as follows:
    - **Capturing splits the segment.** `%call/cc` seals every frame from its caller out; the stack goes on below them, in the same segment. A segment's memory is shared between the stack and the continuations that sealed part of it, and the stack holds views of segments: a segment and the top of the part it may use. A segment part of which was sealed is never reused, since what the sealed frames left there would read as counted values.
    - **A continuation owns the frames it sealed:** from its first frame out to one whose caller is the host or is sealed already. It refers to the continuation that holds that caller, its parent, and keeps the segments its frames are in alive. It is an ordinary heap object whose record sits in the isolate's object table (ADR 0016). Its children are the values its frames hold in their own slots (those below the callee's header), its parent and its catches' handlers, so every strategy frees continuations, and collects cycles through them, like any object. Under precise counting, sealing moves the stack's counts to the continuation; the other strategies count the frames' values in, once per frame sealed.
    - **An underflow flag copies frames back, one at a time.** The outermost live frame's position word has `UNDERFLOW` when its caller is sealed. Returning from it copies the caller's own slots to the top of the now empty segment, with the same flag unless the caller's caller is the host, and resumes the copy. The isolate remembers which continuation holds the caller, and moves to its parent as frames are copied past its own. Frames never returned through are never copied. Copying a chunk of several frames at a time, as Chez does, is a later optimisation.
-   - **Reinstating** drops the live stack and returns the value as if from a frame whose caller is the continuation's first frame. A continuation whose caller is the host returns to whichever host is running the VM now; there is no barrier yet, since Rust cannot nest a run (item 10).
+   - **Reinstating** drops the live stack and returns the value as if from a frame whose caller is the continuation's first frame. A continuation whose caller is the host returns to whichever host is running the VM now; Not built yet: the barrier of item 10, since Rust cannot nest a run.
    - **`%catch` records which continuation holds its frame** once the frame is sealed. A continuation keeps a copy of the catches waiting when it was captured, and reinstating restores them. Raising to a catch whose frame is sealed drops the live stack and copies the frame in before calling the handler.
    - **Every assigned local variable is boxed** (ADR 0005 #4), since a frame that a continuation copies twice would otherwise hold two copies of a variable.
    - **Cost:** the return path gains one test of a flag that was tested before. Without collection, fib and tak are unchanged; under precise counting, fib measured about 3% slower, inside the noise of a shared machine.
 
-   **The dynamic environment, as built,** ahead of continuation marks:
+   **The dynamic environment,** ahead of continuation marks:
    - **Three registers** in the isolate hold `dynamic-wind`'s winders, the exception handlers and the parameterization, each a list, innermost first. (scheme base) reads and writes them through primitives, and does everything else with them in Scheme. The VM only counts them as roots and empties them at the start and end of every host call. An error that escapes to the host runs no after thunks, so this is what keeps a later call from inheriting a dead extent's handlers or a parameter stuck at an inner value.
    - **A parameter looks itself up** in the parameterization, an alist, before falling back to its own value; `parameterize` pushes bindings and pops them on return. A winder records the handlers and parameterization of its `dynamic-wind`, which its before and after thunks run in.
    - **`call/cc` is Scheme over `%call/cc` and `%continue`:** the continuation procedure travels from the current winders to the captured ones, running after and before thunks, then restores the registers and returns to the continuation.
@@ -82,7 +73,7 @@ How frames are represented decides all of this:
 ## Alternatives considered
 
 - **The thread's own native stack:** simplest for native tools, but continuations must copy the whole stack, deep recursion overflows, and tasks cannot suspend.
-- **Frames as data everywhere, driven by a trampoline** (this ADR's first version, close to scheme-rs): simple and uniform. But compiled frames are invisible to native debuggers and profilers, and every call goes through memory.
+- **Frames as data everywhere, driven by a trampoline** (close to scheme-rs): simple and uniform. But compiled frames are invisible to native debuggers and profilers, and every call goes through memory.
 - **Contiguous stacks grown by copying** (Go since 1.4): avoids hot splits. But multi-shot continuations still need copying, and moving a stack requires that nothing outside it points into it. Chez-style segments handle growth and continuations with one mechanism.
 - **Cheney on the MTA** (CHICKEN): uses the C stack as the allocation nursery, which ties the design to compiling via C.
 

@@ -2,11 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Amended:** 2026-11-16, complex numbers are headered objects, as the full numeric tower requires (ADR 0007)
-- **Amended:** 2026-11-17, a closure's code word points to its function, whose entry tier-up replaces; a call is a tag test and two loads
-- **Amended:** 2026-11-17, object layouts: one header word split between the memory strategy and the runtime; pairs and flonums carry a header only if the strategy wants one; the immediate subtags; UTF-8 strings; the built-in type codes (items 7 to 13)
-- **Amended:** 2026-11-17, syntax objects have a type code of their own, since they are Rust values (ADR 0015 #13)
-- **Amended:** 2026-11-18, constants live in a pool outside the heap, on frozen pages; a pair page starts with a header word that says so; the strategy's half of a pool object's header is frozen; the meaning of *immutable*; a pool string never installs hints (items 7, 8, 10, 11; ADR 0020)
 - **Related:** 0003 (memory management), 0006 (ABI version), 0008 (threads), 0010 (contracts), 0012 (distribution format)
 
 ## Context
@@ -106,7 +101,7 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
 - Fixnum fast paths are one or two instructions; generic arithmetic is a runtime call taken on overflow or on a non-fixnum.
 - Fixnums turn into bignums beyond ±2⁶⁰ (about 1.15 × 10¹⁸).
 - Every flonum result allocates in tier 0. The JIT can keep flonums unboxed within a function.
-- A pair takes two words under tracing, and two or three under counting, whichever M1 finds faster. A collector finds pairs without a header by the pages they live on (ADR 0003).
+- A pair takes two words under tracing, and two or three under counting, whichever measures faster. A collector finds pairs without a header by the pages they live on (ADR 0003).
 - Every header holds both a strategy's metadata and the object's type, so one load gives a counting strategy both, and no strategy needs a second header word.
 - `string-ref` on a string with non-ASCII characters costs more than in a Scheme with fixed-width strings. Code that walks strings in order, or uses cursors, does not pay it.
 - Only the immediate subtags have room to grow. A future type that needs fast tests gets a header fast path, or a new ABI version that reassigns a tag.
@@ -123,7 +118,7 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
 ## Left open
 
 - **32-bit targets** (wasm32, armv7, i686). The choice is between word-sized values, with 29-bit fixnums and 2-bit or 3-bit tags, and 64-bit values on every target. Distribution artifacts are unaffected either way (ADR 0012). Must be settled before any 32-bit port.
-- Whether pairs carry a header under the counting strategies (item 8): decided by measurement in M1.
+- Whether pairs carry a header under the counting strategies (item 8): decided by measurement.
 
 ## References
 

@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Amended:** 2026-11-18, the linker chooses unchecked entry points and resolves dispatch, never distribution code (items 4 and 6, ADR 0017)
 - **Related:** 0001 (interface sections), 0005 (removing checks), 0006 (AOT), 0017 (link-time optimisation)
 
 ## Context

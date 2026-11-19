@@ -2,7 +2,6 @@
 
 - **Status:** Accepted, not built
 - **Date:** 2026-11-18
-- **Amended:** 2026-11-18, after review: a procedural macro's reach through `datum->syntax` cannot be listed, so templates define the macro part of the ABI and per-binding facts catch the rest (items 1 and 3)
 - **Related:** 0001 (interface sections), 0006 (Vali's own ABI version), 0010 (contracts), 0012 (distribution, per-binding facts), 0017 (link-time optimisation)
 
 ## Context
@@ -37,7 +36,7 @@ A distributed library is linked against whatever version of each dependency is p
 - Breaking a distributed library's ABI fails at link time with a message that says what broke, instead of misbehaving at run time.
 - Library authors must keep versions, and their release builds need the last published interface to compare against.
 - Importers do not have to recompile for a compatible release.
-- The interface section records the ABI version (ADR 0001 #5, as amended), and so does each importer's dependency record.
+- The interface section records the ABI version (ADR 0001 #5), and so does each importer's dependency record.
 
 ## Alternatives considered
 

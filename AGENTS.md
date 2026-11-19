@@ -46,7 +46,7 @@ The standard libraries' Scheme sources are in `crates/vali-compiler/lib/` (`sche
 ## Docs and decisions
 
 - `docs/architecture.md`: the crate map and the reason each boundary exists, the Rust and Scheme namespaces, and the toolchain policy. Some crates in its table (`vali`, `vali-artifact`, `vali-codegen`, `vali-build`, `vali-ide`) are planned and don't exist yet.
-- `docs/adr/`: one record per design decision, indexed in `docs/adr/README.md`, which also states how records are amended or superseded. Read the relevant ADR before changing a design. New records start from `docs/adr/template.md`.
+- `docs/adr/`: one record per design decision, indexed in `docs/adr/README.md`, which also states how records change. Read the relevant ADR before changing a design. New records start from `docs/adr/template.md`.
 - `docs/bytecode.md`: the run-format instruction set.
 
 ## Commits and review
