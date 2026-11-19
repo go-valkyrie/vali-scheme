@@ -1481,6 +1481,53 @@ impl<S: Strategy> Cx<S> {
         self.max_stack_words = bytes / 8;
     }
 
+    /// Debug builds only: checks that the frame at `fp` is intact where
+    /// the interpreter is about to call or return from it, for
+    /// the fuzzer's sake (`vali_test::fuzz`): bytecode that corrupts the
+    /// stack without crashing would otherwise go unseen. Slot 0 must still
+    /// hold a closure of `running`, the function whose code runs, and the
+    /// frame must lie inside its segment, which ends at `limit`. The entry
+    /// pseudo-frame at `top` has neither. A Rust procedure in slot 0 is
+    /// let through: a tail call to one leaves it there for the return.
+    ///
+    /// # Panics
+    ///
+    /// If the frame is corrupt.
+    #[cfg(debug_assertions)]
+    fn check_frame(
+        &self,
+        fp: *mut u64,
+        top: *mut u64,
+        limit: *mut u64,
+        running: *const Code<S>,
+        at: &str,
+    ) {
+        if fp == top {
+            return;
+        }
+        // SAFETY: slot 0 of a bytecode frame is inside it, and the
+        // tag is checked before the closure is read.
+        let code = unsafe { self.procedure_code(slot(fp, 0)) }
+            .unwrap_or_else(|_| panic!("corrupt frame at {at}: slot 0 holds no closure"));
+        let Kind::Bytecode { slots, .. } = code.kind else {
+            // A tail call to a Rust procedure leaves it in slot 0 for the
+            // return that follows.
+            return;
+        };
+        assert!(
+            std::ptr::eq(code, running),
+            "corrupt frame at {at}: slot 0 holds a closure of {}, but {} is running",
+            code.name(),
+            // SAFETY: `running` is the code switched to for this frame.
+            unsafe { &*running }.name()
+        );
+        assert!(
+            fits(fp, usize::from(slots), limit),
+            "corrupt frame at {at}: {} has {slots} slots, which cross the segment's limit",
+            code.name()
+        );
+    }
+
     /// Sets up a bytecode function's frame at `fp`, which the caller has
     /// made sure fits: checks the arity, fills omitted optional arguments,
     /// builds the rest list, and clears the other slots.
@@ -1693,6 +1740,10 @@ impl<S: Strategy> Cx<S> {
         // refers to it, else 0: closures made here keep it alive.
         let mut owner = 0u64;
         let mut current_module = 0usize;
+        // Debug builds: the function the current frame runs, to check that
+        // slot 0 still holds a closure of it (`check_frame`).
+        #[cfg(debug_assertions)]
+        let mut running: *const Code<S> = std::ptr::null();
         let mut next = Next::Call {
             direct: false,
             base: 0,
@@ -1730,6 +1781,10 @@ impl<S: Strategy> Cx<S> {
                         unreachable!("only bytecode functions are switched to");
                     };
                     code = words;
+                    #[cfg(debug_assertions)]
+                    {
+                        running = $callee as *const Code<S>;
+                    }
                     if module as usize != current_module {
                         current_module = module as usize;
                         (constants, variables, statics, owner) =
@@ -1935,6 +1990,8 @@ impl<S: Strategy> Cx<S> {
                         resume,
                         direct,
                     } => {
+                        #[cfg(debug_assertions)]
+                        self.check_frame(fp, top, limit, running, "a call");
                         // A call is a safepoint.
                         if S::COUNTS && fp != top && S::epoch_due(self.heap()) {
                             let roots = self.stack_roots(fp);
@@ -2334,6 +2391,8 @@ impl<S: Strategy> Cx<S> {
                         }
                     }
                     Next::Return(value) => {
+                        #[cfg(debug_assertions)]
+                        self.check_frame(fp, top, limit, running, "a return");
                         let position = *fp.add(2);
                         if S::PRECISE {
                             // The returning frame's code dropped everything
