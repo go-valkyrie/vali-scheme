@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "fa2f1a35_9eaee8e3",
+        "filename": "docs/adr/0023-resource-limits.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 45,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:02:07Z",
+      "side": 1,
+      "message": "Two parts of this aren\u0027t true yet:\n- Cycle collection doesn\u0027t retire slots: its own finalize closure in `epoch.rs` lacks the syntax case (1260691, rust_objects.rs).\n- `max_syntaxes` counts objects waiting in the zero-count table, not only live ones (1260691, syntax.rs).\n\nWhichever fix lands, this sentence should say what the cap counts then: \"live slots\", or \"live slots and those freed since the last epoch\". The same goes for item 6\u0027s \"the caps count live entries\".",
+      "revId": "ee00ebab806c1188fbb8cca50d9eb17f3dccb851",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
