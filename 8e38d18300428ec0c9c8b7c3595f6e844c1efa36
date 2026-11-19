@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "248182a1_c25f72eb",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 2
+      },
+      "lineNbr": 1197,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:45:31Z",
+      "side": 1,
+      "message": "Two notes on `reproduces`:\n\n- **What it can\u0027t tell apart.** A crafted artifact can add a scope of its own that binds none of its definitions, so it isn\u0027t in `own_scopes`, and bind the other library\u0027s private variable under it. That maps one to one onto the owner\u0027s entry exactly as a real import\u0027s remapped scope does, and its templates can carry that scope. The loader can\u0027t tell a fabricated scope from a remapped one. That\u0027s fine given #9\u0027s last sentence: the artifact could link the variable from its code anyway. It\u0027s worth one line in the doc comment, so nobody later leans on this as more than it is.\n- **Cost.** Each entry that names another library\u0027s private variable scans that library\u0027s whole table, and clones the trial map per candidate. A library that imports `(scheme base)` carries a remapped copy of base\u0027s table, which is mostly its private definitions, so loading its artifact does about entries × entries comparisons. Indexing each owner\u0027s table once by `(symbol, name)` would make it linear. Not urgent, but every library load pays it.",
+      "revId": "8e38d18300428ec0c9c8b7c3595f6e844c1efa36",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
