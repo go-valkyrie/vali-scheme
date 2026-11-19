@@ -1,0 +1,104 @@
+# Verifies changes under review on GerritHub, and votes Verified on them.
+#
+# The gerrithub-ci Worker (https://github.com/go-valkyrie/gerrithub-ci) sends
+# a repository_dispatch for each patch set it has confirmed with Gerrit: new
+# patch sets from trusted uploaders, and anyone's patch set once a trusted
+# reviewer comments "recheck". This workflow fetches the patch set from
+# GerritHub, runs check.yml's checks on it, and reports the result to the
+# Worker, which votes with its own Gerrit account.
+#
+# GitHub holds no GerritHub credentials. Only the vote job may request an
+# OIDC token, which is how it proves itself to the Worker; the jobs that run
+# the change's code get no secrets and no token. They restore the Rust cache
+# but never save it, so a patch set can't poison the cache main's CI uses.
+#
+# Needs the repository variable GERRITHUB_CI_URL, the Worker's URL.
+
+name: gerrit-verify
+
+on:
+  repository_dispatch:
+    types: [gerrit-verify]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gerrit-${{ github.event.client_payload.change }}
+  cancel-in-progress: true
+
+env:
+  GERRIT_URL: https://review.gerrithub.io
+  PROJECT: ${{ github.event.client_payload.project }}
+  REF: ${{ github.event.client_payload.ref }}
+  REVISION: ${{ github.event.client_payload.revision }}
+  # jouet is a development aid, not needed to check the code.
+  MISE_DISABLE_TOOLS: jouet
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: ${{ matrix.check }} (${{ github.event.client_payload.change }},${{ github.event.client_payload.patchset }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [lint, test, docs]
+    env:
+      # As in check.yml: line tables are enough for test failures.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - name: Check out the patch set
+        run: |
+          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
+          git init -q .
+          git fetch -q --depth=1 "$GERRIT_URL/$PROJECT" "$REF"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.check }}
+          save-if: false
+
+      - name: Install the pinned toolchain
+        run: bin/mise install
+
+      - name: Commit message
+        if: matrix.check == 'lint'
+        run: |
+          git log -1 --format=%B > "$RUNNER_TEMP/commit-msg"
+          bin/mise exec -- hk run commit-msg "$RUNNER_TEMP/commit-msg"
+
+      - name: Lint
+        if: matrix.check == 'lint'
+        run: bin/mise run lint
+
+      - name: Test
+        if: matrix.check == 'test'
+        run: bin/mise run test
+
+      - name: Docs and dependencies
+        if: matrix.check == 'docs'
+        run: |
+          bin/mise run docs
+          bin/mise run deny
+
+  vote:
+    needs: verify
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Report the result to gerrithub-ci
+        env:
+          RESULT: ${{ needs.verify.result }}
+          TICKET: ${{ github.event.client_payload.ticket }}
+          WORKER: ${{ vars.GERRITHUB_CI_URL }}
+        run: |
+          token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=gerrithub-ci" | jq -r .value)
+          jq -n --arg ticket "$TICKET" --arg result "$RESULT" '{ticket: $ticket, result: $result}' |
+          curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            --data @- "$WORKER/vote"
