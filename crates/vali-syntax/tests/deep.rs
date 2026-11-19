@@ -143,3 +143,71 @@ fn syntax_shared_between_nodes_drops_once() {
     drop(deep);
     drop(wrapper);
 }
+
+#[test]
+fn deep_datums_and_syntax_format_with_debug() {
+    let mut context = ScopeContext::new();
+    let scope = context.new_scope(ScopeKind::Library).unwrap();
+    let top = context.intern(&[scope]).unwrap();
+    // Small values print as a derive would.
+    let small = nest("list", 2);
+    let text = format!("{small:?}");
+    assert!(text.starts_with("Datum { kind: List { items: [Datum { kind: List"));
+    assert!(!text.contains("..."), "{text}");
+    // Deep ones stop at a bounded depth, plain or pretty.
+    for shape in SHAPES {
+        let deep = nest(shape, DEEP);
+        for text in [format!("{deep:?}"), format!("{deep:#?}")] {
+            assert!(text.contains("..."), "{shape}");
+            assert!(text.len() < 10_000_000, "{shape}: {}", text.len());
+        }
+        let syntax = Syntax::from_datum(&deep, top);
+        let text = format!("{syntax:?}");
+        assert!(text.starts_with("Syntax { content: "), "{shape}");
+        assert!(text.contains("..."), "{shape}");
+        assert!(text.len() < 10_000_000, "{shape}: {}", text.len());
+    }
+}
+
+/// `(x . (x . (... . a)))`, each dotted tail a list of its own, as
+/// [`Syntax::from_parts`] keeps them: the nodes a template's output
+/// leaves, which the constructors would have spliced.
+fn dotted_chain(n: usize, scopes: vali_syntax::ScopeSetId) -> Syntax {
+    let mut chain = Syntax::identifier("a", scopes, span(), None);
+    for _ in 0..n {
+        chain = Syntax::from_parts(
+            vali_syntax::NewNode::List {
+                items: vec![Syntax::identifier("x", scopes, span(), None)],
+                tail: Some(chain),
+            },
+            scopes,
+            Vec::new(),
+            span(),
+            None,
+        )
+        .unwrap();
+    }
+    chain
+}
+
+#[test]
+fn exposing_a_deep_chain_of_dotted_tails_is_one_list() {
+    let mut context = ScopeContext::new();
+    let library = context.new_scope(ScopeKind::Library).unwrap();
+    let step = context.new_scope(ScopeKind::Macro).unwrap();
+    let top = context.intern(&[library]).unwrap();
+    let chain = dotted_chain(DEEP, top);
+    // With and without a pending change that every part below receives.
+    for syntax in [chain.clone(), chain.flip(&mut context, step).unwrap()] {
+        let vali_syntax::Exposed::List { items, tail } = syntax.expose(&mut context).unwrap()
+        else {
+            panic!("a list");
+        };
+        assert_eq!(items.len(), DEEP);
+        let tail = tail.expect("a dotted tail");
+        assert!(matches!(
+            tail.expose(&mut context).unwrap(),
+            vali_syntax::Exposed::Identifier(_)
+        ));
+    }
+}

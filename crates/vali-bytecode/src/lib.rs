@@ -15,6 +15,7 @@
 
 mod builder;
 mod convert;
+mod debug;
 mod instruction;
 mod module;
 pub mod ownership;
