@@ -38,5 +38,6 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0019](0019-webassembly-target.md) | WebAssembly target | Proposed |
 | [0020](0020-constants-outside-the-heap.md) | Constants live outside the isolate heap | Accepted |
 | [0021](0021-portable-artifacts-and-platform-features.md) | Portable artifacts and platform features | Accepted, not built |
+| [0022](0022-lint-framework.md) | Lint framework | Accepted, not built |
 
 Milestone M0 ended with 0002, 0004, 0005 and 0008 accepted. 0003 stays a proposal. M1's measurements exist, but all five strategy variants stay built and tested until the optimising compiler's ownership inference can be measured too.
