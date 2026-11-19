@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "ae59ae1c_750a9036",
+        "filename": "crates/vali-compiler/lib/srfi/128.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 19,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:20:09Z",
+      "side": 1,
+      "message": "As on 1260897: \"hashes do not vary between runs\" holds for the content hashes, but not for the eq and eqv comparators\u0027 identity hashes, nor for `default-hash` of anything that reaches a record or a procedure. Those come from addresses. Line 5\u0027s \"deterministic\" has the same issue. Something like \"content hashes do not vary between runs; identity hashes are stable for an object\u0027s lifetime\" would be exact.",
+      "revId": "0be0aca2981c95cbad68b70d549b394623a63a00",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
