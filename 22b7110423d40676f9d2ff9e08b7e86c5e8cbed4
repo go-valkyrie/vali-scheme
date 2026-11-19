@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "85918ba9_b028c53d",
+        "filename": "docs/adr/0025-weak-references-and-ephemerons.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 78,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T18:59:45Z",
+      "side": 1,
+      "message": "Done in patch set 2. Item 7 now states the opposite case, with the table-that-outlives-its-use example and why trial deletion can\u0027t see it. The Consequences say it too, and question 2 frames the choice as one leak against the other, which is the right way to decide slice 2.",
+      "parentUuid": "cdd986dd_f058d702",
+      "revId": "22b7110423d40676f9d2ff9e08b7e86c5e8cbed4",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "c0d5488b_1e0c1c21",
         "filename": "docs/adr/0025-weak-references-and-ephemerons.md",
         "patchSetId": 1
