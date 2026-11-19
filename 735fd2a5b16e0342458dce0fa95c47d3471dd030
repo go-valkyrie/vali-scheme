@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "0c987a6d_88c6aba2",
+        "filename": "crates/vali-compiler/src/phase.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 83,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:01:50Z",
+      "side": 1,
+      "message": "The phase-1 isolate gets the default configuration, so transformers run uncapped. For `eval` and the REPL, it should take the host isolate\u0027s limits, or at least `max_symbols` and `max_syntaxes`, so that untrusted code can\u0027t intern past the cap by doing it in a `let-syntax` transformer.",
+      "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "b3474b88_1e67da25",
+        "filename": "crates/vali-runtime/src/cx.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 293,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:01:50Z",
+      "side": 1,
+      "message": "`bytes_used()` is what the heap has taken from the system. The page heap keeps emptied pages on its empty list and never gives them back, so this is a high-water mark.\n\nAfter a program fills the heap close to the limit and frees it, `bytes_used() + rust_bytes + bytes \u003e max` holds for good. Every later `intern`, `keyword_raw` and `syntax_raw` miss then fails with `OutOfMemory`, which isn\u0027t catchable, even though `cx.string(..)` still succeeds in the free pages.\n\nReproduced under DeferredHeadered and PreciseSideCounts with an 8-page limit: fill with strings, drop them, `collect_garbage()`. Then `cx.symbol(\"fresh\")` and `cx.syntax(..)` both return `Err(OutOfMemory)`, permanently. Before this change both succeeded.\n\nSecond problem with the same check: the charge is only checked here, when a name or syntax object is made. `PageSource::block` never sees `rust_bytes`, so the heap still grows to the full `max_bytes` afterwards. Interning long names until the limit, then allocating strings, ended at 1.47× the limit (NoCollection) and 1.36× (DeferredHeadered).\n\nFolding the charge into the page source\u0027s own accounting would fix both: one counter, checked on every page and every charge, that goes down when a slot is returned. The check would then compare live usage, not a page high-water mark.",
+      "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
