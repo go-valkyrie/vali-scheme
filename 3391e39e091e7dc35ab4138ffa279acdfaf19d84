@@ -38,6 +38,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "566d6a47_db13fa45",
+        "filename": "fuzz/fuzz_targets/ir.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 30,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:53:23Z",
+      "side": 1,
+      "message": "Done in patch set 3: the target is now stacked on the 1260816 chain and asserts `validate_structure`, with a comment saying why.",
+      "parentUuid": "725832ec_cc0f0fb0",
+      "revId": "3391e39e091e7dc35ab4138ffa279acdfaf19d84",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "0e6e63ea_0b757e35",
         "filename": "fuzz/fuzz_targets/library.rs",
         "patchSetId": 1
