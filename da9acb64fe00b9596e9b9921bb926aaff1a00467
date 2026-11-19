@@ -1,0 +1,72 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "e9a28142_35a1bc8a",
+        "filename": "crates/vali-compiler/lib/srfi/158.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 105,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:22Z",
+      "side": 1,
+      "message": "`resume` reinstates the whole continuation captured during the generator\u0027s first call, and with it that call\u0027s exception handlers, `parameterize` bindings and current ports. `make-for-each-generator` (178) inherits this.\n\n```scheme\n(define g (make-coroutine-generator (lambda (yield) (yield 1) (error \"boom\"))))\n(define a (guard (e (#t \u0027first)) (g)))\n(define b (guard (e (#t \u0027second)) (g)))\n```\n\nThe second call\u0027s error is caught by the first `guard`, and control re-enters the finished `(define a …)` and runs on from there again, every time. If the first call is outside any `guard`, a later `(guard … (g))` doesn\u0027t catch the error at all.\n\nWith a body that yields `(p)`, `(list (parameterize ((p \u0027first)) (g)) (g) (parameterize ((p \u0027third)) (g)))` gives `(first first first)`.\n\nAt least fix the errors: run `(proc yield)` inside a `guard` that marks the generator done and returns the condition, tagged, through `return`. Then have the generator re-raise it in the caller\u0027s own dynamic environment. Parameters and ports need composable continuations (SRFI 226 isn\u0027t exposed yet), so document that limit in the header until then.",
+      "revId": "da9acb64fe00b9596e9b9921bb926aaff1a00467",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "19927e20_b5924e85",
+        "filename": "crates/vali-compiler/lib/srfi/158.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 154,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:22Z",
+      "side": 1,
+      "message": "Should-fix: this is quadratic, because Vali\u0027s `string-ref` walks the string to the index (`chars().nth(i)`). For n non-ASCII characters, n \u003d 10k / 20k / 40k take 2.6 / 8.8 / 35 s, against 0.04 / 0.04 / 0.09 s for `string-for-each`; ASCII strings are quadratic too. Either iterate over `(string-\u003elist str start end)`, documenting that later changes to the string aren\u0027t seen, or keep this until `string-ref` gets the index hints of ADR 0002 #11, with a comment saying so.",
+      "revId": "da9acb64fe00b9596e9b9921bb926aaff1a00467",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "4144bdcb_b8ff28e7",
+        "filename": "crates/vali-compiler/lib/srfi/158.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 240,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:22Z",
+      "side": 1,
+      "message": "Should-fix: each value costs O(k) for k generators, since every call rebuilds two k-long lists and scans every head. On the debug CLI, merging k generators of 10 values takes 11 s at k\u003d250, 42 s at k\u003d500 and 170 s at k\u003d1000, against under 0.1 s for `gappend`. Pair the generators into a balanced tree of lazy two-way merges: O(log k) per value, and leftmost-wins on ties still holds if left stays left.",
+      "revId": "da9acb64fe00b9596e9b9921bb926aaff1a00467",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "0eb841e8_381a571f",
+        "filename": "docs/adr/0007-language-scope.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 63,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:22Z",
+      "side": 1,
+      "message": "Nit: with SRFI 158 added, the parenthetical now reads as if it were about SRFI 158, and the list has two \"and\"s. Perhaps: \"SRFI 117 list queues, SRFI 127 lazy sequences, SRFI 133 vectors and SRFI 158 generators and accumulators (all in Scheme; R7RS\u0027s own `vector-copy`, `vector-map` and the rest are re-exported by `(srfi 133)`)\".",
+      "revId": "da9acb64fe00b9596e9b9921bb926aaff1a00467",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
