@@ -37,6 +37,7 @@
 (test-assert (memq 'srfi-128 (features)))
 (test-assert (memq 'srfi-132 (features)))
 (test-assert (memq 'srfi-133 (features)))
+(test-assert (memq 'srfi-158 (features)))
 (test-assert (not (memq 'srfi-9999 (features))))
 (test-equal 'srfi-1 probe)
 (test-equal 'yes (cond-expand (srfi-132 'yes) (else 'no)))
