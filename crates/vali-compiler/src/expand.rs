@@ -41,10 +41,11 @@ mod transformers;
 mod units;
 
 pub(crate) use context::merge_syntax;
+pub(crate) use context::optimising;
 use context::*;
 use transformers::*;
-pub(crate) use units::decode_library_artifact;
 use units::*;
+pub(crate) use units::{build_stamp, decode_library_artifact};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
@@ -500,11 +501,25 @@ impl Expander {
             };
             let requirement = requirement.to_datum();
             let available = &self.available;
-            if crate::features::is_else(&requirement)
+            let mut asked = Vec::new();
+            let satisfied = crate::features::is_else(&requirement)
                 || crate::features::satisfied(&requirement, &mut |n| {
-                    crate::loader::is_standard(n) || available.get(n) == Some(&true)
-                })?
-            {
+                    if crate::loader::is_standard(n) {
+                        return true;
+                    }
+                    let found = available.get(n) == Some(&true);
+                    asked.push((n.to_string(), found));
+                    found
+                })?;
+            // The unit being expanded followed what it found.
+            if let Some(unit) = self.units.last_mut() {
+                for answer in asked {
+                    if !unit.asked.contains(&answer) {
+                        unit.asked.push(answer);
+                    }
+                }
+            }
+            if satisfied {
                 return Ok(body.to_vec());
             }
         }

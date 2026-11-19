@@ -4,6 +4,7 @@
 
 mod artifacts;
 mod bridges;
+mod cache;
 mod compile;
 mod hostile;
 mod lazy;

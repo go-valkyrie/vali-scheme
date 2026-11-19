@@ -45,6 +45,13 @@ fn compiled_against_another(bytes: &[u8]) -> Vec<u8> {
             changed.raw(&hash);
         }
     }
+    // Then the libraries its `cond-expand`s asked about.
+    let asked = depends.count(2).expect("a count");
+    changed.usize(asked);
+    for _ in 0..asked {
+        changed.str(depends.str().expect("a name"));
+        changed.bool(depends.bool().expect("an answer"));
+    }
     artifact.insert("depends", true, changed.finish());
     artifact.encode()
 }

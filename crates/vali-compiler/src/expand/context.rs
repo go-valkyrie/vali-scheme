@@ -151,7 +151,7 @@ pub(super) fn remap_export(
 /// Whether the optimiser runs: off when the `VALI_NO_OPT` environment
 /// variable is set, so the test suite can check that it changes nothing a
 /// program can see.
-pub(super) fn optimising() -> bool {
+pub(crate) fn optimising() -> bool {
     static OPTIMISING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OPTIMISING.get_or_init(|| std::env::var_os("VALI_NO_OPT").is_none())
 }

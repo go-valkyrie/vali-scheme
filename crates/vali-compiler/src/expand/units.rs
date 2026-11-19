@@ -52,6 +52,11 @@ pub(super) struct Unit {
     pub(super) source: Option<Digest>,
     /// The libraries whose code ran while it was expanded.
     pub(super) instantiated: Vec<usize>,
+    /// The libraries its expansion asked about, by name, and whether each
+    /// was available: what a `cond-expand` found, whether in its own text
+    /// or in a macro's template from another library. Standard libraries
+    /// are not recorded, which the build stamp fixes.
+    pub(super) asked: Vec<(String, bool)>,
     /// Whether its syntax export holds only its own macros and compiled
     /// syntax, as one loaded from an artifact does: importing it imports
     /// its imports' too.
@@ -97,7 +102,7 @@ pub(super) const LIBRARY_SECTIONS: &[&str] =
 /// hash of the sources of the compiler and the crates beneath it (see the
 /// crate's build script), so two builds whose output may differ never
 /// share one.
-pub(super) fn build_stamp() -> String {
+pub(crate) fn build_stamp() -> String {
     format!(
         "vali-compiler {} format {} abi {} build {}",
         env!("CARGO_PKG_VERSION"),
@@ -116,6 +121,9 @@ pub(crate) struct Depends {
     /// Each library whose code ran while it was expanded, by identity,
     /// and the hash of that library's whole artifact.
     pub(crate) expansion: Vec<(String, Digest)>,
+    /// Each library a `cond-expand` asked about while it was expanded,
+    /// and whether it was found.
+    pub(crate) libraries: Vec<(String, bool)>,
 }
 
 fn digest(r: &mut vali_dist::Reader<'_>) -> std::result::Result<Digest, vali_dist::DecodeError> {
@@ -131,6 +139,11 @@ fn encode_depends(depends: &Depends) -> Vec<u8> {
             w.raw(&hash.0);
         }
     }
+    w.usize(depends.libraries.len());
+    for (name, found) in &depends.libraries {
+        w.str(name);
+        w.bool(*found);
+    }
     w.finish()
 }
 
@@ -144,9 +157,18 @@ fn decode_depends(bytes: &[u8]) -> std::result::Result<Depends, vali_dist::Decod
             list.push((identity, digest(&mut r)?));
         }
     }
+    let mut libraries = Vec::new();
+    for _ in 0..r.count(2)? {
+        let name = r.str()?.to_owned();
+        libraries.push((name, r.bool()?));
+    }
     r.end()?;
     let [imports, expansion] = lists;
-    Ok(Depends { imports, expansion })
+    Ok(Depends {
+        imports,
+        expansion,
+        libraries,
+    })
 }
 
 /// A library's artifact, decoded, if this build of Vali wrote it, with
@@ -275,6 +297,7 @@ impl Expander {
             artifact_hash: None,
             source: None,
             instantiated: Vec::new(),
+            asked: Vec::new(),
             pruned: false,
             round_tripped: false,
         });
@@ -506,6 +529,8 @@ impl Expander {
                 .expansion
                 .push((self.units[dependency].identity.clone(), hash));
         }
+        depends.libraries = self.units[unit].asked.clone();
+        depends.libraries.sort();
         let mut source = vali_dist::Writer::new();
         source.bool(self.units[unit].source.is_some());
         if let Some(hash) = self.units[unit].source {
@@ -634,6 +659,21 @@ impl Expander {
             }
             instantiated.push(unit);
         }
+        // What it asked about libraries must still have the same answer:
+        // its expansion followed it.
+        for (name, found) in &depends.libraries {
+            let now = self
+                .available
+                .iter()
+                .any(|(n, available)| *available && n.to_string() == *name);
+            if now != *found {
+                return Err(fail(format!(
+                    "library {name} was {} when it was compiled, and is {} now",
+                    if *found { "available" } else { "missing" },
+                    if now { "available" } else { "missing" },
+                )));
+            }
+        }
         let ir = vali_dist::decode(section("invoke")?).map_err(|e| fail(e.to_string()))?;
         if !own && let Some(name) = links_internal(&ir, MACRO_PRIMITIVES) {
             return Err(fail(format!(
@@ -670,6 +710,7 @@ impl Expander {
             artifact_hash: None,
             source: None,
             instantiated: Vec::new(),
+            asked: Vec::new(),
             pruned: true,
             round_tripped: false,
         });
@@ -694,6 +735,7 @@ impl Expander {
             unit.imports = record.imports;
             unit.source = recorded;
             unit.instantiated = instantiated;
+            unit.asked = depends.libraries;
             unit.interface = record.interface;
             unit.published = record.published;
             unit.seal(index);
@@ -1060,6 +1102,7 @@ impl Expander {
             artifact_hash: None,
             source: None,
             instantiated: Vec::new(),
+            asked: Vec::new(),
             pruned: false,
             round_tripped: false,
         });

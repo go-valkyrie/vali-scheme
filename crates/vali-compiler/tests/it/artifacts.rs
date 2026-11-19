@@ -473,7 +473,7 @@ fn an_artifact_from_another_build_is_refused() {
 #[test]
 fn an_artifact_whose_records_disagree_is_refused() {
     // No dependency records, though it imports (scheme base).
-    let artifacts = tampered(|a| a.insert("depends", true, vec![0, 0]));
+    let artifacts = tampered(|a| a.insert("depends", true, vec![0, 0, 0]));
     let error = compile_answer(&answer("'old"), &reading(&artifacts))
         .map(|_| ())
         .unwrap_err();
