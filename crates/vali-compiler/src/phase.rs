@@ -350,7 +350,8 @@ fn match_value<S: Strategy>(cx: &mut Cx<S>, m: Match) -> Result<Value, Error> {
                 .collect::<Result<Vec<_>, _>>()?;
             let mut list = Value::EMPTY_LIST;
             for v in values.into_iter().rev() {
-                // SAFETY: nothing is collected, so the values stay valid.
+                // SAFETY: natives run with the isolate `running`, so no epoch
+                // frees what this holds in between.
                 list = unsafe { cx.cons_raw(v, list) }?;
             }
             Ok(list)
@@ -483,7 +484,8 @@ fn generate_temporaries<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<V
     let mut list = Value::EMPTY_LIST;
     for id in ids.into_iter().rev() {
         let id = cx.syntax_raw(id)?;
-        // SAFETY: nothing is collected, so the values stay valid.
+        // SAFETY: natives run with the isolate `running`, so no epoch frees
+        // what this holds in between.
         list = unsafe { cx.cons_raw(id, list) }?;
     }
     Ok(list)

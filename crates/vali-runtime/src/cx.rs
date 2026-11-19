@@ -82,7 +82,7 @@ pub struct Cx<S: Strategy> {
     /// The most fuel the isolate may use, if limited.
     pub(crate) fuel_limit: Option<u64>,
     /// The syntax objects that heap objects of type `Syntax` index.
-    pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
+    pub(crate) syntaxes: crate::syntax::SyntaxTable,
     /// The limits the host set (ADR 0023).
     pub(crate) limits: Limits,
     /// Data the host keeps here for its Rust procedures to reach.
@@ -142,7 +142,7 @@ pub(crate) fn name_entry_bytes(name: &str) -> usize {
 
 /// What one runtime syntax object costs on the Rust side besides the
 /// syntax's own allocations: its slot in the table.
-pub(crate) const SYNTAX_SLOT_BYTES: usize = std::mem::size_of::<vali_syntax::Syntax>();
+pub(crate) const SYNTAX_SLOT_BYTES: usize = std::mem::size_of::<Option<vali_syntax::Syntax>>();
 
 impl<S: Strategy> fmt::Debug for Cx<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -207,7 +207,7 @@ impl<S: Strategy> Cx<S> {
             #[cfg(feature = "counters")]
             counters: crate::Counters::default(),
             fuel_limit: None,
-            syntaxes: Vec::new(),
+            syntaxes: Default::default(),
             limits: Limits::new(config),
             host_data: None,
             expander_data: None,
@@ -240,16 +240,17 @@ impl<S: Strategy> Cx<S> {
         &mut self.heap
     }
 
-    /// The strategy's state, the Rust objects and the loaded modules, all
-    /// to change.
-    pub(crate) fn heap_objects_instances(
-        &mut self,
-    ) -> (
-        &mut S::Heap,
-        &mut crate::rust_objects::Objects,
-        &mut crate::code::Instances<S>,
-    ) {
-        (&mut self.heap, &mut self.objects, &mut self.instances)
+    /// The strategy's state and the tables that freeing an object cuts it
+    /// off from, all to change.
+    pub(crate) fn heap_and_tables(&mut self) -> (&mut S::Heap, crate::rust_objects::Tables<'_, S>) {
+        (
+            &mut self.heap,
+            crate::rust_objects::Tables {
+                objects: &mut self.objects,
+                instances: &mut self.instances,
+                syntaxes: &mut self.syntaxes,
+            },
+        )
     }
 
     /// How many modules are loaded: the libraries, programs and evaluated
@@ -293,10 +294,18 @@ impl<S: Strategy> Cx<S> {
         self.limits.max_syntaxes = config.max_syntaxes;
     }
 
-    /// How many runtime syntax objects the isolate holds.
+    /// How many runtime syntax objects the isolate holds: those whose heap
+    /// object is not freed.
     #[doc(hidden)]
     pub fn live_syntaxes(&self) -> usize {
-        self.syntaxes.len()
+        self.syntaxes.live()
+    }
+
+    /// How many slots the table of syntax objects takes, live or free:
+    /// bounded where heap objects are freed.
+    #[doc(hidden)]
+    pub fn syntax_slots(&self) -> usize {
+        self.syntaxes.slots()
     }
 
     /// How many bytes the heap has taken from the system.

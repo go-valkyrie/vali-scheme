@@ -176,6 +176,67 @@ fn programs_under_the_caps_behave_as_before() {
     under_every_strategy!(under_the_cap);
 }
 
+const KEEPING_NONE: &str = r#"(import (scheme base))
+(define context #'context)
+(define (churn n)
+  (let loop ((i 0))
+    (if (< i n)
+        (begin (datum->syntax context i) (loop (+ i 1))))))
+(churn 5000)
+'done"#;
+
+/// A syntax object that nothing keeps does not count against the cap once
+/// it is freed, and epochs come often enough that a loop never reaches a
+/// cap of a thousand while it keeps none, with no collection asked for.
+fn the_cap_counts_live_syntax_objects<S: Strategy>() {
+    let (_, syntaxes) = base::<S>(KEEPING_NONE);
+    let config = HeapConfig {
+        max_syntaxes: Some(syntaxes + 1000),
+        ..Default::default()
+    };
+    let (mut cx, id) = load::<S>(KEEPING_NONE, &config);
+    let result = cx.run(id).and_then(|v| cx.write_string(&v));
+    assert_eq!(result.as_deref(), Ok("done"), "{}", S::NAME);
+}
+
+#[test]
+fn the_syntax_cap_means_live_objects_under_counting() {
+    the_cap_counts_live_syntax_objects::<DeferredHeadered>();
+    the_cap_counts_live_syntax_objects::<DeferredSideCounts>();
+    the_cap_counts_live_syntax_objects::<PreciseHeadered>();
+    the_cap_counts_live_syntax_objects::<PreciseSideCounts>();
+}
+
+/// A syntax object only a garbage cycle held is freed by the cycle
+/// collection, and its slot with it.
+fn cycles_free_their_syntax_objects<S: Strategy>() {
+    let source = r#"(import (scheme base))
+(define context #'context)
+(define (churn n)
+  (let loop ((i 0))
+    (if (< i n)
+        (let ((p (list (datum->syntax context i))))
+          (set-cdr! p p)
+          (loop (+ i 1))))))
+(churn 50)
+'done"#;
+    let (mut cx, id) = load::<S>(source, &HeapConfig::default());
+    let before = cx.live_syntaxes();
+    cx.run(id).unwrap();
+    assert!(cx.live_syntaxes() >= before + 50, "{}", S::NAME);
+    cx.collect_garbage();
+    // What is left is the program's own `context`.
+    assert_eq!(cx.live_syntaxes(), before + 1, "{}", S::NAME);
+}
+
+#[test]
+fn syntax_objects_in_garbage_cycles_are_freed() {
+    cycles_free_their_syntax_objects::<DeferredHeadered>();
+    cycles_free_their_syntax_objects::<DeferredSideCounts>();
+    cycles_free_their_syntax_objects::<PreciseHeadered>();
+    cycles_free_their_syntax_objects::<PreciseSideCounts>();
+}
+
 /// The isolates that run an evaluated macro share the host's caps.
 fn macros_run_under_the_caps<S: Strategy>() {
     let source = r#"(import (scheme base) (scheme eval) (scheme repl))
