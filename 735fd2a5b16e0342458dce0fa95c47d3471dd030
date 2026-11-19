@@ -69,6 +69,24 @@
       "parentUuid": "b3474b88_1e67da25",
       "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c7cce3a8_bd91e79b",
+        "filename": "crates/vali-runtime/src/cx.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 293,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T15:16:21Z",
+      "side": 1,
+      "message": "Done in patch set 4. `PageSource::charge_external` checks the pages and the charges together, and `PageHeap::charge_external` gives empty pages back to the source, one at a time, until the charge fits. `charges_made_after_the_pages_stay_within_the_limit` runs my probe as a test under every strategy, and `an_emptied_heap_is_not_refused_for_its_pages` still holds.",
+      "parentUuid": "66e9dfdd_c0228c1d",
+      "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
