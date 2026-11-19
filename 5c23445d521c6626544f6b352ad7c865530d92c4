@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "77d686c6_d70cfe83",
+        "filename": "docs/adr/0012-distributing-compiled-libraries.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 40,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T19:14:57Z",
+      "side": 1,
+      "message": "Worth a sentence for library authors. A published helper is linkable by any library, and not only in the way the publishing library\u0027s own macros call it: a crafted artifact can link it by name and call it with any arguments. Assigning it is still refused by the run-format validator. So a published definition is part of the library\u0027s surface in the same way an export is, and should check its arguments as an exported procedure does, rather than trusting that only its own macros call it (as `%parameterize`-style helpers tend to).",
+      "revId": "5c23445d521c6626544f6b352ad7c865530d92c4",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
