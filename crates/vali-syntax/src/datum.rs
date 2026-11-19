@@ -8,12 +8,24 @@ use crate::reader::DatumBuilder;
 use crate::{Span, is_identifier};
 
 /// A datum and where it came from.
-#[derive(Debug)]
 pub struct Datum {
     /// What the datum is.
     pub kind: DatumKind,
     /// Where it was read from.
     pub span: Span,
+}
+
+/// Prints at most 200 levels of nesting, and `...` for what is deeper, so
+/// that formatting a deeply nested datum cannot overflow the stack.
+impl fmt::Debug for Datum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::debug::bounded(f, |f| {
+            f.debug_struct("Datum")
+                .field("kind", &self.kind)
+                .field("span", &self.span)
+                .finish()
+        })
+    }
 }
 
 /// The kinds of [`Datum`]. Labels stay explicit, rather than becoming

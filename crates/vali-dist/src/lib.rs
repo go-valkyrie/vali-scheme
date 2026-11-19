@@ -25,6 +25,7 @@
 
 mod artifact;
 mod bytes;
+mod debug;
 mod encode;
 mod hash;
 mod ir;

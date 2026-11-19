@@ -701,54 +701,63 @@ pub(super) fn order(found: Vec<Library>, by_name: HashMap<LibraryName, usize>) -
         Open,
         Done,
     }
+    /// Visits `root` and what it imports, depth first, from a stack of its
+    /// own: the chain of imports can be as long as memory allows, so
+    /// recursing on it could overflow the native stack. `path` is the
+    /// libraries being visited, each with how many of its imports are done.
     fn visit(
-        i: usize,
+        root: usize,
         found: &[Library],
         by_name: &HashMap<LibraryName, usize>,
         state: &mut [State],
-        path: &mut Vec<usize>,
         order: &mut Vec<usize>,
     ) -> Result<()> {
-        match state[i] {
-            State::Done => return Ok(()),
-            State::Open => {
-                let from = path.iter().position(|&p| p == i).expect("on the path");
-                let cycle: Vec<String> = path[from..]
-                    .iter()
-                    .chain([&i])
-                    .map(|&p| found[p].name.to_string())
-                    .collect();
-                return Err(error(
-                    format!("libraries import each other: {}", cycle.join(" -> ")),
-                    found[i].form.as_ref().map(|f| f.span),
-                ));
+        let mut path: Vec<(usize, usize)> = Vec::new();
+        let mut next = Some(root);
+        loop {
+            if let Some(i) = next.take() {
+                match state[i] {
+                    State::Done => {}
+                    State::Open => {
+                        let from = path.iter().position(|&(p, _)| p == i).expect("on the path");
+                        let cycle: Vec<String> = path[from..]
+                            .iter()
+                            .map(|&(p, _)| p)
+                            .chain([i])
+                            .map(|p| found[p].name.to_string())
+                            .collect();
+                        return Err(error(
+                            format!("libraries import each other: {}", cycle.join(" -> ")),
+                            found[i].form.as_ref().map(|f| f.span),
+                        ));
+                    }
+                    State::New => {
+                        state[i] = State::Open;
+                        path.push((i, 0));
+                    }
+                }
             }
-            State::New => {}
-        }
-        state[i] = State::Open;
-        path.push(i);
-        for import in &found[i].imports {
-            // Built-in libraries are not in the graph.
-            if let Some(&j) = by_name.get(import) {
-                visit(j, found, by_name, state, path, order)?;
+            let Some(&mut (i, ref mut done)) = path.last_mut() else {
+                return Ok(());
+            };
+            match found[i].imports.get(*done) {
+                Some(import) => {
+                    *done += 1;
+                    // Built-in libraries are not in the graph.
+                    next = by_name.get(import).copied();
+                }
+                None => {
+                    path.pop();
+                    state[i] = State::Done;
+                    order.push(i);
+                }
             }
         }
-        path.pop();
-        state[i] = State::Done;
-        order.push(i);
-        Ok(())
     }
     let mut state = vec![State::New; found.len()];
     let mut sequence = Vec::new();
     for i in 0..found.len() {
-        visit(
-            i,
-            &found,
-            &by_name,
-            &mut state,
-            &mut Vec::new(),
-            &mut sequence,
-        )?;
+        visit(i, &found, &by_name, &mut state, &mut sequence)?;
     }
     let mut place = vec![0; found.len()];
     for (new, &old) in sequence.iter().enumerate() {
@@ -769,4 +778,87 @@ pub(super) fn order(found: Vec<Library>, by_name: HashMap<LibraryName, usize>) -
         includes: Includes::new(),
         available: Available::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Library `(n)`, importing each of `imports`.
+    fn library(n: usize, imports: &[usize]) -> Library {
+        let name = |n: usize| LibraryName::new([n.to_string().as_str()]);
+        Library {
+            identity: Identity::new(&format!("test:{n}")),
+            name: name(n),
+            form: None,
+            imports: imports.iter().map(|&i| name(i)).collect(),
+            native: None,
+            own: false,
+            source: None,
+        }
+    }
+
+    fn graph_of(libraries: Vec<Library>) -> Result<Graph> {
+        let by_name = libraries
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.name.clone(), i))
+            .collect();
+        order(libraries, by_name)
+    }
+
+    #[test]
+    fn a_long_chain_of_imports_is_ordered_on_a_small_stack() {
+        // Each library imports the next, 200,000 deep, listed in the worst
+        // order: the first visited starts the longest chain. A recursive
+        // search needs a frame for each, far more than a test thread's 2
+        // MiB stack holds.
+        const DEEP: usize = 200_000;
+        let libraries = (0..DEEP)
+            .map(|n| {
+                if n + 1 < DEEP {
+                    library(n, &[n + 1])
+                } else {
+                    library(n, &[])
+                }
+            })
+            .collect();
+        let graph = graph_of(libraries).unwrap();
+        // Each library comes after the one it imports: the reverse order.
+        let names: Vec<_> = graph.libraries.iter().map(|l| l.name.clone()).collect();
+        assert_eq!(names.len(), DEEP);
+        assert_eq!(
+            names[0],
+            LibraryName::new([(DEEP - 1).to_string().as_str()])
+        );
+        assert_eq!(names[DEEP - 1], LibraryName::new(["0"]));
+    }
+
+    #[test]
+    fn imports_come_first_and_cycles_are_named() {
+        // A diamond: 0 imports 1 and 2, which both import 3.
+        let graph = graph_of(vec![
+            library(0, &[1, 2]),
+            library(1, &[3]),
+            library(2, &[3]),
+            library(3, &[]),
+        ])
+        .unwrap();
+        let order: Vec<String> = graph.libraries.iter().map(|l| l.name.to_string()).collect();
+        assert_eq!(order, ["(3)", "(1)", "(2)", "(0)"]);
+        // 1 -> 2 -> 3 -> 1, reached from 0.
+        let e = graph_of(vec![
+            library(0, &[1]),
+            library(1, &[2]),
+            library(2, &[3]),
+            library(3, &[1]),
+        ])
+        .unwrap_err();
+        assert!(
+            e.message
+                .contains("libraries import each other: (1) -> (2) -> (3) -> (1)"),
+            "{}",
+            e.message
+        );
+    }
 }

@@ -822,3 +822,80 @@ impl Template {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use vali_syntax::{ScopeKind, SourceId, TextRange};
+
+    use super::*;
+
+    /// Far beyond what a recursive pass could take on a test thread's
+    /// 2 MiB stack, and beyond the nesting limit: what a decoded artifact
+    /// is held to is checked on decoding, so these passes must not rely on
+    /// it.
+    const DEEP: usize = 100_000;
+
+    fn span() -> Span {
+        Span {
+            source: SourceId(0),
+            range: TextRange::default(),
+        }
+    }
+
+    #[test]
+    fn remapping_and_driving_a_deep_pattern_or_template_needs_little_stack() {
+        let mut from = ScopeContext::new();
+        let library = from.new_scope(ScopeKind::Library).unwrap();
+        let scopes = from.intern(&[library]).unwrap();
+        let id = Syntax::identifier("x", scopes, span(), None);
+
+        let mut pattern = Pattern::Literal(id.clone());
+        let mut template = Template::Constant(id.clone());
+        let mut deepest = Template::Var(0);
+        for _ in 0..DEEP {
+            pattern = Pattern::List {
+                before: vec![pattern],
+                repeat: None,
+                tail: None,
+            };
+            template = Template::List {
+                items: vec![(template, 0)],
+                tail: None,
+                syntax: id.clone(),
+            };
+            deepest = Template::List {
+                items: vec![(deepest, 0)],
+                tail: None,
+                syntax: id.clone(),
+            };
+        }
+
+        let mut to = ScopeContext::new();
+        let mut remap = Remap::new();
+        let pattern_copy = pattern.remap(&mut remap, &from, &mut to).unwrap();
+        let template_copy = template.remap(&mut remap, &from, &mut to).unwrap();
+
+        // The variable has one level of depth, so one ellipsis consumes it:
+        // it drives the whole template, however deep.
+        let builder = Builder {
+            depths: vec![1],
+            origin: None,
+            span: span(),
+        };
+        let mut drivers = Vec::new();
+        builder.drivers(&deepest, 1, 0, &mut drivers);
+        assert_eq!(drivers, [0]);
+
+        // Dropping a value this deep is recursive: it is only the limits on
+        // nesting that keep real ones shallow.
+        for leaked in [
+            Box::new(pattern) as Box<dyn std::any::Any>,
+            Box::new(pattern_copy),
+            Box::new(template),
+            Box::new(template_copy),
+            Box::new(deepest),
+        ] {
+            std::mem::forget(leaked);
+        }
+    }
+}

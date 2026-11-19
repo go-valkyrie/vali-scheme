@@ -71,7 +71,6 @@ impl Arity {
 }
 
 /// A constant in a module's pool.
-#[derive(Debug)]
 pub enum Constant {
     /// An exact integer that fits in 64 bits.
     Integer(i64),
@@ -114,6 +113,38 @@ pub enum Constant {
     /// The constant labelled `n`, defined earlier in the same top-level
     /// constant (`#n#` in source): the same object, not a copy.
     LabelRef(u32),
+}
+
+/// Prints at most 200 levels of nesting, and `...` for what is deeper, so
+/// that formatting a deeply nested constant cannot overflow the stack.
+impl std::fmt::Debug for Constant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::debug::bounded(f, |f| match self {
+            Constant::Integer(n) => f.debug_tuple("Integer").field(n).finish(),
+            Constant::Bignum { negative, limbs } => f
+                .debug_struct("Bignum")
+                .field("negative", negative)
+                .field("limbs", limbs)
+                .finish(),
+            Constant::Ratio(a, b) => f.debug_tuple("Ratio").field(a).field(b).finish(),
+            Constant::Flonum(x) => f.debug_tuple("Flonum").field(x).finish(),
+            Constant::Complex(a, b) => f.debug_tuple("Complex").field(a).field(b).finish(),
+            Constant::Boolean(b) => f.debug_tuple("Boolean").field(b).finish(),
+            Constant::Character(c) => f.debug_tuple("Character").field(c).finish(),
+            Constant::EmptyList => f.write_str("EmptyList"),
+            Constant::Unspecified => f.write_str("Unspecified"),
+            Constant::String(s) => f.debug_tuple("String").field(s).finish(),
+            Constant::Symbol(s) => f.debug_tuple("Symbol").field(s).finish(),
+            Constant::Keyword(s) => f.debug_tuple("Keyword").field(s).finish(),
+            Constant::Pair(a, b) => f.debug_tuple("Pair").field(a).field(b).finish(),
+            Constant::Vector(items) => f.debug_tuple("Vector").field(items).finish(),
+            Constant::Bytevector(bytes) => f.debug_tuple("Bytevector").field(bytes).finish(),
+            Constant::Labelled(n, inner) => {
+                f.debug_tuple("Labelled").field(n).field(inner).finish()
+            }
+            Constant::LabelRef(n) => f.debug_tuple("LabelRef").field(n).finish(),
+        })
+    }
 }
 
 impl Constant {

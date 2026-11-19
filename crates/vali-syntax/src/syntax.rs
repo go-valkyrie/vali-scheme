@@ -23,7 +23,7 @@ use crate::walk::{Split, TreeMap, map_tree};
 use crate::{Datum, DatumKind, Origin, Span};
 
 /// A syntax object.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Syntax {
     content: Arc<Content>,
     scopes: ScopeSetId,
@@ -31,6 +31,22 @@ pub struct Syntax {
     pending: Option<Arc<[(Scope, Effect)]>>,
     span: Span,
     origin: Option<Arc<Origin>>,
+}
+
+/// Prints at most 200 levels of nesting, and `...` for what is deeper, so
+/// that formatting deeply nested syntax cannot overflow the stack.
+impl std::fmt::Debug for Syntax {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::debug::bounded(f, |f| {
+            f.debug_struct("Syntax")
+                .field("content", &self.content)
+                .field("scopes", &self.scopes)
+                .field("pending", &self.pending)
+                .field("span", &self.span)
+                .field("origin", &self.origin)
+                .finish()
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -418,37 +434,47 @@ impl Syntax {
     /// Takes the syntax object apart one level, giving the children their
     /// share of the pending scope changes.
     pub fn expose(&self, context: &mut ScopeContext) -> Result<Exposed<'_>, TooManyScopes> {
-        let mut push = |child: &Syntax| self.push_down(context, child);
         Ok(match &*self.content {
             Content::Identifier(name) => Exposed::Identifier(name),
             Content::Atom(kind) => Exposed::Atom(kind),
             Content::List { items, tail } => {
-                let mut items: Vec<Syntax> =
-                    items.iter().map(&mut push).collect::<Result<_, _>>()?;
-                let mut tail = tail.as_ref().map(&mut push).transpose()?;
+                let mut items: Vec<Syntax> = items
+                    .iter()
+                    .map(|child| self.push_down(context, child))
+                    .collect::<Result<_, _>>()?;
+                let mut tail = tail
+                    .as_ref()
+                    .map(|child| self.push_down(context, child))
+                    .transpose()?;
                 // A dotted tail that is itself a list, as a template with
                 // `(a . rest)` builds, continues this one: one list, one
-                // shape, whatever built it.
+                // shape, whatever built it. A loop, not a recursive call,
+                // so that a long chain of them cannot overflow the stack.
                 while let Some(t) = tail.take() {
-                    if !t.is_list() {
-                        tail = Some(t);
-                        break;
-                    }
-                    let Exposed::List {
+                    let Content::List {
                         items: more,
                         tail: rest,
-                    } = t.expose(context)?
+                    } = &*t.content
                     else {
-                        unreachable!("a list exposes as one")
+                        tail = Some(t);
+                        break;
                     };
-                    items.extend(more);
-                    tail = rest;
+                    for child in more {
+                        items.push(t.push_down(context, child)?);
+                    }
+                    tail = rest
+                        .as_ref()
+                        .map(|child| t.push_down(context, child))
+                        .transpose()?;
                 }
                 Exposed::List { items, tail }
             }
-            Content::Vector(items) => {
-                Exposed::Vector(items.iter().map(push).collect::<Result<_, _>>()?)
-            }
+            Content::Vector(items) => Exposed::Vector(
+                items
+                    .iter()
+                    .map(|child| self.push_down(context, child))
+                    .collect::<Result<_, _>>()?,
+            ),
         })
     }
 

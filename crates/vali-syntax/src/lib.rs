@@ -23,6 +23,7 @@
 
 mod binding;
 mod datum;
+mod debug;
 mod ident;
 mod kind;
 mod lexer;

@@ -94,3 +94,21 @@ fn hashing_follows_equality_for_every_kind() {
     assert!(Constant::Integer(1) != Constant::Flonum(1.0));
     assert!(Constant::Flonum(f64::NAN) != Constant::Flonum(f64::NAN));
 }
+
+#[test]
+fn deep_constants_format_with_debug() {
+    // Small ones print as a derive would.
+    let small = Constant::Pair(
+        Box::new(Constant::Integer(1)),
+        Box::new(Constant::EmptyList),
+    );
+    assert_eq!(format!("{small:?}"), "Pair(Integer(1), EmptyList)");
+    // Deep ones stop at a bounded depth.
+    for make in [long_list, nested_lists, nested_vectors] {
+        let constant = make(DEEP);
+        for text in [format!("{constant:?}"), format!("{constant:#?}")] {
+            assert!(text.contains("..."));
+            assert!(text.len() < 10_000_000, "{}", text.len());
+        }
+    }
+}
