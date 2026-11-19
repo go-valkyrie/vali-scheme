@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "52a0f20b_d26d7af1",
+        "filename": "crates/vali-runtime/src/debug.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 249,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:37:07Z",
+      "side": 1,
+      "message": "A `#[no_mangle]` static in a library crate is one global name for the whole binary. A host that links two semver-incompatible vali-runtime versions (during an upgrade, say) fails to link with a duplicate symbol. Putting the version in the name (`VALI_DEBUG_STATES_3`) avoids that, and lets an extension that doesn\u0027t know the version say so before it reads anything. It\u0027s an edge case, so only if it\u0027s cheap.",
+      "revId": "2ee5a2aeb47eaf4e7f70f3af4fcea6433b697500",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c3f17837_ae5352c7",
+        "filename": "tools/debugger/vali_debug.py",
+        "patchSetId": 1
+      },
+      "lineNbr": 190,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:37:07Z",
+      "side": 1,
+      "message": "The bound counts *running* records, not records visited. A list whose `next` pointers loop through records that aren\u0027t running, which only corrupted memory could produce, would spin the debugger for ever. Counting every record visited (`seen +\u003d 1` per step, stop at the bound) keeps the guard doing what it\u0027s for.",
+      "revId": "2ee5a2aeb47eaf4e7f70f3af4fcea6433b697500",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
