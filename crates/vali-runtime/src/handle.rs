@@ -43,6 +43,12 @@ pub enum Error {
     /// The run entered more procedures than the fuel limit the host set
     /// (`Cx::set_fuel_limit`, ADR 0009 #21). Scheme code cannot catch it.
     OutOfFuel,
+    /// A core primitive panicked, so the isolate may hold a half-updated
+    /// object: it is poisoned, and refuses every later call. The host
+    /// should drop it. Scheme code cannot catch this, and no Scheme code
+    /// runs after it, not even `dynamic-wind` cleanup. The text names the
+    /// primitive and what it said (ADR 0016 #9).
+    Poisoned(String),
     /// Scheme code raised an error. Until Scheme has conditions, errors
     /// unwind to the host with a backtrace.
     Scheme(Box<SchemeError>),
@@ -155,7 +161,7 @@ impl Error {
     pub(crate) fn reaches_handlers(&self) -> bool {
         match self {
             Error::Scheme(e) => !e.escaping,
-            Error::OutOfMemory | Error::Exit(_) | Error::OutOfFuel => false,
+            Error::OutOfMemory | Error::Exit(_) | Error::OutOfFuel | Error::Poisoned(_) => false,
             _ => true,
         }
     }
@@ -172,6 +178,7 @@ impl fmt::Display for Error {
             Error::OutOfRange => f.write_str("index out of range"),
             Error::Exit(code) => write!(f, "the program exited with code {code}"),
             Error::OutOfFuel => f.write_str("out of fuel: the run entered more procedures than its limit"),
+            Error::Poisoned(what) => write!(f, "the isolate is poisoned: {what}"),
             Error::Scheme(e) => {
                 f.write_str(&e.message)?;
                 for frame in &e.backtrace {

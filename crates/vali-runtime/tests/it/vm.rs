@@ -757,24 +757,24 @@ fn failed_procedures_leave_no_tail_call() {
     assert_eq!(cx.call(&one, &[]).unwrap().as_fixnum(), Some(1));
 }
 
-/// A panic in a Rust procedure becomes an error naming it, and the isolate
-/// goes on working.
+/// A panic in a core primitive poisons the isolate: the host gets a
+/// distinct error naming it, and every later call is refused.
 #[test]
-fn panics_in_procedures_become_errors() {
+fn panics_in_primitives_poison_the_isolate() {
     let mut cx = cx();
     // SAFETY: these procedures return only their arguments, immediates
     // and errors, and keep nothing.
     let boom = unsafe { cx.define_native("boom", Arity::exactly(0), boom) }.unwrap();
     let one = unsafe { cx.define_native("one", Arity::exactly(0), one) }.unwrap();
-    let Error::Scheme(e) = cx.call(&boom, &[]).unwrap_err() else {
-        panic!("expected a Scheme error");
+    let Error::Poisoned(what) = cx.call(&boom, &[]).unwrap_err() else {
+        panic!("expected a poisoned isolate");
     };
-    assert!(
-        e.message.contains("boom: panicked: kaboom"),
-        "{}",
-        e.message
+    assert!(what.contains("boom: panicked: kaboom"), "{what}");
+    assert_eq!(
+        cx.call(&one, &[]).err(),
+        Some(Error::Poisoned(what.clone()))
     );
-    assert_eq!(cx.call(&one, &[]).unwrap().as_fixnum(), Some(1));
+    assert_eq!(cx.call(&boom, &[]).err(), Some(Error::Poisoned(what)));
 }
 
 /// A vector too big for 32-bit field offsets is refused, not allocated
