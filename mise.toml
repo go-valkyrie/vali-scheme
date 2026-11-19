@@ -11,6 +11,9 @@ hk = "2.13.0"
 # Installed on first use (`git review`), not by `mise install`, so CI skips it.
 "pipx:git-review" = { version = "2.5.0", lazy = true, lazy_bins = ["git-review"] }
 "aqua:EmbarkStudios/cargo-deny" = "0.21.0"
+# Installed on first use (`cargo fuzz`), not by `mise install`, so CI's
+# check skips it. The fuzz workflow installs it by name.
+"cargo:cargo-fuzz" = { version = "0.13.2", lazy = true, lazy_bins = ["cargo-fuzz"] }
 jouet = { version = "latest", workflow = "release.yml@refs/heads/main" }
 
 [tasks.build]

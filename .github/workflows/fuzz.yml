@@ -1,8 +1,15 @@
-# Fuzzes the bytecode validator and the VM with cargo-fuzz under
-# AddressSanitizer, which needs a nightly toolchain. It runs on a schedule
-# and on request, never as part of the check every push runs, so building
-# Vali never needs nightly. The seeded test in crates/vali-test/tests/fuzz.rs
-# runs the same generator on stable in every check.
+# Fuzzes the bytecode validator and the VM, the IR path, and artifact
+# loading with cargo-fuzz, which needs a nightly toolchain. The bytecode
+# target runs under AddressSanitizer. It runs on a schedule and on request,
+# never as part of the check every push runs, so building Vali never needs
+# nightly. The seeded test in crates/vali-test/tests/fuzz.rs runs the
+# bytecode generator on stable in every check; `hostile.rs` in
+# crates/vali-compiler/tests/it/ does the artifact mutations.
+#
+# The ir and library targets are seeded from vali-stdlib's artifacts by
+# `cargo run --example seeds` (fuzz/README.md), and run with limits on
+# resident and malloc'd memory, so an input that makes the decoders reserve
+# memory out of proportion to its size is a finding.
 name: fuzz
 
 on:
@@ -14,19 +21,29 @@ permissions:
   contents: read
 
 jobs:
-  bytecode:
+  fuzz:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bytecode, ir, library]
     steps:
       - uses: actions/checkout@v4
       - name: Install a nightly toolchain and cargo-fuzz
         run: |
           rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz --locked
+          cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+      - name: Seed the corpora from the standard libraries
+        if: matrix.target != 'bytecode'
+        working-directory: fuzz
+        run: cargo +nightly run --example seeds
       - name: Fuzz for ten minutes
-        run: cargo +nightly fuzz run bytecode -- -max_total_time=600
+        run: >
+          cargo +nightly fuzz run ${{ matrix.target }} --
+          -max_total_time=600 -rss_limit_mb=2048 -malloc_limit_mb=1024
       - name: Keep what failed
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts

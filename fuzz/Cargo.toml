@@ -17,10 +17,30 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 vali-test = { path = "../crates/vali-test", features = ["asan"] }
+vali-bytecode = { path = "../crates/vali-bytecode" }
+vali-compiler = { path = "../crates/vali-compiler" }
+vali-dist = { path = "../crates/vali-dist" }
+vali-opt = { path = "../crates/vali-opt" }
+vali-runtime = { path = "../crates/vali-runtime" }
+vali-stdlib = { path = "../crates/vali-stdlib" }
 
 [[bin]]
 name = "bytecode"
 path = "fuzz_targets/bytecode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ir"
+path = "fuzz_targets/ir.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "library"
+path = "fuzz_targets/library.rs"
 test = false
 doc = false
 bench = false
