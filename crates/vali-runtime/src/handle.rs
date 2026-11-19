@@ -54,6 +54,29 @@ pub enum Error {
     Scheme(Box<SchemeError>),
 }
 
+/// Which predicate, besides `error-object?`, accepts the condition a handler
+/// sees for a Scheme error that raised nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Condition {
+    /// Only `error-object?`.
+    Error,
+    /// `file-error?` too.
+    File,
+    /// `read-error?` too.
+    Read,
+}
+
+impl Condition {
+    /// The code stored in an error object.
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            Condition::Error => 0,
+            Condition::File => 1,
+            Condition::Read => 2,
+        }
+    }
+}
+
 /// An error raised while running Scheme code.
 #[derive(Clone, Debug)]
 pub struct SchemeError {
@@ -71,6 +94,8 @@ pub struct SchemeError {
     /// procedure (scheme base) registers, where it happened, while an
     /// exception handler is installed.
     pub(crate) escaping: bool,
+    /// What kind of condition a handler sees, when the error raised nothing.
+    pub(crate) kind: Condition,
 }
 
 /// One frame of a backtrace: the procedure running, and where in its
@@ -131,6 +156,31 @@ impl Error {
             backtrace: Vec::new(),
             raised: None,
             escaping: false,
+            kind: Condition::Error,
+        }))
+    }
+
+    /// A Scheme error that `file-error?` accepts (R7RS 6.11), for a host
+    /// procedure that could not open or use a file. A handler sees an error
+    /// object with `message`.
+    pub fn file_error(message: impl Into<String>) -> Error {
+        Error::with_condition(message, Condition::File)
+    }
+
+    /// A Scheme error that `read-error?` accepts (R7RS 6.11), for a host
+    /// procedure that met malformed input while reading. A handler sees an
+    /// error object with `message`.
+    pub fn read_error(message: impl Into<String>) -> Error {
+        Error::with_condition(message, Condition::Read)
+    }
+
+    fn with_condition(message: impl Into<String>, kind: Condition) -> Error {
+        Error::Scheme(Box::new(SchemeError {
+            message: message.into(),
+            backtrace: Vec::new(),
+            raised: None,
+            escaping: false,
+            kind,
         }))
     }
 
@@ -141,6 +191,7 @@ impl Error {
             backtrace: Vec::new(),
             raised: Some(raised),
             escaping: false,
+            kind: Condition::Error,
         }))
     }
 
@@ -152,6 +203,7 @@ impl Error {
             backtrace: Vec::new(),
             raised: Some(raised),
             escaping: true,
+            kind: Condition::Error,
         }))
     }
 

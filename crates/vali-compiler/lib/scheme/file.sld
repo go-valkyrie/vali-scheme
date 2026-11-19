@@ -6,14 +6,14 @@
 ;;; consults first for this library.
 
 (define-library (scheme file)
-  (import (scheme base))
+  (import (scheme base) (only (vali primitive) %raise-file-error))
   (export call-with-input-file call-with-output-file delete-file file-exists?
           open-binary-input-file open-binary-output-file open-input-file
           open-output-file with-input-from-file with-output-to-file)
   (begin
     (define (%needs-files name)
       (lambda args
-        (error (string-append
+        (%raise-file-error (string-append
                 (symbol->string name)
                 ": needs the file capability, which this program was not given"))))
 
