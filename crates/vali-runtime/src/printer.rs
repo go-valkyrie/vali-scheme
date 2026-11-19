@@ -333,7 +333,7 @@ impl<S: Strategy> Printer<'_, S> {
     }
 
     fn symbol(&mut self, name: &str) {
-        if self.mode == Mode::Display || vali_syntax::is_identifier(name) {
+        if self.mode == Mode::Display || vali_syntax::symbol_reads_plain(name) {
             self.out.push_str(name);
             return;
         }

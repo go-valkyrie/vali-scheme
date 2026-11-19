@@ -51,17 +51,5 @@
     ("(file-exists? \" no such file \") => #f" "#52: not run: the host grants no file access")
 
     ;; Read syntax: write must put bars around symbols that read as numbers
-    ("(get-output-string out) => \"|+i|\""
-     "#47: gap: write prints the symbol |+i| as +i, which reads back as a number")
-    ("(get-output-string out) => \"|-i|\""
-     "#47: gap: as above for |-i|")
-    ("(get-output-string out) => \"|+inf.0|\""
-     "#47: gap: as above for |+inf.0|")
-    ("(get-output-string out) => \"|-inf.0|\""
-     "#47: gap: as above for |-inf.0|")
-    ("(get-output-string out) => \"|+nan.0|\""
-     "#47: gap: as above for |+nan.0|")
-    ("(get-output-string out) => \"|+NaN.0|\""
-     "#47: gap: as above for |+NaN.0|")
     ("(get-output-string out) => \"|+NaN.0abc|\""
      "upstream: +NaN.0abc is not a number, so no bars are needed to read it back; chibi writes them anyway")))
