@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "f36f3a5f_5e9efc90",
+        "filename": "crates/vali-compiler/src/expand/context.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 333,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:29:32Z",
+      "side": 1,
+      "message": "A dependency skipped here is never descended into, so a library with compiled syntax or a procedural macro, reached only through one that has neither, isn\u0027t remapped into the importer. Before, a pruned export imported every dependency recursively. `start_context` takes the same path.\n\nAt run time:\n\n```scheme\n;; w/h.sld: (define-library (w h) (import (scheme base)) (export h-stx)\n;;            (begin (define (h-stx) #\u0027(foo bar))))\n;; w/j.sld: (define-library (w j) (import (scheme base) (w h)) (export h-stx))\n;; w/k.sld: (define-library (w k) (import (scheme base) (w j)) (export h-stx))\n(import (scheme base) (scheme write) (w k))\n(display (syntax-\u003edatum (h-stx)))\n```\n\nThis prints `(foo bar)` on main. Here it raises `syntax: w/h.sld compiled no syntax at %syntax-build`.\n\nAt expansion time: a `syntax-case` macro in `(x h)` whose transformer calls `make-stx` from `(x h2)`, reached through a facade `(x m)` that holds only a `syntax-rules` macro. Main prints `from-h2`; here it fails with `h-mac: syntax: x/h2.sld compiled no syntax`. A macro library with helpers behind a facade is a common shape. Importing the middle library directly works, which is why the tests pass.\n\nWalk the skipped dependencies with a visited set: import any that runs code, and descend into the imports of any that doesn\u0027t. Alternatively, record per unit whether anything in its import closure runs code. Add the three-library case, at run time and at expansion time, to scaling.rs or the libraries tests.",
+      "revId": "89948687bdf50a23cd5ca31afebbcd76f0336464",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "63bb0487_8f865880",
+        "filename": "docs/adr/0015-scopes-and-syntax-objects.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 40,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:29:32Z",
+      "side": 1,
+      "message": "\"The export of a library with only `syntax-rules` macros and no compiled syntax, which no code at expansion time looks up, is remapped when one of its macros is first used, not with its importer\" overstates it.\n\n- A library imported directly is still remapped as it is imported. Only the dependencies of an imported library (and the seed\u0027s) wait.\n- \"Which no code at expansion time looks up\" isn\u0027t true of what that library itself imports (see context.rs:333).\n\nPlease reword once the walk is fixed.",
+      "revId": "89948687bdf50a23cd5ca31afebbcd76f0336464",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
