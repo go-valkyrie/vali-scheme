@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "ac08b9d4_9e68839e",
+        "filename": "mise.toml",
+        "patchSetId": 2
+      },
+      "lineNbr": 16,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:46:56Z",
+      "side": 1,
+      "message": "Main now has the development tools in `mise.development.toml` (the CI path-filter change, 1260900): `mise.toml`\u0027s `[tools]` holds only `hk`, and cargo-deny, git-review and jouet moved. This hunk\u0027s context, the cargo-deny line, is gone from `mise.toml`, so the rebase will conflict. `cargo:cargo-fuzz` belongs in `mise.development.toml`, beside git-review, as another lazily installed development tool.",
+      "revId": "64146a4baea01d0910b1e43ef35f0e228c36ca6a",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
