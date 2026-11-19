@@ -16,6 +16,41 @@
       "message": "recheck",
       "revId": "dd10b6d9e659916fc5b437a241000ed988bc20da",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "0cbd44b2_1a7a8915",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1004381
+      },
+      "writtenOn": "2026-11-19T04:04:54Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "03b49c4a_019c7993",
+      "revId": "dd10b6d9e659916fc5b437a241000ed988bc20da",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "0d3b82cf_6a0cfac0",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1004381
+      },
+      "writtenOn": "2026-11-19T04:04:54Z",
+      "side": 1,
+      "message": "Merge it",
+      "revId": "dd10b6d9e659916fc5b437a241000ed988bc20da",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
