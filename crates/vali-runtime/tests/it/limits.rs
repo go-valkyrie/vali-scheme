@@ -173,6 +173,77 @@ fn the_memory_limit_stops_symbols() {
     under_every_strategy!(rust_bytes_count_against_the_memory_limit);
 }
 
+fn dropped_syntaxes_free_their_slots<S: Strategy>() {
+    let set = scope_set();
+    let mut cx = Cx::<S>::new(&HeapConfig {
+        max_syntaxes: Some(20),
+        ..Default::default()
+    });
+    for round in 0..50 {
+        for _ in 0..10 {
+            // Dropped at once, so the cap, which counts live slots, is
+            // never reached however many are made.
+            let h = cx.syntax(syntax(set, "x")).unwrap();
+            drop(h);
+        }
+        cx.collect_garbage();
+        assert!(cx.live_syntaxes() <= 10, "{} round {round}", S::NAME);
+    }
+    // The table stayed as small as the most that were alive at once.
+    assert!(
+        cx.syntax_slots() <= 20,
+        "{}: {}",
+        S::NAME,
+        cx.syntax_slots()
+    );
+    // A slot that was reused holds the new object.
+    let h = cx.syntax(syntax(set, "fresh")).unwrap();
+    assert_eq!(cx.write_string(&h).unwrap(), "#<syntax fresh>");
+}
+
+#[test]
+fn freed_syntax_objects_make_room_under_counting() {
+    dropped_syntaxes_free_their_slots::<DeferredHeadered>();
+    dropped_syntaxes_free_their_slots::<DeferredSideCounts>();
+    dropped_syntaxes_free_their_slots::<PreciseHeadered>();
+    dropped_syntaxes_free_their_slots::<PreciseSideCounts>();
+}
+
+#[test]
+fn without_counting_syntax_slots_stay_until_the_cap() {
+    let set = scope_set();
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig {
+        max_syntaxes: Some(30),
+        ..Default::default()
+    });
+    for _ in 0..30 {
+        drop(cx.syntax(syntax(set, "x")).unwrap());
+        cx.collect_garbage();
+    }
+    assert_eq!(cx.syntax_slots(), 30);
+    assert_eq!(
+        cx.syntax(syntax(set, "x")).unwrap_err(),
+        Error::LimitExceeded(Limit::Syntaxes)
+    );
+}
+
+/// A freed object may be seen again, as one waiting in the cycle buffer is:
+/// its slot is retired only once.
+#[test]
+fn a_syntax_slot_is_retired_once() {
+    let set = scope_set();
+    let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+    let a = cx.syntax(syntax(set, "a")).unwrap();
+    drop(a);
+    cx.collect_garbage();
+    cx.collect_garbage();
+    let b = cx.syntax(syntax(set, "b")).unwrap();
+    let c = cx.syntax(syntax(set, "c")).unwrap();
+    assert_eq!(cx.write_string(&b).unwrap(), "#<syntax b>");
+    assert_eq!(cx.write_string(&c).unwrap(), "#<syntax c>");
+    assert_eq!(cx.syntax_slots(), 2);
+}
+
 /// Fills the heap until it refuses, returning what it made.
 fn fill<S: Strategy>(cx: &mut Cx<S>) -> Vec<vali_runtime::Handle> {
     let list = format!("({})", "1 ".repeat(200));
@@ -241,6 +312,27 @@ fn charges_limit_the_pages<S: Strategy>() {
 #[test]
 fn the_heap_stops_growing_where_the_charges_leave_no_room() {
     under_every_strategy!(charges_limit_the_pages);
+}
+
+/// At the cap, an idle isolate runs an epoch and counts again before it
+/// refuses, so the cap means live objects without a collection asked for.
+#[test]
+fn the_cap_is_rechecked_after_an_epoch() {
+    fn check<S: Strategy>() {
+        let set = scope_set();
+        let mut cx = Cx::<S>::new(&HeapConfig {
+            max_syntaxes: Some(5),
+            ..Default::default()
+        });
+        for _ in 0..200 {
+            drop(cx.syntax(syntax(set, "x")).unwrap());
+        }
+        assert!(cx.syntax_slots() <= 5, "{}", S::NAME);
+    }
+    check::<DeferredHeadered>();
+    check::<DeferredSideCounts>();
+    check::<PreciseHeadered>();
+    check::<PreciseSideCounts>();
 }
 
 /// Charges made after the heap took its pages make room by returning the

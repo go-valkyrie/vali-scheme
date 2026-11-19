@@ -23,6 +23,13 @@ use crate::page::OutOfMemory;
 use crate::strategy::Strategy;
 use crate::value::Value;
 
+/// The tables a freed object is cut off from (`Cx::finalize_in`).
+pub(crate) struct Tables<'a, S: Strategy> {
+    pub(crate) objects: &'a mut Objects,
+    pub(crate) instances: &'a mut crate::code::Instances<S>,
+    pub(crate) syntaxes: &'a mut crate::syntax::SyntaxTable,
+}
+
 /// The index of a Rust object or continuation whose record was dropped
 /// (`Cx::retire`).
 const RETIRED: u64 = u64::MAX;
@@ -224,13 +231,28 @@ impl<S: Strategy> Cx<S> {
     }
 
     /// Drops the Rust value `v` stands for, if it is a Rust object, or its
-    /// record, if it is a continuation: the strategy is freeing it.
+    /// record, if it is a continuation, and empties the slot of a syntax
+    /// object: the strategy is freeing it.
     pub(crate) fn finalize(&mut self, v: Value) {
-        if let Some(i) = Self::retire(v) {
-            self.objects.remove(i);
-        } else if let Some(i) = Self::retire_module(v) {
-            self.instances.retire(i);
+        let (heap, mut tables) = self.heap_and_tables();
+        let slots = Self::finalize_in(&mut tables, v);
+        if slots > 0 {
+            S::release_external(heap, slots * crate::cx::SYNTAX_SLOT_BYTES);
         }
+    }
+
+    /// What `finalize` does to the tables, for the cycle collection too,
+    /// which holds the heap meanwhile: how many syntax slots it emptied, for
+    /// the caller to give back their charge.
+    pub(crate) fn finalize_in(tables: &mut Tables<'_, S>, v: Value) -> usize {
+        if let Some(i) = Self::retire(v) {
+            tables.objects.remove(i);
+        } else if let Some(i) = Self::retire_module(v) {
+            tables.instances.retire(i);
+        } else if let Some(i) = Self::retire_syntax(v) {
+            return usize::from(tables.syntaxes.remove(i));
+        }
+        0
     }
 
     /// If `v` is the object of a module that is freed once nothing refers to
