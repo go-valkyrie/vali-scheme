@@ -51,6 +51,7 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
     };
     for (n, constant) in module.constants.iter().enumerate() {
         check_constant(constant).map_err(|why| fail(format!("constant c{n}: {why}")))?;
+        check_labels(constant).map_err(|why| fail(format!("constant c{n}: {why}")))?;
     }
     let body = module
         .functions
@@ -144,6 +145,50 @@ fn check_constant(constant: &Constant) -> Result<(), String> {
                 pending.push(cdr);
             }
             Constant::Vector(items) => pending.extend(items),
+            Constant::Labelled(_, inner) => pending.push(inner),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Checks a constant's labels, iteratively, in the order a pre-order walk
+/// meets them: they are numbered from 0 as defined, a reference names a
+/// label already defined (possibly one it sits inside), and a label's
+/// datum is not nothing but a reference to a label of the same chain, as
+/// there would be no object to refer to.
+fn check_labels(constant: &Constant) -> Result<(), String> {
+    let mut defined = 0u32;
+    let mut pending = vec![constant];
+    while let Some(constant) = pending.pop() {
+        match constant {
+            Constant::Labelled(..) => {
+                let first = defined;
+                let mut inner = constant;
+                while let Constant::Labelled(n, next) = inner {
+                    if *n != defined {
+                        return Err(format!(
+                            "label {n} is out of order: expected label {defined}"
+                        ));
+                    }
+                    defined += 1;
+                    inner = next;
+                }
+                if let Constant::LabelRef(m) = inner
+                    && (first..defined).contains(m)
+                {
+                    return Err(format!("label {m} stands for nothing but itself"));
+                }
+                pending.push(inner);
+            }
+            Constant::LabelRef(n) if *n >= defined => {
+                return Err(format!("label {n} is referred to before it is defined"));
+            }
+            Constant::Pair(car, cdr) => {
+                pending.push(cdr);
+                pending.push(car);
+            }
+            Constant::Vector(items) => pending.extend(items.iter().rev()),
             _ => {}
         }
     }

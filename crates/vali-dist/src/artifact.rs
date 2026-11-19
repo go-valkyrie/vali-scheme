@@ -14,8 +14,9 @@ use crate::bytes::{DecodeError, Reader, Writer};
 pub const MAGIC: &[u8; 8] = b"\0VALI\0A\n";
 
 /// The format version this Vali writes.
-/// Version 2 encodes primitives by name and records fingerprints.
-pub const FORMAT_VERSION: u32 = 2;
+/// Version 2 encodes primitives by name and records fingerprints. Version 3
+/// adds labelled constants, which keep a quoted datum's sharing and cycles.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The format features this Vali knows. None yet: version 2 is the base.
 pub const KNOWN_FEATURES: &[&str] = &[];

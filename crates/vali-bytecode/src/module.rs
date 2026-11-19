@@ -6,7 +6,7 @@ use crate::instruction::{DecodeError, Instruction};
 
 /// The run format's version. Any mismatch means rebuilding from source or
 /// from the distribution artifact (ADR 0005 #9).
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 /// How many arguments a function takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -85,6 +85,14 @@ pub enum Constant {
     /// A complex number: its real and imaginary parts, real constants that
     /// are both exact or both flonums.
     Complex(Box<Constant>, Box<Constant>),
+    /// A constant that other parts of the same top-level constant refer
+    /// back to, or whose own parts do. Labels are numbered from 0 in the
+    /// order a pre-order walk defines them, so a [`Constant::LabelRef`]
+    /// follows the label it names or sits inside it. The tree has no
+    /// cycle: the heap object built from it does.
+    Labelled(u32, Box<Constant>),
+    /// The constant labelled `n`: the same object, not a copy.
+    LabelRef(u32),
 }
 
 /// One function's code and metadata.
@@ -207,6 +215,11 @@ impl std::hash::Hash for Constant {
                     limbs.hash(state);
                 }
                 Constant::Bytevector(bytes) => bytes.hash(state),
+                Constant::Labelled(n, inner) => {
+                    n.hash(state);
+                    pending.push(inner);
+                }
+                Constant::LabelRef(n) => n.hash(state),
             }
         }
     }
@@ -220,6 +233,7 @@ impl Constant {
                 [&**a, &**b].get(index).copied()
             }
             Constant::Vector(items) => items.get(index),
+            Constant::Labelled(_, inner) => [&**inner].get(index).copied(),
             _ => None,
         }
     }
@@ -241,9 +255,11 @@ impl Constant {
             Constant::Symbol(s) => Constant::Symbol(s.clone()),
             Constant::Keyword(s) => Constant::Keyword(s.clone()),
             Constant::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
+            Constant::LabelRef(n) => Constant::LabelRef(*n),
             Constant::Ratio(..)
             | Constant::Complex(..)
             | Constant::Pair(..)
+            | Constant::Labelled(..)
             | Constant::Vector(_) => {
                 return None;
             }
@@ -269,6 +285,9 @@ impl Constant {
             Constant::Pair(..) => {
                 let (a, b) = two();
                 Constant::Pair(a, b)
+            }
+            Constant::Labelled(n, _) => {
+                Constant::Labelled(*n, Box::new(parts.pop().expect("one part")))
             }
             _ => Constant::Vector(parts),
         }
@@ -347,6 +366,10 @@ impl PartialEq for Constant {
                     pending.push((a2, b2));
                     pending.push((a1, b1));
                 }
+                (Constant::Labelled(n, x), Constant::Labelled(m, y)) if n == m => {
+                    pending.push((x, y));
+                }
+                (Constant::LabelRef(x), Constant::LabelRef(y)) if x == y => {}
                 (Constant::Vector(x), Constant::Vector(y)) if x.len() == y.len() => {
                     pending.extend(x.iter().zip(y).rev());
                 }
@@ -364,6 +387,9 @@ impl Constant {
             Constant::Ratio(a, b) | Constant::Complex(a, b) | Constant::Pair(a, b) => {
                 out.push(std::mem::replace(&mut **a, Constant::EmptyList));
                 out.push(std::mem::replace(&mut **b, Constant::EmptyList));
+            }
+            Constant::Labelled(_, inner) => {
+                out.push(std::mem::replace(&mut **inner, Constant::EmptyList));
             }
             Constant::Vector(items) => out.append(items),
             _ => {}

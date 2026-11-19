@@ -50,6 +50,24 @@ pub(crate) struct Pool {
     in_heap: bool,
 }
 
+/// Whether `constant` has a label anywhere in it. Only pairs and vectors
+/// hold anything else that can.
+fn has_labels(constant: &Constant) -> bool {
+    let mut pending = vec![constant];
+    while let Some(constant) = pending.pop() {
+        match constant {
+            Constant::Labelled(..) | Constant::LabelRef(_) => return true,
+            Constant::Pair(car, cdr) => {
+                pending.push(car);
+                pending.push(cdr);
+            }
+            Constant::Vector(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    false
+}
+
 impl<S: Strategy> Cx<S> {
     /// Whether the pair `v` is a constant of a pool: on a frozen page, the
     /// first word of its page header (`PAGE_HEADER_BYTES`) not zero. Every
@@ -243,10 +261,96 @@ impl<S: Strategy> Cx<S> {
         Ok(v)
     }
 
-    /// `constant` as a value, built into the pool. Pairs and vectors are
+    /// `constant` as a value, built into the pool. A label in it makes the
+    /// parts that name it the same object, and a reference inside the
+    /// labelled part itself a cycle.
+    pub(crate) fn pool_constant(&mut self, constant: &Constant) -> Result<Value, Error> {
+        if has_labels(constant) {
+            self.pool_labelled(constant)
+        } else {
+            self.pool_plain(constant)
+        }
+    }
+
+    /// A constant with labels, built in pre-order: each pair and vector is
+    /// allocated before its parts, so a reference to it from inside has an
+    /// object to point at, and its fields are filled as the parts arrive.
+    /// Iterative, like the rest.
+    fn pool_labelled(&mut self, root: &Constant) -> Result<Value, Error> {
+        /// Where a built part goes.
+        enum Dest {
+            Root,
+            Car(Value),
+            Cdr(Value),
+            Element(Value, usize),
+        }
+        let mut labels: Vec<Value> = Vec::new();
+        let mut built = Value::FALSE;
+        let mut work = vec![(root, Dest::Root)];
+        while let Some((mut constant, dest)) = work.pop() {
+            let mut defined = 0;
+            while let Constant::Labelled(n, inner) = constant {
+                if *n as usize != labels.len() + defined {
+                    return Err(Error::scheme("a constant's labels are out of order"));
+                }
+                defined += 1;
+                constant = inner;
+            }
+            let v = match constant {
+                Constant::LabelRef(n) => *labels.get(*n as usize).ok_or_else(|| {
+                    Error::scheme("a constant refers to a label before it is defined")
+                })?,
+                Constant::Pair(car, cdr) => {
+                    let v = self.pool_object(TypeCode::Pair, 2, 0)?;
+                    // SAFETY: a pair has both fields. They hold `#f` until
+                    // their parts are built.
+                    unsafe {
+                        self.pool_store(v, Self::LAYOUT.car(), Value::FALSE);
+                        self.pool_store(v, Self::LAYOUT.cdr(), Value::FALSE);
+                    }
+                    work.push((cdr, Dest::Cdr(v)));
+                    work.push((car, Dest::Car(v)));
+                    v
+                }
+                Constant::Vector(items) => {
+                    let v = self.pool_object(TypeCode::Vector, 1 + items.len(), data::IMMUTABLE)?;
+                    // SAFETY: the vector has a length word and an element
+                    // for each item, which hold `#f` until built.
+                    unsafe {
+                        put(v, Self::LAYOUT.length(TypeCode::Vector), items.len() as u64);
+                        for i in 0..items.len() {
+                            self.pool_store(v, Self::LAYOUT.vector_element(i), Value::FALSE);
+                        }
+                    }
+                    for (i, item) in items.iter().enumerate().rev() {
+                        work.push((item, Dest::Element(v, i)));
+                    }
+                    v
+                }
+                other => self.pool_plain(other)?,
+            };
+            // Defined before the parts are built, so a part may refer to it.
+            labels.extend(std::iter::repeat_n(v, defined));
+            // SAFETY: each destination is a field of an object built above,
+            // and `v` is a valid value of the pool.
+            unsafe {
+                match dest {
+                    Dest::Root => built = v,
+                    Dest::Car(pair) => self.pool_store(pair, Self::LAYOUT.car(), v),
+                    Dest::Cdr(pair) => self.pool_store(pair, Self::LAYOUT.cdr(), v),
+                    Dest::Element(vector, i) => {
+                        self.pool_store(vector, Self::LAYOUT.vector_element(i), v);
+                    }
+                }
+            }
+        }
+        Ok(built)
+    }
+
+    /// A constant with no labels, built into the pool. Pairs and vectors are
     /// built from a stack of their own, so a long or deeply nested quoted
     /// datum cannot overflow the native stack.
-    pub(crate) fn pool_constant(&mut self, constant: &Constant) -> Result<Value, Error> {
+    fn pool_plain(&mut self, constant: &Constant) -> Result<Value, Error> {
         /// A pair or vector whose parts are being built.
         enum Frame<'a> {
             /// A list, built from the end: its last pair's `cdr` first,
@@ -352,6 +456,9 @@ impl<S: Strategy> Cx<S> {
     /// built into the pool.
     fn pool_leaf(&mut self, constant: &Constant) -> Result<Value, Error> {
         Ok(match constant {
+            Constant::Labelled(..) | Constant::LabelRef(_) => {
+                return Err(Error::scheme("a constant's labels are not in order"));
+            }
             Constant::Integer(n) => self.pool_integer(&Integer::from(*n))?,
             Constant::Flonum(x) => self.pool_flonum(*x)?,
             Constant::Boolean(b) => Value::boolean(*b),
@@ -553,5 +660,67 @@ mod tests {
         assert_eq!(cx.bytes_used(), PAGE_BYTES);
         let too_many = list(2 * PAGE_BYTES as i64 / 16);
         assert!(cx.pool_constant(&too_many).is_err());
+    }
+
+    /// Labels make parts the same object and let a constant contain itself.
+    fn labelled_constants_share_and_cycle<S: Strategy>() {
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        let int = |n| Constant::Integer(n);
+        let pair = |a, b| Constant::Pair(Box::new(a), Box::new(b));
+        // `(#0=(1) #0# . #1=(2 . #1#))`
+        let constant = pair(
+            Constant::Labelled(0, Box::new(pair(int(1), Constant::EmptyList))),
+            pair(
+                Constant::LabelRef(0),
+                Constant::Labelled(1, Box::new(pair(int(2), Constant::LabelRef(1)))),
+            ),
+        );
+        let v = cx.pool_constant(&constant).unwrap();
+        // SAFETY: live pairs of the pool, whose fields are valid.
+        unsafe {
+            let first = cx.car(v);
+            let rest = cx.cdr(v);
+            assert!(first.is_pair());
+            assert_eq!(cx.car(first), Value::fixnum(1).unwrap());
+            assert_eq!(cx.car(rest), first, "a reference is the same pair");
+            let cycle = cx.cdr(rest);
+            assert_eq!(cx.car(cycle), Value::fixnum(2).unwrap());
+            assert_eq!(cx.cdr(cycle), cycle, "a cycle through cdr");
+            assert!(Cx::<S>::pair_is_frozen(cycle));
+        }
+        // `#0=#(#0# #1=#u8(7) #1#)`, a vector containing itself.
+        let constant = Constant::Labelled(
+            0,
+            Box::new(Constant::Vector(vec![
+                Constant::LabelRef(0),
+                Constant::Labelled(1, Box::new(Constant::Bytevector(vec![7]))),
+                Constant::LabelRef(1),
+            ])),
+        );
+        let v = cx.pool_constant(&constant).unwrap();
+        // SAFETY: a live vector of the pool.
+        unsafe {
+            assert_eq!(cx.vector_length(v), 3);
+            assert_eq!(cx.vector_ref(v, 0), v, "a cycle through a vector");
+            assert_eq!(cx.vector_ref(v, 1), cx.vector_ref(v, 2));
+        }
+        // A reference with no label, or labels out of order, is an error.
+        assert!(
+            cx.pool_constant(&pair(Constant::LabelRef(0), Constant::EmptyList))
+                .is_err()
+        );
+        assert!(
+            cx.pool_constant(&Constant::Labelled(1, Box::new(Constant::EmptyList)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn labelled_constants_share_and_cycle_under_every_strategy() {
+        labelled_constants_share_and_cycle::<NoCollection>();
+        labelled_constants_share_and_cycle::<DeferredHeadered>();
+        labelled_constants_share_and_cycle::<DeferredSideCounts>();
+        labelled_constants_share_and_cycle::<PreciseHeadered>();
+        labelled_constants_share_and_cycle::<PreciseSideCounts>();
     }
 }
