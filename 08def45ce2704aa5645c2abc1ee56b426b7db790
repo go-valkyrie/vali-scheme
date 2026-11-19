@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "d9aef901_60c2afa5",
+        "filename": "crates/vali-runtime/src/code.rs",
+        "patchSetId": 2
+      },
+      "lineNbr": 317,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T19:08:10Z",
+      "side": 1,
+      "message": "This is where the stub\u0027s arity and free count meet the converted code. `self.functions[index]` (the descriptor) and every validated `closure` and `call-direct` targeting this function were built from the stub. The equality check I asked for on 1260904 belongs in `Converter::convert`, so it covers this caller and any other. If it lands there, nothing changes here.",
+      "revId": "08def45ce2704aa5645c2abc1ee56b426b7db790",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
