@@ -29,5 +29,9 @@ asan = ["vali-runtime/asan"]
 name = "regressions"
 harness = false
 
+[[test]]
+name = "conformance"
+harness = false
+
 [lints]
 workspace = true

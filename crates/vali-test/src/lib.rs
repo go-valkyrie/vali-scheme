@@ -16,6 +16,10 @@
 //! - `host`: the same, in the host fixture `host:` names. `in-memory-loader`
 //!   also serves `(regression virtual)` from memory; `expansion-reads-scoped`
 //!   lets expansion read the test's `data/` directory and nothing else.
+//!   `library-path` serves libraries from the test's `lib/` directory, as
+//!   `lib/a/b.sld` for `(a b)`, and lets them include files from the
+//!   test's own directory. The conformance suites use it for the shims
+//!   that stand in for an upstream suite's test library.
 //! - `performance`: the file defines `(program n)`, returning a program as
 //!   data. Compiling `(program (* 4 n))` must take at most twice as long
 //!   as linear growth would, eight times as long as `(program n)` for an
@@ -115,6 +119,10 @@ impl Backend for Evaluate {
             (Kind::Host, Some("in-memory-loader")) => host.in_memory = true,
             (Kind::Host, Some("expansion-reads-scoped")) => {
                 host.readable = file.path.parent().map(|dir| dir.join("data"));
+            }
+            (Kind::Host, Some("library-path")) => {
+                host.libraries = file.path.parent().map(|dir| dir.join("lib"));
+                host.readable = file.path.parent().map(Path::to_path_buf);
             }
             (Kind::Host, Some(other)) => {
                 return Outcome::Unsupported(format!("no host fixture named {other}"));
@@ -260,6 +268,14 @@ fn run<S: vali_runtime::Strategy>(
             format!("under {}: {e}\n{written}", S::NAME)
         });
     }
+    // A suite that ends without reaching its final `test-end` exits 0 too,
+    // so a `library-path` test must say so when it gets there.
+    if host.libraries.is_some() && !cx.take_output().contains("summary: ") {
+        return Err(format!(
+            "under {}: the run ended without the suite's summary line",
+            S::NAME
+        ));
+    }
     Ok((cx, id))
 }
 
@@ -363,6 +379,8 @@ struct TestHost {
     dir: PathBuf,
     /// The directory expansion may read, if any.
     readable: Option<PathBuf>,
+    /// A directory of `.sld` files to serve libraries from, if any.
+    libraries: Option<PathBuf>,
 }
 
 /// What the `in-memory-loader` fixture serves, with no file behind it.
@@ -406,6 +424,7 @@ impl TestHost {
                 .map(Path::to_path_buf)
                 .unwrap_or_default(),
             readable: None,
+            libraries: None,
         }
     }
 }
@@ -433,6 +452,8 @@ impl vali_compiler::Loader for TestHost {
                     Identity::new("memory:regression/virtual"),
                     VIRTUAL,
                 ))
+            } else if let Some(libraries) = &self.libraries {
+                library_path_source(libraries, name)
             } else {
                 None
             },
@@ -462,6 +483,32 @@ impl vali_compiler::Loader for TestHost {
                 message: e.to_string(),
             })
     }
+}
+
+/// The source of `name` in the `library-path` fixture's directory, as
+/// `a/b.sld` for `(a b)`. Only plain names are served, so a name can't
+/// climb out of the directory.
+fn library_path_source(
+    libraries: &Path,
+    name: &vali_compiler::LibraryName,
+) -> Option<vali_compiler::Source> {
+    let mut path = libraries.to_path_buf();
+    for part in &name.0 {
+        match part {
+            vali_compiler::NamePart::Symbol(s)
+                if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
+            {
+                path.push(s);
+            }
+            _ => return None,
+        }
+    }
+    path.set_extension("sld");
+    let text = std::fs::read_to_string(&path).ok()?;
+    Some(vali_compiler::Source::scheme(
+        vali_compiler::Identity::new(&format!("library-path:{}", path.display())),
+        text,
+    ))
 }
 
 /// The 1-based line and column of `offset` in `source`, counting columns in
