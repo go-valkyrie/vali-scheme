@@ -8,7 +8,7 @@ use crate::reader::DatumBuilder;
 use crate::{Span, is_identifier};
 
 /// A datum and where it came from.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Datum {
     /// What the datum is.
     pub kind: DatumKind,
@@ -18,7 +18,7 @@ pub struct Datum {
 
 /// The kinds of [`Datum`]. Labels stay explicit, rather than becoming
 /// shared or circular structure.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum DatumKind {
     /// A number.
@@ -77,6 +77,173 @@ fn take_children(kind: &mut DatumKind, out: &mut Vec<Datum>) {
             out.push(inner);
         }
         _ => {}
+    }
+}
+/// Clones a datum with a stack of its own, so that cloning a deeply nested
+/// datum cannot overflow the native stack.
+impl Clone for Datum {
+    fn clone(&self) -> Datum {
+        Datum {
+            kind: self.kind.clone(),
+            span: self.span,
+        }
+    }
+}
+
+/// As for [`Datum`]: the parts are cloned from a list of the cloning still
+/// to do.
+impl Clone for DatumKind {
+    fn clone(&self) -> DatumKind {
+        /// A node with parts, partly cloned.
+        enum Frame<'a> {
+            List {
+                span: Option<Span>,
+                rest: std::slice::Iter<'a, Datum>,
+                items: Vec<Datum>,
+                tail: Option<&'a Datum>,
+                tail_started: bool,
+                tail_done: Option<Datum>,
+            },
+            Vector {
+                span: Option<Span>,
+                rest: std::slice::Iter<'a, Datum>,
+                items: Vec<Datum>,
+            },
+            Labelled {
+                span: Option<Span>,
+                label: u64,
+                inner: Option<&'a Datum>,
+                done: Option<Datum>,
+            },
+        }
+
+        /// What cloning a node starts with.
+        enum Started<'a> {
+            /// A leaf, cloned.
+            Leaf(DatumKind),
+            /// A node with parts, and the frame to clone it by.
+            Open(Frame<'a>),
+        }
+
+        /// A leaf cloned, or the frame to clone a node with parts by.
+        fn start(kind: &DatumKind, span: Option<Span>) -> Started<'_> {
+            Started::Leaf(match kind {
+                DatumKind::List { items, tail } => {
+                    return Started::Open(Frame::List {
+                        span,
+                        rest: items.iter(),
+                        items: Vec::with_capacity(items.len()),
+                        tail: tail.as_deref(),
+                        tail_started: false,
+                        tail_done: None,
+                    });
+                }
+                DatumKind::Vector(items) => {
+                    return Started::Open(Frame::Vector {
+                        span,
+                        rest: items.iter(),
+                        items: Vec::with_capacity(items.len()),
+                    });
+                }
+                DatumKind::Labelled(label, inner) => {
+                    return Started::Open(Frame::Labelled {
+                        span,
+                        label: *label,
+                        inner: Some(inner),
+                        done: None,
+                    });
+                }
+                DatumKind::Number(n) => DatumKind::Number(n.clone()),
+                DatumKind::Boolean(b) => DatumKind::Boolean(*b),
+                DatumKind::Character(c) => DatumKind::Character(*c),
+                DatumKind::String(s) => DatumKind::String(s.clone()),
+                DatumKind::Symbol(s) => DatumKind::Symbol(s.clone()),
+                DatumKind::Keyword(s) => DatumKind::Keyword(s.clone()),
+                DatumKind::Bytevector(b) => DatumKind::Bytevector(b.clone()),
+                DatumKind::LabelRef(label) => DatumKind::LabelRef(*label),
+            })
+        }
+
+        let mut stack: Vec<Frame<'_>> = Vec::new();
+        // A node cloned, and its span unless it is the root.
+        let mut finished = match start(self, None) {
+            Started::Leaf(kind) => Some((kind, None)),
+            Started::Open(frame) => {
+                stack.push(frame);
+                None
+            }
+        };
+        loop {
+            if let Some((kind, span)) = finished.take() {
+                let Some(parent) = stack.last_mut() else {
+                    return kind;
+                };
+                let child = Datum {
+                    kind,
+                    span: span.expect("a part has a span"),
+                };
+                match parent {
+                    Frame::List {
+                        items,
+                        tail_started,
+                        tail_done,
+                        ..
+                    } => {
+                        if *tail_started {
+                            *tail_done = Some(child);
+                        } else {
+                            items.push(child);
+                        }
+                    }
+                    Frame::Vector { items, .. } => items.push(child),
+                    Frame::Labelled { done, .. } => *done = Some(child),
+                }
+            }
+            let top = stack.last_mut().expect("a frame to continue");
+            let next = match top {
+                Frame::List {
+                    rest,
+                    tail,
+                    tail_started,
+                    ..
+                } => rest.next().or_else(|| {
+                    let tail = tail.take();
+                    *tail_started = tail.is_some();
+                    tail
+                }),
+                Frame::Vector { rest, .. } => rest.next(),
+                Frame::Labelled { inner, .. } => inner.take(),
+            };
+            match next {
+                Some(part) => match start(&part.kind, Some(part.span)) {
+                    Started::Leaf(kind) => finished = Some((kind, Some(part.span))),
+                    Started::Open(frame) => stack.push(frame),
+                },
+                None => {
+                    finished = Some(match stack.pop().expect("the top frame") {
+                        Frame::List {
+                            span,
+                            items,
+                            tail_done,
+                            ..
+                        } => (
+                            DatumKind::List {
+                                items,
+                                tail: tail_done.map(Box::new),
+                            },
+                            span,
+                        ),
+                        Frame::Vector { span, items, .. } => (DatumKind::Vector(items), span),
+                        Frame::Labelled {
+                            span, label, done, ..
+                        } => (
+                            DatumKind::Labelled(label, Box::new(done.expect("its datum"))),
+                            span,
+                        ),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -181,52 +348,76 @@ impl DatumBuilder for PlainBuilder {
 
 /// Writes the datum in Scheme's external syntax, as `write` would, so that
 /// reading the text back gives an equal datum.
+///
+/// The datums inside wait on a list of their own, so a deeply nested datum
+/// cannot overflow the stack.
 impl fmt::Display for Datum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            DatumKind::Number(n) => write!(f, "{n}"),
-            DatumKind::Boolean(b) => f.write_str(if *b { "#t" } else { "#f" }),
-            DatumKind::Character(c) => write_character(f, *c),
-            DatumKind::String(s) => write_string(f, s),
-            DatumKind::Symbol(name) => write_symbol(f, name),
-            DatumKind::Keyword(name) => write!(f, "{name}:"),
-            DatumKind::List { items, tail } => {
-                f.write_char('(')?;
-                write_items(f, items)?;
-                if let Some(tail) = tail {
-                    write!(f, " . {tail}")?;
+        let mut work = vec![Task::Datum(self)];
+        while let Some(task) = work.pop() {
+            let datum = match task {
+                Task::Text(text) => {
+                    f.write_str(text)?;
+                    continue;
                 }
-                f.write_char(')')
-            }
-            DatumKind::Vector(items) => {
-                f.write_str("#(")?;
-                write_items(f, items)?;
-                f.write_char(')')
-            }
-            DatumKind::Bytevector(bytes) => {
-                f.write_str("#u8(")?;
-                for (i, b) in bytes.iter().enumerate() {
-                    if i > 0 {
-                        f.write_char(' ')?;
+                Task::Datum(datum) => datum,
+            };
+            match &datum.kind {
+                DatumKind::Number(n) => write!(f, "{n}")?,
+                DatumKind::Boolean(b) => f.write_str(if *b { "#t" } else { "#f" })?,
+                DatumKind::Character(c) => write_character(f, *c)?,
+                DatumKind::String(s) => write_string(f, s)?,
+                DatumKind::Symbol(name) => write_symbol(f, name)?,
+                DatumKind::Keyword(name) => write!(f, "{name}:")?,
+                DatumKind::List { items, tail } => {
+                    f.write_char('(')?;
+                    work.push(Task::Text(")"));
+                    if let Some(tail) = tail {
+                        work.push(Task::Datum(tail));
+                        work.push(Task::Text(" . "));
                     }
-                    write!(f, "{b}")?;
+                    push_items(&mut work, items);
                 }
-                f.write_char(')')
+                DatumKind::Vector(items) => {
+                    f.write_str("#(")?;
+                    work.push(Task::Text(")"));
+                    push_items(&mut work, items);
+                }
+                DatumKind::Bytevector(bytes) => {
+                    f.write_str("#u8(")?;
+                    for (i, b) in bytes.iter().enumerate() {
+                        if i > 0 {
+                            f.write_char(' ')?;
+                        }
+                        write!(f, "{b}")?;
+                    }
+                    f.write_char(')')?;
+                }
+                DatumKind::Labelled(label, inner) => {
+                    write!(f, "#{label}=")?;
+                    work.push(Task::Datum(inner));
+                }
+                DatumKind::LabelRef(label) => write!(f, "#{label}#")?,
             }
-            DatumKind::Labelled(label, datum) => write!(f, "#{label}={datum}"),
-            DatumKind::LabelRef(label) => write!(f, "#{label}#"),
         }
+        Ok(())
     }
 }
 
-fn write_items(f: &mut fmt::Formatter<'_>, items: &[Datum]) -> fmt::Result {
-    for (i, item) in items.iter().enumerate() {
+/// What is left to write.
+enum Task<'a> {
+    Datum(&'a Datum),
+    Text(&'static str),
+}
+
+/// Schedules `items`, spaced, to be written in order.
+fn push_items<'a>(work: &mut Vec<Task<'a>>, items: &'a [Datum]) {
+    for (i, item) in items.iter().enumerate().rev() {
+        work.push(Task::Datum(item));
         if i > 0 {
-            f.write_char(' ')?;
+            work.push(Task::Text(" "));
         }
-        write!(f, "{item}")?;
     }
-    Ok(())
 }
 
 /// The R7RS character names, in both directions.

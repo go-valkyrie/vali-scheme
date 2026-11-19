@@ -5,6 +5,7 @@
 use vali_syntax::{Datum, DatumKind};
 
 use crate::CompileError;
+use crate::expand::{RED_ZONE, STACK_GROWTH};
 use crate::library::{self, LibraryName};
 
 type Result<T> = std::result::Result<T, CompileError>;
@@ -45,6 +46,16 @@ pub(crate) fn satisfied(
     requirement: &Datum,
     library: &mut dyn FnMut(&LibraryName) -> bool,
 ) -> Result<bool> {
+    // Requirements nest as `and`, `or` and `not` do, as deep as the source.
+    stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || {
+        satisfied_here(requirement, library)
+    })
+}
+
+fn satisfied_here(
+    requirement: &Datum,
+    library: &mut dyn FnMut(&LibraryName) -> bool,
+) -> Result<bool> {
     if let DatumKind::Symbol(name) = &requirement.kind {
         return Ok(vali_runtime::FEATURES.contains(&name.as_str()));
     }
@@ -73,6 +84,10 @@ pub(crate) fn satisfied(
 
 /// The libraries `requirement` asks about, so they can be looked for first.
 pub(crate) fn libraries(requirement: &Datum, out: &mut Vec<LibraryName>) -> Result<()> {
+    stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || libraries_here(requirement, out))
+}
+
+fn libraries_here(requirement: &Datum, out: &mut Vec<LibraryName>) -> Result<()> {
     match parts(requirement) {
         Some(("and" | "or" | "not", rest)) => {
             for r in rest {

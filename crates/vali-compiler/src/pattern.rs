@@ -14,6 +14,7 @@ use vali_syntax::{
 };
 
 use crate::CompileError;
+use crate::expand::{RED_ZONE, STACK_GROWTH};
 
 type Result<T> = std::result::Result<T, CompileError>;
 
@@ -148,8 +149,64 @@ impl Spelling<'_> {
     }
 }
 
+/// How deeply a pattern or a template may nest. Compiled ones are trees that
+/// matching, building, remapping and dropping walk by recursion, so a limit
+/// keeps those within the stack and reports anything deeper as an error,
+/// where recursion on a pattern a hundred thousand deep would abort the
+/// process. Real macros nest a few levels.
+pub(crate) const MAX_NESTING: usize = 1_000;
+
+/// An error if `stx` nests more than [`MAX_NESTING`] deep. Measured with a
+/// stack of its own, since `stx` may be deeper than the stack allows.
+fn check_nesting(stx: &Syntax, what: &str) -> Result<()> {
+    use vali_syntax::Node;
+    let mut work = vec![(stx, 1usize)];
+    while let Some((stx, depth)) = work.pop() {
+        if depth > MAX_NESTING {
+            return Err(error(
+                format!("{what} is nested more than {MAX_NESTING} levels deep"),
+                stx.span(),
+            ));
+        }
+        match stx.node() {
+            Node::List { items, tail } => {
+                work.extend(items.iter().chain(tail).map(|part| (part, depth + 1)));
+            }
+            Node::Vector(items) => work.extend(items.iter().map(|part| (part, depth + 1))),
+            Node::Identifier(_) | Node::Atom(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Compiles `stx` as a pattern at `depth` ellipses.
 pub(crate) fn pattern(
+    cx: &mut ScopeContext,
+    spelling: &Spelling<'_>,
+    vars: &mut Vars,
+    stx: &Syntax,
+    depth: usize,
+) -> Result<Pattern> {
+    check_nesting(stx, "a pattern")?;
+    compile_pattern(cx, spelling, vars, stx, depth)
+}
+
+/// Compiles `stx` as a template, inside `depth` ellipses. With `escaped`,
+/// the ellipsis is an ordinary identifier: `(... template)`.
+pub(crate) fn template(
+    cx: &mut ScopeContext,
+    spelling: &Spelling<'_>,
+    find: Find<'_>,
+    stx: &Syntax,
+    depth: usize,
+    escaped: bool,
+) -> Result<Template> {
+    check_nesting(stx, "a template")?;
+    compile_template(cx, spelling, find, stx, depth, escaped)
+}
+
+/// Compiles `stx` as a pattern, below the nesting check.
+fn compile_pattern(
     cx: &mut ScopeContext,
     spelling: &Spelling<'_>,
     vars: &mut Vars,
@@ -182,7 +239,7 @@ pub(crate) fn pattern(
         Exposed::List { items, tail } => {
             let (before, repeat) = sequence(cx, spelling, vars, &items, depth)?;
             let tail = tail
-                .map(|t| pattern(cx, spelling, vars, &t, depth).map(Box::new))
+                .map(|t| compile_pattern(cx, spelling, vars, &t, depth).map(Box::new))
                 .transpose()?;
             Ok(Pattern::List {
                 before,
@@ -213,7 +270,7 @@ fn sequence(
         [] => Ok((
             items
                 .iter()
-                .map(|p| pattern(cx, spelling, vars, p, depth))
+                .map(|p| compile_pattern(cx, spelling, vars, p, depth))
                 .collect::<Result<_>>()?,
             None,
         )),
@@ -221,14 +278,14 @@ fn sequence(
         [at] => {
             let before = items[..at - 1]
                 .iter()
-                .map(|p| pattern(cx, spelling, vars, p, depth))
+                .map(|p| compile_pattern(cx, spelling, vars, p, depth))
                 .collect::<Result<_>>()?;
             let first = vars.len();
-            let each = pattern(cx, spelling, vars, &items[at - 1], depth + 1)?;
+            let each = compile_pattern(cx, spelling, vars, &items[at - 1], depth + 1)?;
             let each_vars = (first..vars.len()).collect();
             let after = items[at + 1..]
                 .iter()
-                .map(|p| pattern(cx, spelling, vars, p, depth))
+                .map(|p| compile_pattern(cx, spelling, vars, p, depth))
                 .collect::<Result<_>>()?;
             Ok((
                 before,
@@ -251,6 +308,18 @@ pub(crate) type Same<'a> = &'a dyn Fn(&ScopeContext, &Syntax, &Syntax) -> bool;
 
 /// Matches `stx` against `pattern`, recording what each variable matched.
 pub(crate) fn matches(
+    cx: &mut ScopeContext,
+    same: Same<'_>,
+    pattern: &Pattern,
+    stx: &Syntax,
+    binds: &mut [Option<Match>],
+) -> Result<bool> {
+    stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || {
+        matches_here(cx, same, pattern, stx, binds)
+    })
+}
+
+fn matches_here(
     cx: &mut ScopeContext,
     same: Same<'_>,
     pattern: &Pattern,
@@ -373,9 +442,8 @@ fn elements(
 /// and its depth in its pattern, if it is one.
 pub(crate) type Find<'a> = &'a mut dyn FnMut(&ScopeContext, &Syntax) -> Option<(usize, usize)>;
 
-/// Compiles `stx` as a template, inside `depth` ellipses. With `escaped`,
-/// the ellipsis is an ordinary identifier: `(... template)`.
-pub(crate) fn template(
+/// Compiles `stx` as a template, below the nesting check.
+fn compile_template(
     cx: &mut ScopeContext,
     spelling: &Spelling<'_>,
     find: Find<'_>,
@@ -409,11 +477,11 @@ pub(crate) fn template(
                 && let [first, inner] = &items[..]
                 && spelling.is_ellipsis(first)
             {
-                return template(cx, spelling, find, inner, depth, true);
+                return compile_template(cx, spelling, find, inner, depth, true);
             }
             let items = elements_template(cx, spelling, find, &items, depth, escaped)?;
             let tail = tail
-                .map(|t| template(cx, spelling, find, &t, depth, escaped).map(Box::new))
+                .map(|t| compile_template(cx, spelling, find, &t, depth, escaped).map(Box::new))
                 .transpose()?;
             Ok(Template::List {
                 items,
@@ -449,7 +517,7 @@ fn elements_template(
             count += 1;
         }
         out.push((
-            template(cx, spelling, find, &items[i], depth + count, escaped)?,
+            compile_template(cx, spelling, find, &items[i], depth + count, escaped)?,
             count,
         ));
         i += 1 + count;
@@ -472,6 +540,10 @@ impl Builder<'_> {
     /// Builds `t`. Repeating a part rebinds the variables it repeats over
     /// in `binds` while it runs, and restores them after.
     pub(crate) fn build(&self, t: &Template, binds: &mut [Option<Match>]) -> Result<Syntax> {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.build_here(t, binds))
+    }
+
+    fn build_here(&self, t: &Template, binds: &mut [Option<Match>]) -> Result<Syntax> {
         let origin = self.origin.cloned();
         match t {
             Template::Var(v) => match &binds[*v] {

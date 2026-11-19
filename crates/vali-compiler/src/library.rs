@@ -185,14 +185,30 @@ fn identifiers(ds: &[Datum], what: &str) -> Result<Vec<String>> {
 /// id)`, `(rename set (from to) ...)`, R6RS's `(library name)` and `(for
 /// set level ...)`, or a library name.
 pub(crate) fn import_set(d: &Datum) -> Result<ImportSet> {
+    import_set_within(d, MAX_IMPORT_SET_NESTING)
+}
+
+/// How many import sets may nest: `(only (prefix (rename ...) ...) ...)`.
+/// Real ones nest a few. A limit keeps what walks them by recursion, after
+/// this, within the stack.
+const MAX_IMPORT_SET_NESTING: usize = 100;
+
+/// [`import_set`], allowing `room` more levels of nesting.
+fn import_set_within(d: &Datum, room: usize) -> Result<ImportSet> {
+    let Some(room) = room.checked_sub(1) else {
+        return Err(error(
+            format!("import sets are nested more than {MAX_IMPORT_SET_NESTING} deep"),
+            d.span,
+        ));
+    };
     let parts = items(d).ok_or_else(|| error("expected an import set", d.span))?;
     match parts {
         [head, set, rest @ ..] if symbol(head) == Some("only") => Ok(ImportSet::Only(
-            Box::new(import_set(set)?),
+            Box::new(import_set_within(set, room)?),
             identifiers(rest, "only")?,
         )),
         [head, set, rest @ ..] if symbol(head) == Some("except") => Ok(ImportSet::Except(
-            Box::new(import_set(set)?),
+            Box::new(import_set_within(set, room)?),
             identifiers(rest, "except")?,
         )),
         [head, set, prefix] if symbol(head) == Some("prefix") => {
@@ -203,7 +219,10 @@ pub(crate) fn import_set(d: &Datum) -> Result<ImportSet> {
                 DatumKind::Keyword(k) => format!("{k}:"),
                 _ => return Err(error("prefix: expected an identifier", prefix.span)),
             };
-            Ok(ImportSet::Prefix(Box::new(import_set(set)?), prefix))
+            Ok(ImportSet::Prefix(
+                Box::new(import_set_within(set, room)?),
+                prefix,
+            ))
         }
         [head, set, renames @ ..] if symbol(head) == Some("rename") => {
             let renames = renames
@@ -216,14 +235,17 @@ pub(crate) fn import_set(d: &Datum) -> Result<ImportSet> {
                     _ => Err(error("rename: expected (from to)", r.span)),
                 })
                 .collect::<Result<_>>()?;
-            Ok(ImportSet::Rename(Box::new(import_set(set)?), renames))
+            Ok(ImportSet::Rename(
+                Box::new(import_set_within(set, room)?),
+                renames,
+            ))
         }
         [head, name] if symbol(head) == Some("library") => {
             Ok(ImportSet::Library(library_name(name)?, Some(d.span)))
         }
         // Phases are implicit (ADR 0001 #1); for now an explicit level
         // imports at every phase too.
-        [head, set, ..] if symbol(head) == Some("for") => import_set(set),
+        [head, set, ..] if symbol(head) == Some("for") => import_set_within(set, room),
         _ => Ok(ImportSet::Library(library_name(d)?, Some(d.span))),
     }
 }

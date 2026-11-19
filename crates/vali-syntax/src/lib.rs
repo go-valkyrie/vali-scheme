@@ -35,6 +35,7 @@ mod scope;
 mod span;
 mod syntax;
 mod tree;
+mod walk;
 
 pub use binding::{AlreadyBound, BindingTable, Phase, Phases, Resolution};
 pub use datum::{Datum, DatumKind, PlainBuilder};
@@ -52,3 +53,4 @@ pub use span::{Location, SourceId, Sources, Span};
 pub use syntax::{Effect, Exposed, NewNode, Node, Syntax, bound_identifier_eq, free_identifier_eq};
 pub use text_size::{TextRange, TextSize};
 pub use tree::{SyntaxElement, SyntaxNode, SyntaxToken, TreeSink, ValiLanguage};
+pub use walk::{Split, TreeMap, map_tree};

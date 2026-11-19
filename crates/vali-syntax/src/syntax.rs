@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::binding::{BindingTable, Phase, Resolution};
 use crate::scope::{Remap, Scope, ScopeContext, ScopeSetId, TooManyScopes};
+use crate::walk::{Split, TreeMap, map_tree};
 use crate::{Datum, DatumKind, Origin, Span};
 
 /// A syntax object.
@@ -41,6 +42,36 @@ enum Content {
     },
     Vector(Vec<Syntax>),
     Atom(DatumKind),
+}
+
+impl Content {
+    /// Moves the syntax objects directly inside into `out`.
+    fn take_children(&mut self, out: &mut Vec<Syntax>) {
+        match self {
+            Content::List { items, tail } => {
+                out.append(items);
+                out.extend(tail.take());
+            }
+            Content::Vector(items) => out.append(items),
+            Content::Identifier(_) | Content::Atom(_) => {}
+        }
+    }
+}
+
+/// Frees the syntax objects inside one at a time, from a list of its own,
+/// so that dropping deeply nested syntax cannot overflow the stack.
+impl Drop for Content {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children(&mut pending);
+        while let Some(syntax) = pending.pop() {
+            // Only the last holder of a node takes it apart. `content` is
+            // left without children, so dropping it recurses no further.
+            if let Some(mut content) = Arc::into_inner(syntax.content) {
+                content.take_children(&mut pending);
+            }
+        }
+    }
 }
 
 /// What one scope change does to whether a set holds the scope.
@@ -164,50 +195,15 @@ impl Syntax {
         from: &ScopeContext,
         to: &mut ScopeContext,
     ) -> Result<Syntax, TooManyScopes> {
-        let scopes = remap.set(from, to, self.scopes)?;
-        let pending = match &self.pending {
-            None => None,
-            Some(changes) => {
-                let mut mapped = changes
-                    .iter()
-                    .map(|&(scope, effect)| Ok((remap.scope(from, to, scope)?, effect)))
-                    .collect::<Result<Vec<_>, TooManyScopes>>()?;
-                // Pending changes are kept sorted by scope.
-                mapped.sort_by_key(|&(scope, _)| scope);
-                Some(mapped.into())
-            }
-        };
-        let content = match &*self.content {
-            Content::Identifier(name) => Content::Identifier(name.clone()),
-            Content::List { items, tail } => Content::List {
-                items: items
-                    .iter()
-                    .map(|item| item.remap(remap, from, to))
-                    .collect::<Result<_, _>>()?,
-                tail: tail
-                    .as_ref()
-                    .map(|tail| tail.remap(remap, from, to))
-                    .transpose()?,
+        map_tree(
+            &mut Remapper {
+                remap,
+                from,
+                to,
+                open: Vec::new(),
             },
-            Content::Vector(items) => Content::Vector(
-                items
-                    .iter()
-                    .map(|item| item.remap(remap, from, to))
-                    .collect::<Result<_, _>>()?,
-            ),
-            Content::Atom(datum) => Content::Atom(datum.clone()),
-        };
-        Ok(Syntax {
-            content: Arc::new(content),
-            scopes,
-            pending,
-            span: remap.span(self.span),
-            origin: if remap.moves_sources() {
-                self.origin.as_ref().map(|o| remap_origin(remap, o))
-            } else {
-                self.origin.clone()
-            },
-        })
+            self,
+        )
     }
 
     fn new(content: Content, scopes: ScopeSetId, span: Span, origin: Option<Arc<Origin>>) -> Self {
@@ -297,51 +293,22 @@ impl Syntax {
         span: Option<Span>,
         origin: Option<&Arc<Origin>>,
     ) -> Self {
-        let each = |d: &Datum| Syntax::from_datum_with(d, scopes, span, origin);
-        let content = match &datum.kind {
-            DatumKind::Symbol(name) => Content::Identifier(name.as_str().into()),
-            DatumKind::List { items, tail } => Content::List {
-                items: items.iter().map(each).collect(),
-                tail: tail.as_deref().map(each),
+        let Ok(syntax) = map_tree(
+            &mut FromDatum {
+                scopes,
+                span,
+                origin,
             },
-            DatumKind::Vector(items) => Content::Vector(items.iter().map(each).collect()),
-            other => Content::Atom(other.clone()),
-        };
-        Syntax::new(content, scopes, span.unwrap_or(datum.span), origin.cloned())
+            datum,
+        );
+        syntax
     }
 
     /// The datum, without scopes: `syntax->datum`. Pending changes don't
     /// matter to it, so it takes nothing apart.
     pub fn to_datum(&self) -> Datum {
-        let kind = match &*self.content {
-            Content::Identifier(name) => DatumKind::Symbol(name.to_string()),
-            Content::List { items, tail } => {
-                let mut items: Vec<Datum> = items.iter().map(Syntax::to_datum).collect();
-                let mut tail = tail.as_ref();
-                // As in `expose`, a list-shaped tail continues the list.
-                while let Some(t) = tail
-                    && let Content::List {
-                        items: more,
-                        tail: rest,
-                    } = &*t.content
-                {
-                    items.extend(more.iter().map(Syntax::to_datum));
-                    tail = rest.as_ref();
-                }
-                DatumKind::List {
-                    items,
-                    tail: tail.map(|t| Box::new(t.to_datum())),
-                }
-            }
-            Content::Vector(items) => {
-                DatumKind::Vector(items.iter().map(Syntax::to_datum).collect())
-            }
-            Content::Atom(kind) => kind.clone(),
-        };
-        Datum {
-            kind,
-            span: self.span,
-        }
+        let Ok(datum) = map_tree(&mut ToDatum, self);
+        datum
     }
 
     /// Its scopes.
@@ -581,6 +548,217 @@ impl Syntax {
             Some(name) => table.resolve(context, name, self.scopes, phase),
             None => Resolution::Unbound,
         }
+    }
+}
+
+/// `datum` as syntax, for [`Syntax::from_datum_with`].
+struct FromDatum<'o> {
+    scopes: ScopeSetId,
+    span: Option<Span>,
+    origin: Option<&'o Arc<Origin>>,
+}
+
+impl FromDatum<'_> {
+    fn node(&self, content: Content, datum: &Datum) -> Syntax {
+        Syntax::new(
+            content,
+            self.scopes,
+            self.span.unwrap_or(datum.span),
+            self.origin.cloned(),
+        )
+    }
+}
+
+impl<'a> TreeMap<'a> for FromDatum<'_> {
+    type Src = Datum;
+    type Out = Syntax;
+    type Error = std::convert::Infallible;
+
+    fn split(&mut self, datum: &'a Datum) -> Result<Split<'a, Datum, Syntax>, Self::Error> {
+        Ok(match &datum.kind {
+            DatumKind::Symbol(name) => {
+                Split::Leaf(self.node(Content::Identifier(name.as_str().into()), datum))
+            }
+            DatumKind::List { items, tail } => Split::List {
+                items: items.iter().collect(),
+                tail: tail.as_deref(),
+            },
+            DatumKind::Vector(items) => Split::Vector(items.iter().collect()),
+            other => Split::Leaf(self.node(Content::Atom(other.clone()), datum)),
+        })
+    }
+
+    fn list(
+        &mut self,
+        datum: &'a Datum,
+        items: Vec<Syntax>,
+        tail: Option<Syntax>,
+    ) -> Result<Syntax, Self::Error> {
+        Ok(self.node(Content::List { items, tail }, datum))
+    }
+
+    fn vector(&mut self, datum: &'a Datum, items: Vec<Syntax>) -> Result<Syntax, Self::Error> {
+        Ok(self.node(Content::Vector(items), datum))
+    }
+}
+
+/// Syntax as a datum, for [`Syntax::to_datum`].
+struct ToDatum;
+
+impl<'a> TreeMap<'a> for ToDatum {
+    type Src = Syntax;
+    type Out = Datum;
+    type Error = std::convert::Infallible;
+
+    fn split(&mut self, syntax: &'a Syntax) -> Result<Split<'a, Syntax, Datum>, Self::Error> {
+        let leaf = |kind| {
+            Split::Leaf(Datum {
+                kind,
+                span: syntax.span,
+            })
+        };
+        Ok(match &*syntax.content {
+            Content::Identifier(name) => leaf(DatumKind::Symbol(name.to_string())),
+            Content::Atom(kind) => leaf(kind.clone()),
+            Content::List { items, tail } => {
+                let mut items: Vec<&Syntax> = items.iter().collect();
+                let mut tail = tail.as_ref();
+                // As in `expose`, a list-shaped tail continues the list.
+                while let Some(t) = tail
+                    && let Content::List {
+                        items: more,
+                        tail: rest,
+                    } = &*t.content
+                {
+                    items.extend(more.iter());
+                    tail = rest.as_ref();
+                }
+                Split::List { items, tail }
+            }
+            Content::Vector(items) => Split::Vector(items.iter().collect()),
+        })
+    }
+
+    fn list(
+        &mut self,
+        syntax: &'a Syntax,
+        items: Vec<Datum>,
+        tail: Option<Datum>,
+    ) -> Result<Datum, Self::Error> {
+        Ok(Datum {
+            kind: DatumKind::List {
+                items,
+                tail: tail.map(Box::new),
+            },
+            span: syntax.span,
+        })
+    }
+
+    fn vector(&mut self, syntax: &'a Syntax, items: Vec<Datum>) -> Result<Datum, Self::Error> {
+        Ok(Datum {
+            kind: DatumKind::Vector(items),
+            span: syntax.span,
+        })
+    }
+}
+
+/// What [`Remapper`] works out for a node before its parts.
+struct Moved {
+    scopes: ScopeSetId,
+    pending: Option<Arc<[(Scope, Effect)]>>,
+    span: Span,
+    origin: Option<Arc<Origin>>,
+}
+
+/// Syntax made in one scope context, in another, for [`Syntax::remap`].
+struct Remapper<'r> {
+    remap: &'r mut Remap,
+    from: &'r ScopeContext,
+    to: &'r mut ScopeContext,
+    /// The lists and vectors whose parts are being remapped, innermost
+    /// last.
+    open: Vec<Moved>,
+}
+
+impl Remapper<'_> {
+    fn moved(&mut self, syntax: &Syntax) -> Result<Moved, TooManyScopes> {
+        let scopes = self.remap.set(self.from, self.to, syntax.scopes)?;
+        let pending = match &syntax.pending {
+            None => None,
+            Some(changes) => {
+                let mut mapped = changes
+                    .iter()
+                    .map(|&(scope, effect)| {
+                        Ok((self.remap.scope(self.from, self.to, scope)?, effect))
+                    })
+                    .collect::<Result<Vec<_>, TooManyScopes>>()?;
+                // Pending changes are kept sorted by scope.
+                mapped.sort_by_key(|&(scope, _)| scope);
+                Some(mapped.into())
+            }
+        };
+        Ok(Moved {
+            scopes,
+            pending,
+            span: self.remap.span(syntax.span),
+            origin: if self.remap.moves_sources() {
+                syntax.origin.as_ref().map(|o| remap_origin(self.remap, o))
+            } else {
+                syntax.origin.clone()
+            },
+        })
+    }
+
+    fn built(moved: Moved, content: Content) -> Syntax {
+        Syntax {
+            content: Arc::new(content),
+            scopes: moved.scopes,
+            pending: moved.pending,
+            span: moved.span,
+            origin: moved.origin,
+        }
+    }
+}
+
+impl<'a> TreeMap<'a> for Remapper<'_> {
+    type Src = Syntax;
+    type Out = Syntax;
+    type Error = TooManyScopes;
+
+    fn split(&mut self, syntax: &'a Syntax) -> Result<Split<'a, Syntax, Syntax>, TooManyScopes> {
+        let moved = self.moved(syntax)?;
+        Ok(match &*syntax.content {
+            Content::Identifier(name) => {
+                Split::Leaf(Self::built(moved, Content::Identifier(name.clone())))
+            }
+            Content::Atom(datum) => Split::Leaf(Self::built(moved, Content::Atom(datum.clone()))),
+            Content::List { items, tail } => {
+                self.open.push(moved);
+                Split::List {
+                    items: items.iter().collect(),
+                    tail: tail.as_ref(),
+                }
+            }
+            Content::Vector(items) => {
+                self.open.push(moved);
+                Split::Vector(items.iter().collect())
+            }
+        })
+    }
+
+    fn list(
+        &mut self,
+        _: &'a Syntax,
+        items: Vec<Syntax>,
+        tail: Option<Syntax>,
+    ) -> Result<Syntax, TooManyScopes> {
+        let moved = self.open.pop().expect("the list's own changes");
+        Ok(Self::built(moved, Content::List { items, tail }))
+    }
+
+    fn vector(&mut self, _: &'a Syntax, items: Vec<Syntax>) -> Result<Syntax, TooManyScopes> {
+        let moved = self.open.pop().expect("the vector's own changes");
+        Ok(Self::built(moved, Content::Vector(items)))
     }
 }
 

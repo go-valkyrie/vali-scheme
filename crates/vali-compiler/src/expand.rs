@@ -173,11 +173,68 @@ fn string(s: &str, span: Span) -> Expr {
     })
 }
 
-/// FNV-1a: a fixed, deterministic hash (ADR 0001 #4).
-fn text_hash(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+/// FNV-1a over `body`, spans included: a fixed, deterministic hash (ADR
+/// 0001 #4). It walks the datums with a stack of its own, so a deeply
+/// nested one cannot overflow the native stack.
+fn body_hash(body: &[vali_syntax::Datum]) -> u64 {
+    use vali_syntax::DatumKind;
+
+    fn text(feed: &mut impl FnMut(&[u8]), tag: u8, text: &str) {
+        feed(&[tag]);
+        feed(&text.len().to_le_bytes());
+        feed(text.as_bytes());
+    }
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash = (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let mut work: Vec<&vali_syntax::Datum> = body.iter().rev().collect();
+    while let Some(datum) = work.pop() {
+        feed(&datum.span.source.0.to_le_bytes());
+        feed(&u32::from(datum.span.range.start()).to_le_bytes());
+        feed(&u32::from(datum.span.range.end()).to_le_bytes());
+        match &datum.kind {
+            DatumKind::Number(n) => text(&mut feed, b'n', &n.to_string()),
+            DatumKind::Boolean(b) => feed(&[b'b', u8::from(*b)]),
+            DatumKind::Character(c) => {
+                feed(b"c");
+                feed(&u32::from(*c).to_le_bytes());
+            }
+            DatumKind::String(s) => text(&mut feed, b's', s),
+            DatumKind::Symbol(s) => text(&mut feed, b'y', s),
+            DatumKind::Keyword(s) => text(&mut feed, b'k', s),
+            DatumKind::Bytevector(bytes) => {
+                text(&mut feed, b'u', "");
+                feed(&bytes.len().to_le_bytes());
+                feed(bytes);
+            }
+            DatumKind::List { items, tail } => {
+                feed(&[b'l', u8::from(tail.is_some())]);
+                feed(&items.len().to_le_bytes());
+                work.extend(tail.as_deref());
+                work.extend(items.iter().rev());
+            }
+            DatumKind::Vector(items) => {
+                feed(b"v");
+                feed(&items.len().to_le_bytes());
+                work.extend(items.iter().rev());
+            }
+            DatumKind::Labelled(label, inner) => {
+                feed(b"=");
+                feed(&label.to_le_bytes());
+                work.push(inner);
+            }
+            DatumKind::LabelRef(label) => {
+                feed(b"#");
+                feed(&label.to_le_bytes());
+            }
+            _ => feed(b"?"),
+        }
+    }
+    hash
 }
 
 fn too_many(e: TooManyScopes) -> CompileError {

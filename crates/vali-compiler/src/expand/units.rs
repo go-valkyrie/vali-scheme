@@ -655,7 +655,7 @@ impl Expander {
             repl,
             syntax: None,
             key: if std::mem::take(&mut self.next_hashed) {
-                format!("{identity}@{:016x}", text_hash(&format!("{body:?}")))
+                format!("{identity}@{:016x}", body_hash(body))
             } else {
                 identity.to_owned()
             },
