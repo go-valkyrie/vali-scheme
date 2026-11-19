@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "545e7683_1ac92503",
+        "filename": "crates/vali-dist/src/bounds.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 72,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:12:15Z",
+      "side": 1,
+      "message": "`top_slot` is `live + params + 2 * operands + 16`: the operands are added once in `allocated_slot` and again here. For one call of N variable arguments that\u0027s about 2N, so the frame limit of 65,535 refuses anything past about 32,700 arguments. Main converts and runs 60,000.\n\nProbe, appended to `crates/vali-compiler/tests/it/artifacts.rs`, which already has the helpers:\n\n```\nlet args \u003d \" x\".repeat(n);\nlet lib \u003d format!(\"(define-library (test wide) (import (scheme base)) (export run)\n  (begin (define (f . xs) (length xs)) (define (run x) (f{args}))))\");\n// compile \"(import (scheme base) (test wide)) (run 1)\" with `write: true`,\n// then again with `reading(\u0026artifacts)`, inside `catch_unwind`\n```\n\nOn main, N \u003d 34,000, 40,000 and 60,000 all compile, load from the artifact and return N. On 1260818 they\u0027re compile errors in release and panics in debug (\"the optimiser produced invalid IR: … it may need 68019 slots, and a frame has 65535\").",
+      "revId": "0aa5ac558ecbe53cd26ca42baeb621664fa00eb9",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
