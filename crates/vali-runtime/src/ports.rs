@@ -29,6 +29,9 @@ pub struct Port {
     input: bool,
     open: bool,
     data: Data,
+    /// The file an output port from [`Port::output_file`] writes through
+    /// to, until it is closed.
+    sink: Option<std::fs::File>,
     /// Whether `read` has passed a `#!fold-case` directive, and no
     /// `#!no-fold-case` since: it folds what it reads next (R7RS 2.1).
     fold_case: bool,
@@ -83,6 +86,7 @@ impl Port {
         Port {
             input: true,
             open: true,
+            sink: None,
             fold_case: false,
             data: Data::Text {
                 text: text.into(),
@@ -96,6 +100,7 @@ impl Port {
         Port {
             input: false,
             open: true,
+            sink: None,
             fold_case: false,
             data: Data::Text {
                 text: String::new(),
@@ -109,6 +114,7 @@ impl Port {
         Port {
             input: true,
             open: true,
+            sink: None,
             fold_case: false,
             data: Data::Binary { bytes, at: 0 },
         }
@@ -119,12 +125,47 @@ impl Port {
         Port {
             input: false,
             open: true,
+            sink: None,
             fold_case: false,
             data: Data::Binary {
                 bytes: Vec::new(),
                 at: 0,
             },
         }
+    }
+
+    /// An output port that writes through to `file` as it is written to,
+    /// textual or binary, until it is closed. A host that grants file
+    /// access opens the file; the port does no checking of its own.
+    pub fn output_file(file: std::fs::File, binary: bool) -> Port {
+        let mut port = if binary {
+            Port::output_bytes()
+        } else {
+            Port::output_string()
+        };
+        port.sink = Some(file);
+        port
+    }
+
+    /// Writes what is gathered through to the file, if the port has one.
+    fn drain(&mut self) -> Outcome<()> {
+        use std::io::Write;
+        let Some(file) = &mut self.sink else {
+            return Ok(());
+        };
+        let written = match &mut self.data {
+            Data::Text { text, .. } => {
+                let r = file.write_all(text.as_bytes());
+                text.clear();
+                r
+            }
+            Data::Binary { bytes, .. } => {
+                let r = file.write_all(bytes);
+                bytes.clear();
+                r
+            }
+        };
+        written.map_err(|e| e.to_string())
     }
 
     fn is_input(&self) -> bool {
@@ -153,6 +194,7 @@ impl Port {
 
     fn close(&mut self) {
         self.open = false;
+        self.sink = None;
     }
 
     fn close_input(&mut self) {
@@ -164,6 +206,7 @@ impl Port {
     fn close_output(&mut self) {
         if !self.input {
             self.open = false;
+            self.sink = None;
         }
     }
 
@@ -294,22 +337,22 @@ impl Port {
 
     fn write_char(&mut self, c: char) -> Outcome<()> {
         self.text_out()?.push(c);
-        Ok(())
+        self.drain()
     }
 
     fn write_string(&mut self, s: String) -> Outcome<()> {
         self.text_out()?.push_str(&s);
-        Ok(())
+        self.drain()
     }
 
     fn write_u8(&mut self, b: u8) -> Outcome<()> {
         self.bytes_out()?.push(b);
-        Ok(())
+        self.drain()
     }
 
     fn write_bytevector(&mut self, b: Bytes) -> Outcome<()> {
         self.bytes_out()?.extend_from_slice(&b.0);
-        Ok(())
+        self.drain()
     }
 
     fn flush(&mut self) -> Outcome<()> {
@@ -515,10 +558,8 @@ pub(crate) fn write_to<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Va
         Style::WriteSimple => "write-simple",
     };
     let text = cx.print_styled(args[0], style);
-    cx.with_port(name, args[1], |p| {
-        p.text_out().map(|out| out.push_str(&text))
-    })?
-    .map_err(|e| Error::scheme(format!("{name}: {e}")))?;
+    cx.with_port(name, args[1], |p| p.write_string(text))?
+        .map_err(|e| Error::scheme(format!("{name}: {e}")))?;
     Ok(Value::UNSPECIFIED)
 }
 
