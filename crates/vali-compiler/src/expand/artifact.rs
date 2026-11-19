@@ -38,7 +38,8 @@ use vali_syntax::{
     Span, Syntax,
 };
 
-use super::{RED_ZONE, STACK_GROWTH};
+use super::{MAX_PHASE, RED_ZONE, STACK_GROWTH};
+use crate::pattern::MAX_NESTING;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -481,6 +482,66 @@ struct Decoder<'a, 'b> {
     resolve: &'b dyn Fn(&str) -> Option<usize>,
     units: Vec<usize>,
     origins: Vec<Arc<Origin>>,
+    /// How deep in patterns and templates the decoder is.
+    depth: usize,
+    /// What the pattern being decoded has bound.
+    facts: Facts,
+}
+
+/// How deeply a decoded pattern or template may nest: twice what source
+/// may (`MAX_NESTING`), as a compiled pattern has a level for a repeat that
+/// its source has none for. What walks them recurses on this, and drops
+/// them recursively, so the depth is what the stack must hold, and what
+/// the input says is not trusted with it.
+const MAX_DECODED_NESTING: usize = 2 * MAX_NESTING;
+
+/// What decoding a pattern met, to check it as a whole once its variable
+/// count is known.
+#[derive(Default)]
+struct Facts {
+    /// The variables it binds, in the order they were met.
+    vars: Vec<usize>,
+    /// Each repeat's range of `vars` for the variables its repeated
+    /// pattern binds, and the variables it names.
+    repeats: Vec<(usize, usize, Vec<usize>)>,
+}
+
+impl Facts {
+    /// Checks that the pattern binds each of variables `0..count` once,
+    /// and each repeat names exactly the variables its repeated pattern
+    /// binds, as the compiler makes them. Matching can then rely on it: an
+    /// unbound variable is a panic, and a count beyond what is bound is
+    /// the size of the allocation made for each match.
+    fn check(&self, count: usize) -> std::result::Result<(), String> {
+        if self.vars.len() != count {
+            return Err(format!(
+                "a pattern binds {} variables, not the {count} it counts",
+                self.vars.len()
+            ));
+        }
+        let mut position = vec![usize::MAX; count];
+        for (at, &v) in self.vars.iter().enumerate() {
+            match position.get_mut(v) {
+                Some(slot) if *slot == usize::MAX => *slot = at,
+                Some(_) => return Err(format!("a pattern binds variable {v} twice")),
+                None => return Err(format!("a pattern binds variable {v} of {count}")),
+            }
+        }
+        for (start, end, named) in &self.repeats {
+            if named.len() != end - start {
+                return Err("a repeat does not name the variables it repeats".to_owned());
+            }
+            let mut places: Vec<usize> = named
+                .iter()
+                .map(|&v| position.get(v).copied().unwrap_or(usize::MAX))
+                .collect();
+            places.sort_unstable();
+            if places.iter().zip(*start..*end).any(|(&p, q)| p != q) {
+                return Err("a repeat does not name the variables it repeats".to_owned());
+            }
+        }
+        Ok(())
+    }
 }
 
 type Decoded<T> = std::result::Result<T, DecodeError>;
@@ -502,6 +563,8 @@ pub(super) fn decode(
         resolve,
         units: Vec::new(),
         origins: Vec::new(),
+        depth: 0,
+        facts: Facts::default(),
     };
     d.state().map_err(|e| CompileError {
         message: format!("a syntax export: {e}"),
@@ -669,6 +732,7 @@ impl Decoder<'_, '_> {
                 let mut clauses = Vec::with_capacity(n);
                 for _ in 0..n {
                     let pattern = self.pattern()?;
+                    let facts = std::mem::take(&mut self.facts);
                     let template = self.template()?;
                     let depths = self.depths()?;
                     let vars = depths.len();
@@ -677,6 +741,9 @@ impl Decoder<'_, '_> {
                             "{name}: a clause names a variable it does not bind"
                         )));
                     }
+                    facts
+                        .check(vars)
+                        .map_err(|why| self.r.error(format!("{name}: {why}")))?;
                     clauses.push(Clause {
                         pattern,
                         template,
@@ -687,6 +754,11 @@ impl Decoder<'_, '_> {
             }
             1 => {
                 let phase = self.index()?;
+                if phase > MAX_PHASE {
+                    return Err(self.r.error(format!(
+                        "{name}: a transformer at phase {phase}, above {MAX_PHASE}"
+                    )));
+                }
                 let bytes = self.r.bytes()?;
                 let ir = vali_dist::decode(bytes)?;
                 Transformer::Procedure(Procedure {
@@ -711,10 +783,12 @@ impl Decoder<'_, '_> {
         let mut patterns = Vec::with_capacity(n);
         for _ in 0..n {
             let p = self.pattern()?;
+            let facts = std::mem::take(&mut self.facts);
             let vars = self.index()?;
             if max_var(&p) > vars {
                 return Err(self.r.error("a pattern names a variable it does not count"));
             }
+            facts.check(vars).map_err(|why| self.r.error(why))?;
             patterns.push((p, vars));
         }
         let n = self.r.count(2)?;
@@ -886,13 +960,31 @@ impl Decoder<'_, '_> {
     }
 
     fn pattern(&mut self) -> Decoded<Pattern> {
-        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.pattern_here())
+        self.nested("a pattern", Self::pattern_here)
+    }
+
+    /// Runs `f` one level deeper in patterns and templates, which are
+    /// refused past [`MAX_DECODED_NESTING`].
+    fn nested<T>(&mut self, what: &str, f: impl FnOnce(&mut Self) -> Decoded<T>) -> Decoded<T> {
+        if self.depth >= MAX_DECODED_NESTING {
+            return Err(self.r.error(format!(
+                "{what} is nested more than {MAX_DECODED_NESTING} levels deep"
+            )));
+        }
+        self.depth += 1;
+        let result = stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || f(self));
+        self.depth -= 1;
+        result
     }
 
     fn pattern_here(&mut self) -> Decoded<Pattern> {
         Ok(match self.r.byte()? {
             0 => Pattern::Discard,
-            1 => Pattern::Var(self.index()?),
+            1 => {
+                let v = self.index()?;
+                self.facts.vars.push(v);
+                Pattern::Var(v)
+            }
             2 => Pattern::Literal(self.syntax()?),
             3 => Pattern::Datum(self.r.str()?.to_owned()),
             4 => {
@@ -922,8 +1014,11 @@ impl Decoder<'_, '_> {
         if !self.r.bool()? {
             return Ok(None);
         }
+        let start = self.facts.vars.len();
         let each = Box::new(self.pattern()?);
+        let end = self.facts.vars.len();
         let vars = self.depths()?;
+        self.facts.repeats.push((start, end, vars.clone()));
         let after = self.patterns()?;
         Ok(Some(Repeat { each, vars, after }))
     }
@@ -939,7 +1034,7 @@ impl Decoder<'_, '_> {
     }
 
     fn template(&mut self) -> Decoded<Template> {
-        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.template_here())
+        self.nested("a template", Self::template_here)
     }
 
     fn template_here(&mut self) -> Decoded<Template> {
@@ -1085,6 +1180,8 @@ pub(super) fn decode_library(
         resolve,
         units: Vec::new(),
         origins: Vec::new(),
+        depth: 0,
+        facts: Facts::default(),
     };
     let record = (|| {
         let identity = d.r.str()?.to_owned();

@@ -109,11 +109,13 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let body = FunId(r.u32()?);
     let n = r.count(1)?;
     let mut functions = Vec::with_capacity(n);
+    // What the functions bind without spending a byte on each, in all.
+    let mut budget = bytes.len() + UNPAID_SLACK;
     for _ in 0..n {
         let record = r.bytes()?;
         let start = r.offset() - record.len();
         let mut f = Reader::new(record);
-        let function = decode_function(&mut f)
+        let function = decode_function(&mut f, &mut budget)
             .and_then(|function| f.end().map(|()| function))
             .map_err(|e| DecodeError {
                 offset: start + e.offset,
@@ -142,12 +144,29 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
 /// they take no bytes each, so the input's length cannot bound them.
 const MAX_BOUND_TOGETHER: u64 = 1 << 16;
 
-fn bounded(r: &mut Reader<'_>, what: &str) -> Result<usize, DecodeError> {
+/// How many free variables and join-point parameters, over all the
+/// functions of a module, the module may have beyond one for each byte of
+/// its encoding: each is also an operand at the closure or jump that
+/// supplies it, which takes a byte, so code that is not dead stays within
+/// that, and what a small input can make a decoder allocate stays linear in
+/// its size.
+const UNPAID_SLACK: usize = 1 << 10;
+
+/// A count of free variables or join-point parameters: at most
+/// [`MAX_BOUND_TOGETHER`], and within what is left of `budget`, which it
+/// spends.
+fn bounded(r: &mut Reader<'_>, what: &str, budget: &mut usize) -> Result<usize, DecodeError> {
     let n = r.uint()?;
     if n > MAX_BOUND_TOGETHER {
         return Err(r.error(format!("{n} {what}, more than {MAX_BOUND_TOGETHER}")));
     }
-    Ok(n as usize)
+    let n = n as usize;
+    *budget = budget.checked_sub(n).ok_or_else(|| {
+        r.error(format!(
+            "{what} beyond what the module's size allows (one per byte of the module)"
+        ))
+    })?;
+    Ok(n)
 }
 
 fn encode_constant(w: &mut Writer, constant: &Constant) {
@@ -279,7 +298,7 @@ fn decode_constant(r: &mut Reader<'_>) -> Result<Constant, DecodeError> {
             14 => {
                 let n = r.count(1)?;
                 if n > 0 {
-                    open.push((Open::Vector(n), Vec::with_capacity(n)));
+                    open.push((Open::Vector(n), Vec::new()));
                     continue;
                 }
                 Constant::Vector(Vec::new())
@@ -686,7 +705,7 @@ impl Decoder {
     }
 }
 
-fn decode_function(r: &mut Reader<'_>) -> Result<Function, DecodeError> {
+fn decode_function(r: &mut Reader<'_>, budget: &mut usize) -> Result<Function, DecodeError> {
     let name = if r.bool()? {
         Some(r.str()?.into())
     } else {
@@ -697,8 +716,8 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, DecodeError> {
         optional: r.byte()?,
         rest: r.bool()?,
     };
-    let free_count = bounded(r, "free variables")?;
-    let inlined_count = bounded(r, "inlined copies")?;
+    let free_count = bounded(r, "free variables", budget)?;
+    let inlined_count = r.count(2)?;
     let mut inlined = Vec::with_capacity(inlined_count);
     for _ in 0..inlined_count {
         let name = if r.bool()? {
@@ -737,7 +756,7 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, DecodeError> {
                 d.holes.push((id, 0));
             }
             1 => {
-                let n = bounded(r, "join-point parameters")?;
+                let n = bounded(r, "join-point parameters", budget)?;
                 let recursive = r.bool()?;
                 if d.vars as usize + n > u32::MAX as usize {
                     return Err(r.error("too many variables"));

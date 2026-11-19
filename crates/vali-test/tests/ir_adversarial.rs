@@ -341,7 +341,6 @@ fn constant_pool_dedup_time() {
 /// A quoted list a million long: the IR's constants drop iteratively, the
 /// run format's do not.
 #[test]
-#[ignore = "aborts the process with a stack overflow; run alone"]
 fn deep_constant_list() {
     let mut list = Constant::EmptyList;
     for i in 0..1_000_000 {
@@ -361,7 +360,6 @@ fn deep_constant_list() {
 
 /// Two equal quoted lists: the builder's dedup compares them recursively.
 #[test]
-#[ignore = "aborts the process with a stack overflow; run alone"]
 fn deep_constant_list_dedup() {
     let make = || {
         let mut list = Constant::EmptyList;

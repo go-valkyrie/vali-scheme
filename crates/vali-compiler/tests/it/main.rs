@@ -5,6 +5,7 @@
 mod artifacts;
 mod bridges;
 mod compile;
+mod hostile;
 mod libraries;
 mod lower;
 mod repl;

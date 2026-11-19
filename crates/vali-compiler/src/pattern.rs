@@ -424,7 +424,13 @@ fn elements(
             return Ok(false);
         }
         for (slot, &v) in collected.iter_mut().zip(&repeat.vars) {
-            slot.push(each[v].take().expect("the repeated pattern binds it"));
+            let Some(m) = each.get_mut(v).and_then(Option::take) else {
+                return Err(error(
+                    "a repeated pattern does not bind a variable it repeats",
+                    item.span(),
+                ));
+            };
+            slot.push(m);
         }
     }
     for (slot, &v) in collected.into_iter().zip(&repeat.vars) {

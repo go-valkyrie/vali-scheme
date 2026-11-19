@@ -598,6 +598,8 @@ impl Expander {
                 return Err(fail(format!("the artifact is {}'s", record.identity)));
             }
             let syntax = artifact::decode(section("syntax")?, &resolve, &mut self.sources)?;
+            self.check_bindings(index, own, &record.interface, &syntax)
+                .map_err(&fail)?;
             let unit = &mut self.units[index];
             // The records of what it imports must agree.
             if record.imports != imported {
@@ -623,6 +625,55 @@ impl Expander {
             return Err(e);
         }
         Ok(module)
+    }
+
+    /// Checks that what a library's record and syntax export bind is there to
+    /// be used: each macro exists, in this library or the one it names, and
+    /// only Vali's own libraries bind an internal primitive. The expander
+    /// trusts a binding it finds, so one that names nothing is refused here
+    /// and not met in the middle of expanding a program.
+    fn check_bindings(
+        &self,
+        index: usize,
+        own: bool,
+        interface: &HashMap<String, Binding>,
+        syntax: &ContextState,
+    ) -> std::result::Result<(), String> {
+        let bindings = interface
+            .values()
+            .chain(syntax.table.entries().map(|(_, _, _, binding)| binding));
+        for binding in bindings {
+            match binding {
+                Binding::Macro(id) => {
+                    let defined = |syntax: &ContextState| syntax.macros.contains_key(id);
+                    let there = if id.unit as usize == index {
+                        defined(syntax)
+                    } else {
+                        self.units
+                            .get(id.unit as usize)
+                            .and_then(|u| u.syntax.as_deref())
+                            .is_some_and(defined)
+                    };
+                    if !there {
+                        return Err(format!(
+                            "it binds macro {} of {}, which does not exist",
+                            id.index,
+                            self.units
+                                .get(id.unit as usize)
+                                .map_or("a library that is not loaded", |u| u.identity.as_str())
+                        ));
+                    }
+                }
+                Binding::Primitive(name) if !own && name.starts_with('%') => {
+                    return Err(format!(
+                        "it binds {name}, an internal primitive that only Vali's own \
+                         libraries may"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Expands and compiles a program. With imports, it sees only what it
