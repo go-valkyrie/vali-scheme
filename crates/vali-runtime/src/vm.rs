@@ -1136,6 +1136,15 @@ impl<S: Strategy> Cx<S> {
                 }
                 fp = *fp as *mut u64;
                 slots = self.suspended_slots(fp);
+                if position & RAISED != 0 {
+                    // The raise procedure's frame sits past all of the
+                    // frame it was called in. That one may not be a
+                    // bytecode function's: a Rust procedure that fails
+                    // when tail-called keeps the frame it was called in,
+                    // and its procedure and arguments, which
+                    // `suspended_slots` cannot count.
+                    slots = slots.max(position_base(position));
+                }
             }
         }
     }
