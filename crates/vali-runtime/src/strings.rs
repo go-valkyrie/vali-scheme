@@ -577,25 +577,34 @@ fn single(mut mapped: impl Iterator<Item = char>, c: char) -> char {
     }
 }
 
-/// Simple case folding, as `char-foldcase` does it: the lowercase letter,
-/// with final sigma folding to sigma. Close to Unicode's simple folding,
-/// which differs only for a few scripts' characters.
+/// Simple case folding, as `char-foldcase` does it: Unicode's CaseFolding.txt
+/// statuses C and S. It differs from lowercasing for `ſ` (to `s`), final
+/// sigma, the Cherokee letters (which fold to the capitals) and others.
 fn fold_char(c: char) -> char {
+    // The simple folding is the full folding when that is one character.
+    // The characters whose full folding is longer have no simple folding of
+    // their own (they stay as they are) except these, which have an S entry.
     match c {
-        'ς' => 'σ',
-        _ => single(c.to_lowercase(), c),
+        'ẞ' => 'ß',
+        '\u{1F88}'..='\u{1F8F}' | '\u{1F98}'..='\u{1F9F}' | '\u{1FA8}'..='\u{1FAF}' => {
+            char::from_u32(c as u32 - 8).expect("a Greek extended letter")
+        }
+        '\u{1FBC}' => '\u{1FB3}',
+        '\u{1FCC}' => '\u{1FC3}',
+        '\u{1FFC}' => '\u{1FF3}',
+        _ => {
+            let mut folded = caseless::Caseless::default_case_fold(std::iter::once(c));
+            match (folded.next(), folded.next()) {
+                (Some(f), None) => f,
+                _ => c,
+            }
+        }
     }
 }
 
 /// Full case folding, as `string-foldcase` does it: `ß` folds to `ss`.
 fn fold_string(text: &str) -> String {
-    text.chars()
-        .flat_map(|c| match c {
-            'ß' | 'ẞ' => "ss".chars().collect::<Vec<_>>(),
-            'ς' => vec!['σ'],
-            _ => c.to_lowercase().collect(),
-        })
-        .collect()
+    caseless::default_case_fold_str(text)
 }
 
 /// A one-character procedure from a character to a character.
@@ -893,5 +902,24 @@ mod tests {
         assert_eq!(fold_char('Σ'), 'σ');
         assert_eq!(fold_char('ς'), 'σ');
         assert_eq!(fold_string("Straße ΣΑΣ"), "strasse σασ");
+    }
+
+    #[test]
+    fn folding_is_simple_case_folding_not_lowercasing() {
+        assert_eq!(fold_char('ſ'), 's');
+        assert_eq!(fold_string("ſ"), "s");
+        // S entries: the simple folding where the full one is longer.
+        assert_eq!(fold_char('ẞ'), 'ß');
+        assert_eq!(fold_char('\u{1F88}'), '\u{1F80}');
+        assert_eq!(fold_char('\u{1FAF}'), '\u{1FA7}');
+        assert_eq!(fold_char('\u{1FBC}'), '\u{1FB3}');
+        // F-only entries have no simple folding.
+        assert_eq!(fold_char('ß'), 'ß');
+        assert_eq!(fold_char('İ'), 'İ');
+        // Cherokee folds to the capitals, not to the small letters.
+        assert_eq!(fold_char('\u{AB70}'), '\u{13A0}');
+        assert_eq!(fold_char('\u{13A0}'), '\u{13A0}');
+        assert_eq!(fold_char('\u{13F8}'), '\u{13F0}');
+        assert_eq!(fold_string("\u{AB70}\u{13A0}"), "\u{13A0}\u{13A0}");
     }
 }
