@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "2d2b0f47_d2251ffb",
+        "filename": "crates/vali-compiler/lib/scheme/load.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 20,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:39:52Z",
+      "side": 1,
+      "message": "Done in patch set 2: `dynamic-wind` closes the port however the load ends, and the CLI test loads a file that raises partway, then loads again.",
+      "parentUuid": "df89ba5e_e08344b7",
+      "revId": "2b66bf529376436485007409d820d94628e703c3",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "94635c0a_76a240b0",
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T16:13:40Z",
       "side": 1,
       "message": "The export list is R7RS appendix A\u0027s, which leaves out `syntax-rules` and the auxiliary syntax: `else`, `\u003d\u003e`, `unquote`, `unquote-splicing`, `...` and `_`. R5RS defines all of them, and without them a program that imports only this library breaks. With the CLI built from this change:\n\n```\n(import (scheme r5rs)) (display (cond (#f 1) (else 2)))\n  → else is not bound: is it imported?\n(import (scheme r5rs)) (display (case 3 ((1) \u0027a) (else \u0027b)))\n  → case: no pattern matches this use\n(import (scheme r5rs)) (display (cond ((assv 2 \u0027((2 . x))) \u003d\u003e cdr) (else \u0027none)))\n  → \u003d\u003e is not bound: is it imported?\n(import (scheme r5rs)) (define-syntax swap! (syntax-rules () ...))\n  → syntax-rules is not bound: is it imported?\n(import (scheme r5rs)) (display `(1 ,(+ 1 1) ,@(list 3)))\n  → (1 (unquote (+ 1 1)) (unquote-splicing (list 3)))\n```\n\nThe last one is the worst: no error, just the wrong value. `scheme-report-environment` already adds exactly these names. Exporting them from the library too would make `(import (scheme r5rs))` usable on its own, and a test along the lines of the five above would keep it that way.",
+      "revId": "2b66bf529376436485007409d820d94628e703c3",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "88bcc9d7_533c9b51",
+        "filename": "crates/vali-compiler/lib/scheme/r5rs.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 17,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:39:52Z",
+      "side": 1,
+      "message": "Done in patch set 2. The library exports `syntax-rules`, `else`, `\u003d\u003e`, `unquote`, `unquote-splicing`, `...` and `_`, `scheme-report-environment` is now just `(environment \u0027(scheme r5rs))`, and `scheme-r5rs-only-import.scm` runs the five cases I\u0027d tried.",
+      "parentUuid": "94635c0a_76a240b0",
       "revId": "2b66bf529376436485007409d820d94628e703c3",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
