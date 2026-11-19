@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "b887e29e_75922a97",
+        "filename": "crates/vali-compiler/src/phase.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 83,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:50Z",
+      "side": 1,
+      "message": "Done in patch set 3. `set_caps` gives `eval`\u0027s isolates the host\u0027s symbol and syntax caps, both those already made and new ones. I also tried tight caps: with only 5 symbols or 5 syntax objects of headroom, an evaluated procedural macro still runs, so a macro isolate\u0027s own starting count doesn\u0027t get in the way.",
+      "parentUuid": "0c987a6d_88c6aba2",
+      "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "b3474b88_1e67da25",
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T14:01:50Z",
       "side": 1,
       "message": "`bytes_used()` is what the heap has taken from the system. The page heap keeps emptied pages on its empty list and never gives them back, so this is a high-water mark.\n\nAfter a program fills the heap close to the limit and frees it, `bytes_used() + rust_bytes + bytes \u003e max` holds for good. Every later `intern`, `keyword_raw` and `syntax_raw` miss then fails with `OutOfMemory`, which isn\u0027t catchable, even though `cx.string(..)` still succeeds in the free pages.\n\nReproduced under DeferredHeadered and PreciseSideCounts with an 8-page limit: fill with strings, drop them, `collect_garbage()`. Then `cx.symbol(\"fresh\")` and `cx.syntax(..)` both return `Err(OutOfMemory)`, permanently. Before this change both succeeded.\n\nSecond problem with the same check: the charge is only checked here, when a name or syntax object is made. `PageSource::block` never sees `rust_bytes`, so the heap still grows to the full `max_bytes` afterwards. Interning long names until the limit, then allocating strings, ended at 1.47× the limit (NoCollection) and 1.36× (DeferredHeadered).\n\nFolding the charge into the page source\u0027s own accounting would fix both: one counter, checked on every page and every charge, that goes down when a slot is returned. The check would then compare live usage, not a page high-water mark.",
+      "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "66e9dfdd_c0228c1d",
+        "filename": "crates/vali-runtime/src/cx.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 293,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:50Z",
+      "side": 1,
+      "message": "Half done in patch set 3.\n\nThe first problem is fixed: a heap that was full and has been emptied still interns, and `an_emptied_heap_is_not_refused_for_its_pages` covers it.\n\nThe second is fixed in one order only. When symbols are charged first, later pages are refused in time, as `the_heap_stops_growing_where_the_charges_leave_no_room` checks. When the heap takes its pages first, `charge_external` compares the charges alone with the limit, so they can add nearly another `max_bytes` on top of pages the heap never gives back. Probe, appended to `crates/vali-runtime/tests/it/limits.rs` on 1260691 patch set 3:\n\n```\nlet limit \u003d vali_runtime::PAGE_BYTES * 8;\nlet mut cx \u003d Cx::\u003cS\u003e::new(\u0026HeapConfig { max_bytes: Some(limit), ..Default::default() });\ndrop(fill(\u0026mut cx));\ncx.collect_garbage();\nlet name \u003d \"n\".repeat(1000);\nlet mut made \u003d 0;\nwhile cx.symbol(\u0026format!(\"{name}{made}\")).is_ok() { made +\u003d 1; }\n// cx.bytes_used() + made * name.len() vs limit\n```\n\nUnder all four counting strategies the result is 262,144 bytes of pages plus at least 186,000 bytes of name charges (186 symbols), 1.71 times the limit. It then fails with `OutOfMemory` because the heap itself runs out of room for the names\u0027 strings, not because of the charge check.\n\nSuggested fix: when a charge doesn\u0027t fit next to the pages, have the page heap give empty pages back to the source first, then check `used + external` on every charge as on every page. `PageSource::free_large` already frees any block by its recorded layout, and `PageHeap::free` already puts a page with no live blocks on the empty list. An emptied heap would still intern, because its empty pages go back to make room, and pages plus charges would stay under the limit in both orders. A test for this order would go next to the two above.",
+      "parentUuid": "b3474b88_1e67da25",
       "revId": "735fd2a5b16e0342458dce0fa95c47d3471dd030",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
