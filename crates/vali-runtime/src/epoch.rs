@@ -18,7 +18,19 @@ use crate::value::Value;
 
 impl<S: Strategy> Cx<S> {
     /// The values frames hold, from the innermost frame at `fp` out to the
-    /// entry frame, and the handlers of waiting `%catch`es.
+    /// entry frame, and the handlers of waiting `%catch`es. It also clears
+    /// the live frames' words that no frame scans: see below.
+    ///
+    /// Deferred counting never counts out a slot, so a word a returned
+    /// callee left in its caller's frame still holds its reference,
+    /// uncounted. An epoch that does not scan the word (one that runs in a
+    /// later, smaller callee, which does not reach it) may free the object,
+    /// and a later epoch that scans the caller's frame whole, as it does the
+    /// innermost, would retain the freed object. So an epoch clears the
+    /// words of the frames' extent past the innermost frame's: there are no
+    /// others, since each callee's header and slots start at its caller's
+    /// call base. A new frame clears its own locals as it is entered, so
+    /// words outside every frame need nothing.
     ///
     /// # Safety
     ///
@@ -33,7 +45,13 @@ impl<S: Strategy> Cx<S> {
         // each frame's slot 0 holds its closure.
         unsafe {
             let mut limit = self.frame_slots(fp);
+            // In the segment being walked: the lowest word any frame's
+            // slots reach, and where the scanned words end, which are those
+            // of its innermost frame: the others' lie above.
+            let mut lowest = fp.sub(limit);
+            let mut scanned = lowest;
             loop {
+                lowest = lowest.min(fp.sub(self.frame_slots(fp)));
                 for i in 0..limit {
                     let v = Value::from_raw(*fp.sub(i + 1));
                     if v.is_pointer() {
@@ -43,13 +61,27 @@ impl<S: Strategy> Cx<S> {
                 // Frames past the outermost live one are sealed: the
                 // continuation below the stack holds their values.
                 let position = *fp.add(2);
-                if position == crate::vm::ENTRY || position & crate::vm::UNDERFLOW != 0 {
-                    break;
+                let end = position == crate::vm::ENTRY || position & crate::vm::UNDERFLOW != 0;
+                // The words of this segment's frames that none scanned: the
+                // words of live frames, which belong to no deeper frame.
+                if end || position & crate::vm::BOUNDARY != 0 {
+                    if lowest < scanned {
+                        std::ptr::write_bytes(lowest, 0, scanned.offset_from(lowest) as usize);
+                    }
+                    if end {
+                        break;
+                    }
                 }
                 // The caller's slots from the call's base on hold this
                 // frame's header and its own slots.
                 limit = crate::vm::position_base(position);
                 fp = *fp as *mut u64;
+                if position & crate::vm::BOUNDARY != 0 {
+                    // The caller is in the segment before: its words are
+                    // its own.
+                    lowest = fp.sub(self.frame_slots(fp));
+                    scanned = fp.sub(limit);
+                }
             }
         }
         roots.extend(self.control_values().filter(|v| v.is_pointer()));

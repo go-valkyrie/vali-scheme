@@ -39,7 +39,7 @@ pub(crate) const ENTRY: u64 = u64::MAX;
 
 /// Set in a frame's position word when the frame is the first in its
 /// segment, so returning from it drops back to the previous segment.
-const BOUNDARY: u64 = 1 << 63;
+pub(crate) const BOUNDARY: u64 = 1 << 63;
 
 /// Set in the position word of the frame `%catch` calls its thunk in, and
 /// in the resume word of a native thunk's call: returning through it

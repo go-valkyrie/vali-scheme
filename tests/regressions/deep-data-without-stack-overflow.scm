@@ -17,7 +17,7 @@
 (import (scheme base) (scheme write) (scheme read) (scheme eval)
         (srfi 64))
 
-(define depth 50000)
+(define depth 200000)
 
 ;; ((((...x...)))): `n` lists, each holding the next.
 (define (nest-lists n x)
@@ -106,9 +106,9 @@
        (let ((deep (nest (syntax->datum #'n) '())))
          (datum->syntax
           #'k (equal? deep (syntax->datum (datum->syntax #'k deep)))))))))
-(test-assert (equal? deep (deep-quote 50000)))
-(test-equal depth (length (long-quote 50000)))
-(test-assert (round-trips? 50000))
+(test-assert (equal? deep (deep-quote 200000)))
+(test-equal depth (length (long-quote 200000)))
+(test-assert (round-trips? 200000))
 
 ;; Code nested deeply is expanded and lowered by passes that grow their
 ;; stack, and a procedure that nests this deep runs.

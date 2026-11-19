@@ -14,5 +14,6 @@ mod primitives;
 mod printer;
 mod read;
 mod rust_objects;
+mod stack;
 mod syntax;
 mod vm;
