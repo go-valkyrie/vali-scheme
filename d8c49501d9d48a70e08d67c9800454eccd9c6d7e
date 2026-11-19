@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "34545652_1136f430",
+        "filename": "docs/adr/0003-memory-management.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 82,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:16:11Z",
+      "side": 1,
+      "message": "Under the new convention this reads as the design now, but the baseline compiler is gone (this change removes it from 0017). Something like \"built in M1, before the optimising compiler\" keeps the point without naming it. The \"On the baseline compiler and VM\" caption of the measurements below is fine as a description of when they were taken.",
+      "revId": "d8c49501d9d48a70e08d67c9800454eccd9c6d7e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
