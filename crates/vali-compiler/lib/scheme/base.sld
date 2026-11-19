@@ -561,13 +561,23 @@
             (reverse cdrs)
             (loop (cdr lists) (cons (cdr (car lists)) cdrs)))))
 
+    (define (%circular-list who)
+      (error (string-append who ": expected a proper list, not a circular one")))
+
     ;; map and for-each stop at the shortest list. map builds its result in
     ;; reverse, so a long list never deepens the stack.
     (define (map f list1 . lists)
       (if (null? lists)
-          (let loop ((xs list1) (acc '()))
+          ;; The tortoise `slow` advances every other step; meeting it means
+          ;; the list is circular.
+          (let loop ((xs list1) (slow list1) (step #f) (acc '()))
             (if (pair? xs)
-                (loop (cdr xs) (cons (f (car xs)) acc))
+                (let ((next (cdr xs)))
+                  (cond ((not step)
+                         (loop next slow #t (cons (f (car xs)) acc)))
+                        ((eq? (cdr slow) next) (%circular-list "map"))
+                        (else
+                         (loop next (cdr slow) #f (cons (f (car xs)) acc)))))
                 (reverse acc)))
           (let loop ((lists (cons list1 lists)) (acc '()))
             (let ((cars (%cars lists)))
@@ -577,10 +587,16 @@
 
     (define (for-each f list1 . lists)
       (if (null? lists)
-          (let loop ((xs list1))
+          (let loop ((xs list1) (slow list1) (step #f))
             (when (pair? xs)
-              (f (car xs))
-              (loop (cdr xs))))
+              (let ((next (cdr xs)))
+                (cond ((not step)
+                       (f (car xs))
+                       (loop next slow #t))
+                      ((eq? (cdr slow) next) (%circular-list "for-each"))
+                      (else
+                       (f (car xs))
+                       (loop next (cdr slow) #f))))))
           (let loop ((lists (cons list1 lists)))
             (let ((cars (%cars lists)))
               (when cars
@@ -588,9 +604,12 @@
                 (loop (%cdrs lists)))))))
 
     (define (list-copy x)
-      (let loop ((x x) (acc '()))
+      (let loop ((x x) (slow x) (step #f) (acc '()))
         (if (pair? x)
-            (loop (cdr x) (cons (car x) acc))
+            (let ((next (cdr x)))
+              (cond ((not step) (loop next slow #t (cons (car x) acc)))
+                    ((eq? (cdr slow) next) (%circular-list "list-copy"))
+                    (else (loop next (cdr slow) #f (cons (car x) acc)))))
             (let rebuild ((acc acc) (tail x))
               (if (null? acc)
                   tail
@@ -608,19 +627,23 @@
       (if (null? compare)
           (%member x list)
           (let ((same? (car compare)))
-            (let loop ((l list))
+            (let loop ((l list) (slow list) (step #f))
               (cond ((null? l) #f)
                     ((same? x (car l)) l)
-                    (else (loop (cdr l))))))))
+                    ((not step) (loop (cdr l) slow #t))
+                    ((eq? (cdr slow) (cdr l)) (%circular-list "member"))
+                    (else (loop (cdr l) (cdr slow) #f)))))))
 
     (define (assoc x alist . compare)
       (if (null? compare)
           (%assoc x alist)
           (let ((same? (car compare)))
-            (let loop ((l alist))
+            (let loop ((l alist) (slow alist) (step #f))
               (cond ((null? l) #f)
                     ((same? x (car (car l))) (car l))
-                    (else (loop (cdr l))))))))
+                    ((not step) (loop (cdr l) slow #t))
+                    ((eq? (cdr slow) (cdr l)) (%circular-list "assoc"))
+                    (else (loop (cdr l) (cdr slow) #f)))))))
 
     ;; Booleans and numbers.
     (define (boolean=? a b . rest)
