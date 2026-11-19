@@ -1,0 +1,55 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "90f0a12a_291c9c5f",
+        "filename": "docs/adr/0023-resource-limits.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 19,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:50:42Z",
+      "side": 1,
+      "message": "`max_symbols` shares a table with everything the isolate interns for itself: every symbol constant of every library it loads, record type names, keywords. A host choosing a cap needs to know that baseline, or a cap that seems generous fails isolate creation or the first `(import ...)`.\n\nWorth stating that the cap includes it. Exposing the live count, such as `Cx::symbol_count()`, would let a host set the cap relative to what its isolate starts with.",
+      "revId": "07f1ffa7507f67dbac297e16b413cc2c673dd2df",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "a3056062_ab5f7a02",
+        "filename": "docs/adr/0023-resource-limits.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 30,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:50:42Z",
+      "side": 1,
+      "message": "\"So the isolate is left as it was\" holds for `string-\u003esymbol` and the reader. A module load that reaches the cap partway through its constants leaves the constants already built in the pool (ADR 0020), which never frees. The load fails cleanly, but not without trace. Saying \"fails cleanly, keeping what was already built\" would be exact.",
+      "revId": "07f1ffa7507f67dbac297e16b413cc2c673dd2df",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "5f6ef729_e447e154",
+        "filename": "docs/adr/0023-resource-limits.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 40,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:50:42Z",
+      "side": 1,
+      "message": "One more consequence: `max_bytes` now also counts the Rust-side estimates (item 3), so a host whose memory limit was tuned close to an isolate\u0027s usage can reach `OutOfMemory` earlier than before, with nothing else changed.",
+      "revId": "07f1ffa7507f67dbac297e16b413cc2c673dd2df",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
