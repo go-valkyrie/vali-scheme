@@ -16,11 +16,39 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-vali-test = { path = "../crates/vali-test", features = ["asan"] }
+vali-test = { path = "../crates/vali-test", features = ["asan"], optional = true }
+vali-bytecode = { path = "../crates/vali-bytecode" }
+vali-compiler = { path = "../crates/vali-compiler" }
+vali-dist = { path = "../crates/vali-dist" }
+vali-opt = { path = "../crates/vali-opt" }
+vali-runtime = { path = "../crates/vali-runtime" }
+vali-stdlib = { path = "../crates/vali-stdlib" }
+
+[features]
+# AddressSanitizer's view into the runtime's pages and stack segments, which
+# needs the sanitizer's runtime to link: on for the fuzz targets, off to run
+# the seeds example (`cargo run --example seeds --no-default-features`).
+default = ["asan"]
+asan = ["dep:vali-test"]
 
 [[bin]]
 name = "bytecode"
 path = "fuzz_targets/bytecode.rs"
+required-features = ["asan"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ir"
+path = "fuzz_targets/ir.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "library"
+path = "fuzz_targets/library.rs"
 test = false
 doc = false
 bench = false
