@@ -564,6 +564,11 @@ impl Expander {
                 "it links {name}, which only Vali's own libraries may"
             )));
         }
+        if let Some(name) = links_repl(&ir) {
+            return Err(fail(format!(
+                "it links {name}, an isolate global, which only a REPL's input may"
+            )));
+        }
         let module = converted(&ir)?;
         // The unit goes in first: what it exports names it.
         let index = self.units.len();
@@ -648,7 +653,19 @@ impl Expander {
             ));
         }
         // A transformer runs in the expander's isolate, so what its code
-        // links is held to what a library's own may.
+        // links is held to what a library's own may, and it may not touch
+        // the isolate's globals.
+        for m in syntax.macros.values() {
+            if let Transformer::Procedure(p) = &m.transformer
+                && let Some(name) = links_repl(&p.ir)
+            {
+                return Err(format!(
+                    "the transformer {} links {name}, an isolate global, which only a \
+                     REPL's input may",
+                    m.name
+                ));
+            }
+        }
         if !own {
             let mut allowed = vec![QUOTE_SYNTAX, SYNTAX_MATCH, SYNTAX_BUILD];
             allowed.extend(MACRO_PRIMITIVES);
@@ -663,11 +680,61 @@ impl Expander {
                 }
             }
         }
-        let bindings = record
-            .interface
-            .values()
-            .chain(syntax.table.entries().map(|(_, _, _, binding)| binding));
-        for binding in bindings {
+        // The variables of another library this export may name: what its
+        // interface exports, which its own interface may re-export, and
+        // also what its syntax export binds, which a macro's template may
+        // need. Its other variables are its own: no export of another
+        // library reaches them.
+        let mut known: HashMap<usize, (HashSet<&str>, HashSet<&str>)> = HashMap::new();
+        let interface = record.interface.values().map(|b| (b, true));
+        let table = syntax
+            .table
+            .entries()
+            .map(|(_, _, _, binding)| (binding, false));
+        for (binding, in_interface) in interface.chain(table) {
+            match binding {
+                Binding::Global(name) => {
+                    return Err(format!(
+                        "it binds {name}, an isolate global, which only a REPL's input may"
+                    ));
+                }
+                Binding::Variable(owner, name) if *owner != index => {
+                    let unit = self.units.get(*owner).filter(|u| !u.repl).ok_or_else(|| {
+                        format!("it binds {name} of a library that is not loaded")
+                    })?;
+                    let (exported, bound) = known.entry(*owner).or_insert_with(|| {
+                        fn named(b: &Binding, owner: usize) -> Option<&str> {
+                            match b {
+                                Binding::Variable(o, n) if *o == owner => Some(n.as_str()),
+                                _ => None,
+                            }
+                        }
+                        let exported: HashSet<&str> = unit
+                            .interface
+                            .values()
+                            .filter_map(|b| named(b, *owner))
+                            .collect();
+                        let mut bound = exported.clone();
+                        if let Some(syntax) = unit.syntax.as_deref() {
+                            bound.extend(
+                                syntax
+                                    .table
+                                    .entries()
+                                    .filter_map(|(_, _, _, binding)| named(binding, *owner)),
+                            );
+                        }
+                        (exported, bound)
+                    });
+                    let names = if in_interface { exported } else { bound };
+                    if !names.contains(name.as_str()) {
+                        return Err(format!(
+                            "it binds {name} of {}, which does not export it",
+                            unit.identity
+                        ));
+                    }
+                }
+                _ => {}
+            }
             match binding {
                 Binding::Macro(id) => {
                     let defined = |syntax: &ContextState| syntax.macros.contains_key(id);
@@ -1082,5 +1149,15 @@ fn links_internal(ir: &vali_dist::Module, allowed: &[&str]) -> Option<String> {
                 && !allowed.contains(&&*g.name)
                 || matches!(g.link, vali_dist::GlobalLink::Native(_))
         })
+        .map(|g| g.name.to_string())
+}
+
+/// The first of `ir`'s globals that is an isolate global, a REPL's variable:
+/// no library's code may link one, since it would read or assign what the
+/// host and other code keep there.
+fn links_repl(ir: &vali_dist::Module) -> Option<String> {
+    ir.globals
+        .iter()
+        .find(|g| matches!(g.link, vali_dist::GlobalLink::Repl))
         .map(|g| g.name.to_string())
 }
