@@ -50,6 +50,9 @@ pub struct Cx<S: Strategy> {
     pub(crate) native_cells: HashMap<(Box<str>, Box<str>), OwnCell>,
     /// Whether the primitives are installed (`Cx::install_primitives`).
     pub(crate) primitives_installed: bool,
+    /// Feature identifiers beyond [`crate::features`]: the `srfi-N` of the
+    /// libraries the compiler ships, which it sets.
+    pub(crate) extra_features: Vec<Box<str>>,
     /// Loaded libraries, by identity, which imports link to.
     pub(crate) libraries: HashMap<Box<str>, crate::code::ModuleId>,
     /// Where the next constant of a module goes (ADR 0020).
@@ -159,6 +162,7 @@ impl<S: Strategy> Cx<S> {
             primitives: HashMap::new(),
             native_cells: HashMap::new(),
             primitives_installed: false,
+            extra_features: Vec::new(),
             libraries: HashMap::new(),
             pool: Default::default(),
             symbols: HashMap::new(),
