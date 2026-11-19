@@ -16,6 +16,24 @@
       "message": "Leftover debug output: this `eprintln!(\"STEP start …\")` looks like it was used while writing the validation-count test.",
       "revId": "1f0ddda4e7f5d4bada4888fe1fb84c0c01f8b3d9",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "75e328f6_a24f1499",
+        "filename": "crates/vali-compiler/tests/it/artifacts.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 245,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T16:47:47Z",
+      "side": 1,
+      "message": "Done: the debug line is gone.",
+      "parentUuid": "ab8fd8fd_7f2a836c",
+      "revId": "1f0ddda4e7f5d4bada4888fe1fb84c0c01f8b3d9",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
