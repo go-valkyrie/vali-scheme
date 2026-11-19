@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-18
+- **Amended:** 2026-11-18, an As built section: the caps and the syntax slab are built, the scope budget is planned
 - **Related:** 0003 (memory management), 0008 (isolates, #6 shared symbols), 0009 (item 21, resource limits), 0015 (scopes and syntax objects), 0016 (Rust objects and the finalize hook), 0020 (constants outside the heap)
 
 ## Context
@@ -23,7 +24,7 @@ The caps for 1 and 2 must hold under every memory strategy, `NoCollection` inclu
    | `max_bytes` | Heap pages and large objects (ADR 0009 item 21), plus the Rust-side bytes of symbols, keywords and syntax objects (item 3) | unlimited |
    | `max_symbols` | Interned symbols and keywords together | unlimited |
    | `max_syntaxes` | Runtime syntax objects alive at once | unlimited |
-   | `scope_bit_set_bytes` | Scope bit-set memory, shared by everything the isolate or a build expands | 256 MiB, today's `BIT_SET_BUDGET` |
+   | `scope_bit_set_bytes` (**planned**, #16) | Scope bit-set memory, shared by everything the isolate or a build expands | 256 MiB, today's `BIT_SET_BUDGET` |
 
    Fuel stays a separate argument of the run, since a host sets it per run and not per isolate.
 
@@ -33,9 +34,16 @@ The caps for 1 and 2 must hold under every memory strategy, `NoCollection` inclu
 
 4. **At a cap, a catchable Scheme error.** The error is `Error::LimitExceeded(Limit)`, with `Limit` naming the cap (`Symbols`, `Syntaxes`). Scheme handlers see an error object whose message says which limit was reached, and a host whose program did not handle it receives the typed error, as it receives `OutOfFuel` and `OutOfMemory`. It differs from those two in being **catchable**, because it leaves the isolate consistent and a program may reasonably report it or refuse the request that asked for the symbol. The memory limit and fuel keep ADR 0009 item 21's behaviour: not catchable, no `dynamic-wind` after-thunks run. A memory limit reached through the Rust-side charge is still `OutOfMemory`.
 
-5. **The scope budget is shared.** `scope_bit_set_bytes` is one counter shared by every `ScopeContext` a build makes and by every one an isolate's compiler makes at run time. `ScopeContext` already keeps its count in an atomic; sharing it is plumbing. A context's bit sets are returned to the budget when the context is dropped. The build entry points take the same type and read the fields that concern a build, and an isolate's `eval`, `environment` and REPL draw from the budget its configuration set. Past the budget, subset tests fall back to merging sorted lists, which is correct and slower, so this limit degrades speed and never raises an error.
+5. **The scope budget is shared (planned, #16).** `scope_bit_set_bytes` is one counter shared by every `ScopeContext` a build makes and by every one an isolate's compiler makes at run time. `ScopeContext` already keeps its count in an atomic; sharing it is plumbing. A context's bit sets are returned to the budget when the context is dropped. The build entry points take the same type and read the fields that concern a build, and an isolate's `eval`, `environment` and REPL draw from the budget its configuration set. Past the budget, subset tests fall back to merging sorted lists, which is correct and slower, so this limit degrades speed and never raises an error.
 
 6. **Weak tables count live entries.** When symbols or syntax objects are freed (#46 for symbols; syntax objects already are, #44), the caps count live entries and not every entry ever made. Until then `max_symbols` counts every symbol ever interned, and a long-lived isolate that interns without bound will meet it for good. That is the guarantee for now: a bound the host chooses. The meaning of the field does not change when the table becomes weak, only how long an entry counts.
+
+## As built
+
+- `HeapConfig` has `max_bytes`, `max_symbols` and `max_syntaxes`. `Error::LimitExceeded(Limit)` is the error, with `Limit::Symbols` and `Limit::Syntaxes`, and `reaches_handlers` lets Scheme handlers see it.
+- The runtime's own error-object type interns its few names outside `max_symbols`, so that a handler can be given the error a cap raised even when the cap was the last thing to be reached.
+- `cx.syntaxes` is a slab: the finalize hook retires the slot of a syntax object the strategy frees, as it does for Rust objects, and `max_syntaxes` counts live slots. Under `NoCollection` nothing is freed, so the cap is the bound there.
+- Not built: `scope_bit_set_bytes`. `ScopeContext` still has its constant `BIT_SET_BUDGET`. What is left is the shared counter between contexts, its release on drop, and passing the configuration to the build entry points and to the compiler an isolate runs for `eval`.
 
 ## Consequences
 
