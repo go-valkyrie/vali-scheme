@@ -30,13 +30,13 @@ fn small_procedures_are_inlined() {
     // `sq`'s body replaces the call, keeping its position.
     let sq = ir("(define (sq x) (* x x)) (define (f y) (+ (sq y) 1))");
     assert!(
-        sq.contains("fun f2 f (v0) []:\n  let v5 = * v0 v0 @0:1:15/i0\n  let v3 = + v5 c1 @0:1:38\n  return v3\n  inlined i0 sq @0:1:41\n"),
+        sq.contains("fun f2 f (v0) []:\n  let v2 = * v0 v0 @0:1:15/i0\n  let v1 = + v2 c1 @0:1:38\n  return v1\n  inlined i0 sq @0:1:41\n"),
         "{sq}"
     );
     // In tail position, its returns are the caller's.
     let tail = ir("(define (sq x) (* x x)) (define (f y) (sq y))");
     assert!(
-        tail.contains("fun f2 f (v0) []:\n  let v3 = * v0 v0 @0:1:15/i0\n  return v3\n"),
+        tail.contains("fun f2 f (v0) []:\n  let v1 = * v0 v0 @0:1:15/i0\n  return v1\n"),
         "{tail}"
     );
     // Its constants fold with the caller's arguments.
@@ -67,7 +67,7 @@ fn inlined_procedures_may_call_others() {
          (define (h x) (+ 1 (g x)))");
     assert!(
         nested.contains(
-            "fun f3 h (v0) []:\n  let v6 = call direct f1(v0) @0:2:23/i0\n  let v3 = + c1 v6 @0:3:23\n  return v3\n  inlined i0 g @0:3:28\n"
+            "fun f3 h (v0) []:\n  let v2 = call direct f1(v0) @0:2:23/i0\n  let v1 = + c1 v2 @0:3:23\n  return v1\n  inlined i0 g @0:3:28\n"
         ),
         "{nested}"
     );

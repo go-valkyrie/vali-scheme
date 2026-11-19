@@ -27,7 +27,7 @@ mod known;
 mod simplify;
 mod unbox;
 
-use vali_dist::{ConstantId, FunId, Module, Operand, Term, Value};
+use vali_dist::{ConstantId, FunId, Function, JoinId, Module, Operand, Term, Value, Var};
 
 /// The most closures contified in one function: each makes the function
 /// bigger, and a long chain of them is rare.
@@ -61,6 +61,7 @@ pub fn contify(module: &mut Module) {
 pub fn contify_attempts(module: &mut Module) -> usize {
     let attempts = contify_all(module);
     compact_functions(module);
+    compact_variables(module);
     attempts
 }
 
@@ -118,6 +119,7 @@ pub fn optimise(module: &mut Module) {
     }
     compact_functions(module);
     compact_constants(module);
+    compact_variables(module);
     debug_assert!(
         vali_dist::validate(module).is_ok(),
         "the optimiser produced invalid IR: {:?}",
@@ -219,9 +221,78 @@ fn compact_constants(module: &mut Module) {
     });
 }
 
+/// Numbers each function's variables and join points from 0 with none
+/// skipped, keeping their order: passes that remove bindings leave the
+/// numbers they used, and a function must declare no more variables and
+/// join points than it binds.
+fn compact_variables(module: &mut Module) {
+    for f in &mut module.functions {
+        let mut vars = vec![false; f.vars as usize];
+        let mut joins = vec![false; f.joins as usize];
+        for v in f.params.iter().chain(&f.free) {
+            vars[v.0 as usize] = true;
+        }
+        for term in &f.terms {
+            match term {
+                Term::Let { var, .. } => vars[var.0 as usize] = true,
+                Term::Join { join, params, .. } => {
+                    joins[join.0 as usize] = true;
+                    for v in params {
+                        vars[v.0 as usize] = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let numbered = |used: &[bool]| {
+            let mut next = 0;
+            let renumber: Vec<u32> = used
+                .iter()
+                .map(|&u| {
+                    next += u32::from(u);
+                    next - u32::from(u)
+                })
+                .collect();
+            (renumber, next)
+        };
+        let (var_map, var_count) = numbered(&vars);
+        let (join_map, join_count) = numbered(&joins);
+        if var_count == f.vars && join_count == f.joins {
+            continue;
+        }
+        f.vars = var_count;
+        f.joins = join_count;
+        let var = |v: &mut Var| *v = Var(var_map[v.0 as usize]);
+        for_each_operand_in(f, |x| {
+            if let Operand::Var(v) = x {
+                var(v);
+            }
+        });
+        f.params.iter_mut().chain(&mut f.free).for_each(var);
+        for term in &mut f.terms {
+            match term {
+                Term::Let { var: v, .. } => var(v),
+                Term::Join { join, params, .. } => {
+                    *join = JoinId(join_map[join.0 as usize]);
+                    params.iter_mut().for_each(var);
+                }
+                Term::Jump { join, .. } => *join = JoinId(join_map[join.0 as usize]),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Calls `visit` on every operand in `module`.
 fn for_each_operand(module: &mut Module, mut visit: impl FnMut(&mut Operand)) {
     for f in &mut module.functions {
+        for_each_operand_in(f, &mut visit);
+    }
+}
+
+/// Calls `visit` on every operand in `f`.
+fn for_each_operand_in(f: &mut Function, mut visit: impl FnMut(&mut Operand)) {
+    {
         for term in &mut f.terms {
             match term {
                 Term::Let { value, .. } => match value {

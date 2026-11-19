@@ -103,7 +103,11 @@ impl B {
             params,
             free,
             vars: self.vars,
-            joins: 1,
+            joins: self
+                .terms
+                .iter()
+                .filter(|t| matches!(t, Term::Join { .. }))
+                .count() as u32,
             terms: self.terms,
             body,
             inlined: vec![],

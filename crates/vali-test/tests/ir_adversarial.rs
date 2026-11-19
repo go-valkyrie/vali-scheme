@@ -292,56 +292,55 @@ fn negative_zero_survives() {
     }
 }
 
-/// 65,536 distinct constants pass the converter's own limit check, then
-/// the unspecified constant it adds is the 65,537th.
-#[test]
-#[ignore = "slow: quadratic constant dedup; run with --release --ignored"]
-fn full_constant_pool() {
+/// A module returning constant 0, with `constants`.
+fn constants_module(constants: Vec<Constant>) -> Module {
     let mut fb = FB::default();
     let body = fb.push(Term::Return(c(0)));
     let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
-    let constants = (0..65_536).map(Constant::Integer).collect();
-    let m = module(constants, vec![], vec![f0]);
-    let t = Instant::now();
-    let r = convert_checked(&m);
-    eprintln!(
-        "full_constant_pool: {:?} in {:?}",
-        r.as_ref().map(|_| "ok"),
-        t.elapsed()
-    );
-    assert!(
-        !matches!(&r, Err(e) if e.contains("PANICKED")),
-        "{:?}",
-        r.err()
-    );
+    module(constants, vec![], vec![f0])
 }
 
-/// The time the converter's dedup takes: quadratic in the pool size.
+/// 65,536 distinct constants leave no room for the unspecified constant
+/// the converter adds: an error, not a panic, and no quadratic search to
+/// find it.
 #[test]
-#[ignore = "timing"]
+fn full_constant_pool() {
+    let m = constants_module((0..65_536).map(Constant::Integer).collect());
+    let t = Instant::now();
+    let r = convert_checked(&m);
+    let e = r.expect_err("there is no room for the unspecified value");
+    assert!(!e.contains("PANICKED"), "{e}");
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+
+    // One fewer fits.
+    let m = constants_module((0..65_535).map(Constant::Integer).collect());
+    convert_checked(&m).unwrap();
+
+    // 65,536 constants that include the unspecified value share it.
+    let mut constants: Vec<Constant> = (0..65_535).map(Constant::Integer).collect();
+    constants.push(Constant::Unspecified);
+    convert_checked(&constants_module(constants)).unwrap();
+}
+
+/// The time the converter's dedup takes grows linearly with the pool.
+#[test]
 fn constant_pool_dedup_time() {
-    for n in [4_000u32, 8_000, 16_000, 32_000] {
-        let mut fb = FB::default();
-        let body = fb.push(Term::Return(c(0)));
-        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let mut times = Vec::new();
+    for n in [16_000u32, 64_000] {
         let constants = (0..n)
             .map(|i| Constant::String(format!("s{i}").into()))
             .collect();
-        let m = module(constants, vec![], vec![f0]);
+        let m = constants_module(constants);
         let t = Instant::now();
-        let r = convert_checked(&m);
-        eprintln!(
-            "{n} constants: {:?} in {:?}",
-            r.as_ref().map(|_| "ok"),
-            t.elapsed()
-        );
+        convert_checked(&m).unwrap();
+        times.push(t.elapsed());
     }
+    assert!(times[1].as_secs() < 5, "{times:?}");
 }
 
 /// A quoted list a million long: the IR's constants drop iteratively, the
 /// run format's do not.
 #[test]
-#[ignore = "aborts the process with a stack overflow; run alone"]
 fn deep_constant_list() {
     let mut list = Constant::EmptyList;
     for i in 0..1_000_000 {
@@ -361,7 +360,6 @@ fn deep_constant_list() {
 
 /// Two equal quoted lists: the builder's dedup compares them recursively.
 #[test]
-#[ignore = "aborts the process with a stack overflow; run alone"]
 fn deep_constant_list_dedup() {
     let make = || {
         let mut list = Constant::EmptyList;
@@ -415,6 +413,229 @@ fn very_wide_calls() {
         );
         assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
     }
+}
+
+/// Calls with tens of thousands of arguments, and as many variables live
+/// at once, convert in time that grows with the size, not its square.
+#[test]
+fn enormous_calls_convert_in_linear_time() {
+    for (n, vars, tail) in [
+        (60_000usize, 0usize, false),
+        (60_000, 0, true),
+        (10_000, 10_000, false),
+        (10_000, 10_000, true),
+        (30_000, 30_000, false),
+        (30_000, 30_000, true),
+        (60_000, 60_000, false),
+    ] {
+        let mut fb = FB::default();
+        let f = fb.var();
+        let r = if tail { f } else { fb.var() };
+        let xs: Vec<Var> = (0..vars).map(|_| fb.var()).collect();
+        // The variables, last first, then constants.
+        let args: Vec<Operand> = xs
+            .iter()
+            .rev()
+            .map(|&x| v(x))
+            .chain(std::iter::repeat_n(c(0), n))
+            .collect();
+        let mut t = if tail {
+            fb.push(Term::TailCall {
+                callee: v(f),
+                args,
+                position: None,
+            })
+        } else {
+            let ret = fb.push(Term::Return(v(r)));
+            let_(&mut fb, r, Value::Call { callee: v(f), args }, ret)
+        };
+        t = let_(&mut fb, f, Value::Global(GlobalId(0)), t);
+        for &x in xs.iter().rev() {
+            t = let_(&mut fb, x, Value::Operand(c(0)), t);
+        }
+        let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+        let m = module(
+            vec![Constant::Integer(1)],
+            vec![Global {
+                name: "list".into(),
+                link: GlobalLink::Primitive,
+            }],
+            vec![f0],
+        );
+        let time = Instant::now();
+        let r = convert_checked(&m);
+        eprintln!(
+            "{n} constants + {vars} variables as arguments (tail {tail}): {:?} in {:?}",
+            r.as_ref().map(|_| "ok").map_err(|e| e.clone()),
+            time.elapsed()
+        );
+        assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+        assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
+    }
+}
+
+/// Modules with very many functions, globals, sources, exports, inlined
+/// copies, join-point parameters and free variables convert in time that
+/// grows with their size.
+#[test]
+fn very_many_of_everything_converts_in_linear_time() {
+    let time = Instant::now();
+    let n = 60_000usize;
+    // Many functions, each closed over by the body, with a position in its
+    // own source and many globals and exports.
+    let mut functions = Vec::new();
+    let mut fb = FB::default();
+    let mut body = fb.push(Term::Return(c(0)));
+    for i in 0..n {
+        let x = fb.var();
+        body = fb.push(Term::Let {
+            var: x,
+            value: Value::Closure {
+                function: FunId(i as u32 + 1),
+                free: vec![],
+            },
+            body,
+            position: Some(ir::Position {
+                source: i as u16,
+                line: 1,
+                column: 1,
+                inlined: 0,
+            }),
+        });
+        let x = fb.var();
+        body = let_(&mut fb, x, Value::SetGlobal(GlobalId(i as u32), c(0)), body);
+    }
+    functions.push(fb.finish("body", Arity::exactly(0), vec![], vec![], body));
+    for i in 0..n {
+        let mut fb = FB::default();
+        let ret = fb.push(Term::Return(c(0)));
+        functions.push(fb.finish(&format!("f{i}"), Arity::exactly(0), vec![], vec![], ret));
+    }
+    let mut m = module(vec![Constant::Integer(1)], vec![], functions);
+    m.globals = (0..n)
+        .map(|i| Global {
+            name: format!("g{i}").into(),
+            link: GlobalLink::Defined,
+        })
+        .collect();
+    m.exports = (0..n)
+        .map(|i| (format!("g{i}").into(), GlobalId(i as u32)))
+        .collect();
+    m.sources = (0..n).map(|i| format!("s{i}").into()).collect();
+    convert_checked(&m).unwrap();
+    eprintln!(
+        "{n} functions, globals, exports, sources: {:?}",
+        time.elapsed()
+    );
+
+    // A join point with many parameters, jumped to with as many arguments;
+    // a closure with many free variables.
+    let time = Instant::now();
+    let mut fb = FB::default();
+    let params: Vec<Var> = (0..n).map(|_| fb.var()).collect();
+    let j = fb.join();
+    let handler = fb.push(Term::Return(v(params[0])));
+    let jump = fb.push(Term::Jump {
+        join: j,
+        args: vec![c(0); n],
+    });
+    let body = fb.push(Term::Join {
+        join: j,
+        params,
+        recursive: false,
+        handler,
+        body: jump,
+    });
+    let g = fb.finish("g", Arity::exactly(0), vec![], vec![], body);
+    let mut fb = FB::default();
+    let free: Vec<Var> = (0..n).map(|_| fb.var()).collect();
+    let ret = fb.push(Term::Return(v(free[n - 1])));
+    let h = fb.finish("h", Arity::exactly(0), vec![], free, ret);
+    let mut fb = FB::default();
+    let x = fb.var();
+    let ret = fb.push(Term::Return(v(x)));
+    let body = let_(
+        &mut fb,
+        x,
+        Value::Closure {
+            function: FunId(2),
+            free: vec![c(0); n],
+        },
+        ret,
+    );
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0, g, h]);
+    let r = convert_checked(&m);
+    eprintln!(
+        "{n} join parameters, {n} free: {:?} in {:?}",
+        r.as_ref().map(|_| "ok").map_err(|e| e.clone()),
+        time.elapsed()
+    );
+    assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+    assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
+}
+
+/// Slot allocation takes the lowest free slot without scanning the busy
+/// ones: 60,000 long-lived variables and 250,000 short-lived ones took
+/// 13 s that way, and a join point with 60,000 parameters over a second.
+#[test]
+fn slot_allocation_is_not_a_scan_of_the_slots() {
+    let time = Instant::now();
+    let (long, short) = (60_000usize, 250_000usize);
+    let mut fb = FB::default();
+    let xs: Vec<Var> = (0..long).map(|_| fb.var()).collect();
+    let ys: Vec<Var> = (0..short).map(|_| fb.var()).collect();
+    // Each long-lived variable is read at the end, so all are live at once.
+    let last = *xs.last().unwrap();
+    let mut t = fb.push(Term::Return(v(xs[0])));
+    for &x in xs.iter().skip(1) {
+        let r = fb.var();
+        t = let_(
+            &mut fb,
+            r,
+            Value::Primitive {
+                op: Primitive::Eq,
+                args: vec![v(x), v(last)],
+            },
+            t,
+        );
+    }
+    for &y in &ys {
+        t = let_(&mut fb, y, Value::Operand(c(0)), t);
+    }
+    for &x in xs.iter().rev() {
+        t = let_(&mut fb, x, Value::Operand(c(0)), t);
+    }
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], t);
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
+    let r = convert_checked(&m);
+    eprintln!(
+        "{long} long-lived, {short} short-lived: {:?} in {:?}",
+        r.as_ref().map(|_| "ok").map_err(|e| e.clone()),
+        time.elapsed()
+    );
+    assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+    assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
+
+    // A join point with 60,000 parameters, never jumped to.
+    let time = Instant::now();
+    let mut fb = FB::default();
+    let params: Vec<Var> = (0..60_000).map(|_| fb.var()).collect();
+    let j = fb.join();
+    let handler = fb.push(Term::Return(v(params[0])));
+    let body = fb.push(Term::Return(c(0)));
+    let top = fb.push(Term::Join {
+        join: j,
+        params,
+        recursive: false,
+        handler,
+        body,
+    });
+    let f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], top);
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
+    let r = convert_checked(&m);
+    assert!(!matches!(&r, Err(e) if e.contains("PANICKED") || e.contains("INVALID")));
+    assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
 }
 
 /// The widest calls that fit: every argument a distinct live variable.
@@ -662,13 +883,12 @@ fn duplicate_defined_globals_alias() {
         ],
         vec![f0],
     );
-    let out = convert_checked(&m).unwrap();
-    eprintln!("variables: {}", out.variables.len());
-    let results = run_all(&out);
-    eprintln!(
-        "duplicate globals: g0 reads {:?} (IR semantics: 1)",
-        results[0].1
-    );
+    let e = ir::validate(&m).unwrap_err();
+    assert!(e.message.contains("twice"), "{e}");
+    // The same name with another link is another variable.
+    let mut m = m;
+    m.globals[1].link = GlobalLink::Repl;
+    ir::validate(&m).unwrap();
 }
 
 /// Nesting 1,000,000 deep: lets, ifs, joins.
@@ -784,12 +1004,12 @@ fn deep_nesting() {
     }
 }
 
-/// `analyse` checks every use against every recursive join's region:
-/// O(uses x loops).
+/// Many recursive joins and as many uses of an outer variable: the time
+/// grows with their product if each use is checked against each loop
+/// (80,000 took 2.8 s in a release build).
 #[test]
-#[ignore = "timing"]
 fn quadratic_loop_regions() {
-    for n in [10_000usize, 20_000, 40_000, 80_000] {
+    for n in [10_000usize, 200_000] {
         let mut fb = FB::default();
         // rec join j_i() = return x  in  rec join j_{i+1} ... in  return x
         let x = fb.var();
@@ -815,19 +1035,25 @@ fn quadratic_loop_regions() {
             r.as_ref().map(|_| "ok"),
             time.elapsed()
         );
+        r.unwrap();
+        assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
     }
 }
 
-/// `analyse` scans the free-variable list for each fused `if`, before the
-/// free-variable count is checked: O(ifs x free).
+/// Many fused `if`s in a function with many free variables: the time
+/// grows with their product if each `if` scans the free list (80,000 took
+/// 2.6 s in a release build, and the function was then rejected).
 #[test]
-#[ignore = "timing"]
 fn quadratic_free_scan() {
-    for n in [10_000usize, 20_000, 40_000, 80_000] {
+    for (n, ifs) in [
+        (10_000usize, 10_000usize),
+        (60_000, 300_000),
+        (80_000, 10_000),
+    ] {
         let mut fb = FB::default();
         let free: Vec<Var> = (0..n).map(|_| fb.var()).collect();
         let mut t = fb.push(Term::Return(c(0)));
-        for _ in 0..n {
+        for _ in 0..ifs {
             let b = fb.var();
             let other = fb.push(Term::Return(c(0)));
             let iff = fb.push(Term::If {
@@ -857,33 +1083,54 @@ fn quadratic_free_scan() {
             r.as_ref().map(|_| "ok").map_err(|e| e.clone()),
             time.elapsed()
         );
+        assert!(time.elapsed().as_secs() < 10, "took {:?}", time.elapsed());
+        if n > 65_535 {
+            assert!(r.is_err(), "more free variables than a closure holds");
+        }
     }
 }
 
-/// A function that declares 2^32 - 1 variables and join points but has one
-/// term: the validator and converter allocate per declared count.
+/// A function that declares 2^32 - 1 variables or join points but has one
+/// term: the validator must reject it before allocating for the count, and
+/// so must the converter, which validates first.
 #[test]
-#[ignore = "allocates many GB; run alone under ulimit -v"]
 fn huge_declared_counts() {
-    let which = std::env::var("HUGE").unwrap_or_else(|_| "vars".into());
-    let mut fb = FB::default();
-    let body = fb.push(Term::Return(c(0)));
-    let mut f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
-    if which == "vars" {
-        f0.vars = u32::MAX;
-    } else {
-        f0.joins = u32::MAX;
+    for which in ["vars", "joins"] {
+        let mut fb = FB::default();
+        let body = fb.push(Term::Return(c(0)));
+        let mut f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+        if which == "vars" {
+            f0.vars = u32::MAX;
+        } else {
+            f0.joins = u32::MAX;
+        }
+        let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
+        let time = Instant::now();
+        let e = ir::validate(&m).unwrap_err();
+        assert!(e.message.contains("declares"), "{e}");
+        vali_bytecode::convert(&m).unwrap_err();
+        assert!(time.elapsed().as_secs() < 2, "took {:?}", time.elapsed());
     }
+}
+
+/// A count too large for the bindings a function has is an error even when
+/// small: it is exactly the bindings' number or fewer.
+#[test]
+fn declared_counts_must_match_bindings() {
+    let mut fb = FB::default();
+    let x = fb.var();
+    let ret = fb.push(Term::Return(v(x)));
+    let body = let_(&mut fb, x, Value::Operand(c(0)), ret);
+    let mut f0 = fb.finish("body", Arity::exactly(0), vec![], vec![], body);
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0.clone()]);
+    ir::validate(&m).unwrap();
+    f0.vars = 2;
+    let m = module(vec![Constant::Integer(1)], vec![], vec![f0.clone()]);
+    assert!(ir::validate(&m).is_err());
+    f0.vars = 1;
+    f0.joins = 1;
     let m = module(vec![Constant::Integer(1)], vec![], vec![f0]);
-    let time = Instant::now();
-    let r = ir::validate(&m);
-    eprintln!("validate: {r:?} in {:?}", time.elapsed());
-    let r = vali_bytecode::convert(&m);
-    eprintln!(
-        "convert: {:?} in {:?}",
-        r.as_ref().map(|_| "ok"),
-        time.elapsed()
-    );
+    assert!(ir::validate(&m).is_err());
 }
 
 // ---------------------------------------------------------------------------
