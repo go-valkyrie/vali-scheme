@@ -82,7 +82,11 @@ pub struct Cx<S: Strategy> {
     /// The most fuel the isolate may use, if limited.
     pub(crate) fuel_limit: Option<u64>,
     /// The syntax objects that heap objects of type `Syntax` index.
-    pub(crate) syntaxes: Vec<vali_syntax::Syntax>,
+    /// A slot is empty once its heap object is freed, and its index waits
+    /// in `free_syntaxes` to be reused.
+    pub(crate) syntaxes: Vec<Option<vali_syntax::Syntax>>,
+    /// The indices of the empty slots of `syntaxes`.
+    pub(crate) free_syntaxes: Vec<usize>,
     /// The limits the host set (ADR 0023), and the Rust-side bytes of
     /// symbols, keywords and syntax objects charged against `max_bytes`.
     pub(crate) limits: Limits,
@@ -213,6 +217,7 @@ impl<S: Strategy> Cx<S> {
             counters: crate::Counters::default(),
             fuel_limit: None,
             syntaxes: Vec::new(),
+            free_syntaxes: Vec::new(),
             limits: Limits::new(config),
             host_data: None,
             expander_data: None,
@@ -277,9 +282,17 @@ impl<S: Strategy> Cx<S> {
         self.symbols.len() + self.keywords.len()
     }
 
-    /// How many runtime syntax objects the isolate holds.
+    /// How many runtime syntax objects the isolate holds: those whose heap
+    /// object is not freed.
     #[doc(hidden)]
     pub fn live_syntaxes(&self) -> usize {
+        self.syntaxes.len() - self.free_syntaxes.len()
+    }
+
+    /// How many slots the table of syntax objects takes, live or free:
+    /// bounded where heap objects are freed.
+    #[doc(hidden)]
+    pub fn syntax_slots(&self) -> usize {
         self.syntaxes.len()
     }
 
@@ -314,6 +327,11 @@ impl<S: Strategy> Cx<S> {
             return Err(crate::Error::LimitExceeded(crate::Limit::Symbols));
         }
         self.check_rust_bytes(name_entry_bytes(name))
+    }
+
+    /// Gives back `bytes` of Rust-side memory charged earlier.
+    pub(crate) fn release_rust_bytes(&mut self, bytes: usize) {
+        self.limits.rust_bytes = self.limits.rust_bytes.saturating_sub(bytes);
     }
 
     /// Charges `bytes` of Rust-side memory, which `check_rust_bytes`

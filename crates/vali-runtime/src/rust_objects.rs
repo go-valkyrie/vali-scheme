@@ -230,6 +230,8 @@ impl<S: Strategy> Cx<S> {
             self.objects.remove(i);
         } else if let Some(i) = Self::retire_module(v) {
             self.instances.retire(i);
+        } else if let Some(i) = Self::retire_syntax(v) {
+            self.remove_syntax(i);
         }
     }
 
