@@ -1156,6 +1156,9 @@ impl<S: Strategy> Cx<S> {
     }
 
     fn execute(&mut self, procedure: Value, args: &[Value]) -> Result<Value, Error> {
+        if let Some(what) = &self.poisoned {
+            return Err(Error::Poisoned(what.clone()));
+        }
         if self.running {
             return Err(Error::scheme(
                 "calling Scheme from inside Scheme code is not supported yet",
@@ -1586,16 +1589,21 @@ impl<S: Strategy> Cx<S> {
         // collection may free, for the next Rust procedure to call.
         self.task.tail_call = None;
         let result = match &code.kind {
-            // A panic in a primitive becomes an error naming it, as in a
-            // bridge, so it never unwinds through the frames it ran in.
+            // A primitive works on raw heap words, so a panic in one may
+            // leave an object half-updated for Scheme code to reach. It
+            // poisons the isolate instead of becoming a condition, unlike a
+            // bridge's panic, which cannot touch the heap. It is caught
+            // here so it never unwinds through the frames it ran in.
             Kind::Native(f) => {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, args)))
                     .unwrap_or_else(|panic| {
-                        Err(Error::scheme(format!(
+                        let what = format!(
                             "{}: panicked: {}",
                             code.name,
                             crate::bridge::panic_message(&*panic)
-                        )))
+                        );
+                        self.poisoned = Some(what.clone());
+                        Err(Error::Poisoned(what))
                     })
             }
             Kind::Bridge(f) => f.invoke(self, args),
@@ -1869,7 +1877,7 @@ impl<S: Strategy> Cx<S> {
                         // call; with none, or for an exit, return the error
                         // to the host.
                         let catch = match error {
-                            Error::Exit(_) | Error::OutOfFuel => None,
+                            Error::Exit(_) | Error::OutOfFuel | Error::Poisoned(_) => None,
                             _ => self.task.catches.pop(),
                         };
                         let Some(catch) = catch else {

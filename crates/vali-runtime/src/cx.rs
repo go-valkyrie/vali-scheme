@@ -68,6 +68,9 @@ pub struct Cx<S: Strategy> {
     pub(crate) max_stack_words: usize,
     /// Whether Scheme code is running, which forbids re-entering it.
     pub(crate) running: bool,
+    /// Why the isolate refuses to run: a core primitive panicked, and may
+    /// have left the heap half-updated.
+    pub(crate) poisoned: Option<String>,
     /// Calls made, the fuel used so far (ADR 0009).
     pub(crate) fuel_used: u64,
     /// What it has done, counted (the `counters` feature).
@@ -164,6 +167,7 @@ impl<S: Strategy> Cx<S> {
             task: Task::new(),
             max_stack_words: crate::stack::MAX_STACK_WORDS,
             running: false,
+            poisoned: None,
             fuel_used: 0,
             #[cfg(feature = "counters")]
             counters: crate::Counters::default(),

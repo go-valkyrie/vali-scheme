@@ -2251,6 +2251,105 @@ fn exiting() {
     assert_eq!(log("emergency-exit"), "()");
 }
 
+fn test_panic(
+    _cx: &mut Cx<PreciseHeadered>,
+    _args: &[vali_runtime::Value],
+) -> Result<vali_runtime::Value, Error> {
+    panic!("kaboom")
+}
+
+fn test_fail(
+    _cx: &mut Cx<PreciseHeadered>,
+    _args: &[vali_runtime::Value],
+) -> Result<vali_runtime::Value, Error> {
+    Err(Error::scheme("deliberate"))
+}
+
+/// A panic in a core primitive may leave the heap half-updated, so it
+/// poisons the isolate: no handler, guard or `dynamic-wind` after thunk
+/// sees it or runs, the host gets `Error::Poisoned`, and every later call
+/// is refused. An error a primitive returns stays an ordinary condition.
+#[test]
+fn a_panicking_primitive_poisons_the_isolate() {
+    let source = "(import (scheme base))
+         (define log '())
+         (define (note x) (set! log (cons x log)))
+         (define (guarded f)
+           (dynamic-wind
+             (lambda () #f)
+             (lambda () (guard (e (#t (note 'guard) 'caught)) (f)))
+             (lambda () (note 'after))))
+         (define (handled f)
+           (with-exception-handler
+             (lambda (e) (note 'handler) 'handled)
+             (lambda () (f))))
+         (define (fine) 'fine)";
+    let program =
+        vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+    let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    // SAFETY: neither procedure touches the heap.
+    let (panics, fails) = unsafe {
+        (
+            cx.define_native("panics", vali_bytecode::Arity::exactly(0), test_panic)
+                .unwrap(),
+            cx.define_native("fails", vali_bytecode::Arity::exactly(0), test_fail)
+                .unwrap(),
+        )
+    };
+    let id = vali_compiler::load(&mut cx, program).unwrap();
+    cx.run(id).unwrap();
+    let guarded = cx.variable(id, "guarded").unwrap();
+    let handled = cx.variable(id, "handled").unwrap();
+    let fine = cx.variable(id, "fine").unwrap();
+    let show = |cx: &mut Cx<PreciseHeadered>, h| cx.write_string(h).unwrap();
+
+    // A deliberate error is still caught, and the after thunk runs.
+    let caught = cx.call(&guarded, std::slice::from_ref(&fails)).unwrap();
+    assert_eq!(show(&mut cx, &caught), "caught");
+    let handled_ok = cx.call(&handled, std::slice::from_ref(&fine)).unwrap();
+    assert_eq!(show(&mut cx, &handled_ok), "fine");
+    let log = cx.variable(id, "log").unwrap();
+    assert_eq!(show(&mut cx, &log), "(after guard)");
+
+    // A panic gets past the guard and the handler, and the cleanup does not
+    // run.
+    let Err(Error::Poisoned(what)) = cx.call(&guarded, std::slice::from_ref(&panics)) else {
+        panic!("expected a poisoned isolate");
+    };
+    assert!(what.contains("panics: panicked: kaboom"), "{what}");
+    let log = cx.variable(id, "log").unwrap();
+    assert_eq!(show(&mut cx, &log), "(after guard)");
+    // The isolate refuses further work, of any kind.
+    assert!(matches!(cx.call(&fine, &[]), Err(Error::Poisoned(_))));
+    assert!(matches!(
+        cx.call(&handled, std::slice::from_ref(&panics)),
+        Err(Error::Poisoned(_))
+    ));
+    let log = cx.variable(id, "log").unwrap();
+    assert_eq!(show(&mut cx, &log), "(after guard)");
+
+    // Without a guard in the way the handler is not called either.
+    let mut cx2 = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+    cx2.install_primitives().unwrap();
+    let program =
+        vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+    // SAFETY: as above.
+    let panics = unsafe {
+        cx2.define_native("panics", vali_bytecode::Arity::exactly(0), test_panic)
+            .unwrap()
+    };
+    let id = vali_compiler::load(&mut cx2, program).unwrap();
+    cx2.run(id).unwrap();
+    let handled = cx2.variable(id, "handled").unwrap();
+    assert!(matches!(
+        cx2.call(&handled, &[panics]),
+        Err(Error::Poisoned(_))
+    ));
+    let log = cx2.variable(id, "log").unwrap();
+    assert_eq!(show(&mut cx2, &log), "()");
+}
+
 #[test]
 fn libraries_that_reach_outside() {
     // Vali's own versions have no capability.
