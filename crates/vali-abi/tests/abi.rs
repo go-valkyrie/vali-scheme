@@ -134,7 +134,7 @@ fn type_codes_are_odd_and_round_trip() {
     }
     assert_eq!(TypeCode::from_u8(0), None);
     assert_eq!(TypeCode::from_u8(2), None);
-    assert_eq!(TypeCode::from_u8(47), None);
+    assert_eq!(TypeCode::from_u8(49), None);
     assert_eq!(TypeCode::Pair.tag(), Tag::Pair);
     assert_eq!(TypeCode::Vector.tag(), Tag::Other);
 }

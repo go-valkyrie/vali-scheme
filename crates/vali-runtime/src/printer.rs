@@ -55,12 +55,18 @@ impl<S: Strategy> Printer<'_, S> {
                 == Some(TypeCode::Vector)
     }
 
+    fn is_ipair(&self, v: Value) -> bool {
+        self.cx.is_ipair(v)
+    }
+
     /// The pairs and vectors reachable from `v`, each followed once.
     fn children(&self, v: Value) -> Vec<Value> {
         // SAFETY: `v` is a live pair or vector.
         unsafe {
             if v.is_pair() {
                 vec![self.cx.car(v), self.cx.cdr(v)]
+            } else if self.is_ipair(v) {
+                vec![self.cx.icar(v), self.cx.icdr(v)]
             } else if self.is_vector(v) {
                 (0..self.cx.vector_length(v))
                     .map(|i| self.cx.vector_ref(v, i))
@@ -84,7 +90,7 @@ impl<S: Strategy> Printer<'_, S> {
         // Each entry: an object, and whether its children were pushed.
         let mut stack = vec![(root, false)];
         while let Some((v, expanded)) = stack.pop() {
-            if !(v.is_pair() || self.is_vector(v)) {
+            if !(v.is_pair() || self.is_vector(v) || self.is_ipair(v)) {
                 continue;
             }
             if expanded {
@@ -142,6 +148,8 @@ impl<S: Strategy> Printer<'_, S> {
             Text(&'static str),
             /// The rest of a list, after the car of this pair.
             Tail(Value),
+            /// The rest of an immutable list, after the `icar` of this ipair.
+            ITail(Value),
         }
         let mut work = vec![Task::Value(v)];
         while let Some(task) = work.pop() {
@@ -158,6 +166,17 @@ impl<S: Strategy> Printer<'_, S> {
                     work.push(Task::Tail(v));
                     work.push(Task::Value(car));
                 }
+                Task::Value(v) if self.is_ipair(v) => {
+                    if self.label(v) {
+                        continue;
+                    }
+                    self.out.push_str("#<ilist ");
+                    // SAFETY: `v` is a live immutable pair.
+                    let car = unsafe { self.cx.icar(v) };
+                    work.push(Task::Text(">"));
+                    work.push(Task::ITail(v));
+                    work.push(Task::Value(car));
+                }
                 Task::Value(v) if self.is_vector(v) => {
                     if self.label(v) {
                         continue;
@@ -172,6 +191,23 @@ impl<S: Strategy> Printer<'_, S> {
                     }
                 }
                 Task::Value(v) => self.atom(v),
+                Task::ITail(pair) => {
+                    // SAFETY: `pair` is a live immutable pair.
+                    let cdr = unsafe { self.cx.icdr(pair) };
+                    if cdr == Value::EMPTY_LIST {
+                        continue;
+                    }
+                    if self.is_ipair(cdr) && !self.labels.contains_key(&cdr.raw()) {
+                        // SAFETY: `cdr` is a live immutable pair.
+                        let car = unsafe { self.cx.icar(cdr) };
+                        work.push(Task::ITail(cdr));
+                        work.push(Task::Value(car));
+                        work.push(Task::Text(" "));
+                    } else {
+                        work.push(Task::Value(cdr));
+                        work.push(Task::Text(" . "));
+                    }
+                }
                 Task::Tail(pair) => {
                     // SAFETY: `pair` is a live pair.
                     let cdr = unsafe { self.cx.cdr(pair) };

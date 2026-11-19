@@ -55,7 +55,7 @@ impl<S: Strategy> Cx<S> {
         // object's type keeps it.
         unsafe {
             match t {
-                TypeCode::Pair | TypeCode::RecordType => 2,
+                TypeCode::Pair | TypeCode::RecordType | TypeCode::Ipair => 2,
                 TypeCode::Ratnum | TypeCode::ExactComplex | TypeCode::InexactComplex => 2,
                 // Its index in the isolate's table, not a value.
                 TypeCode::RustObject => 1,
@@ -101,6 +101,7 @@ impl<S: Strategy> Cx<S> {
             TypeCode::Pair
             | TypeCode::RecordType
             | TypeCode::Box
+            | TypeCode::Ipair
             | TypeCode::Record
             | TypeCode::Ratnum
             | TypeCode::ExactComplex => {
