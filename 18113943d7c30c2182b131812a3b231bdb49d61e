@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "196354fa_0cebe597",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 96,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T18:55:53Z",
+      "side": 1,
+      "message": "The per-isolate megamorphic cache holds resolutions too, so holders and validity cells, but it belongs to no module, so its references act as roots: a holder (a prototype, say) stays alive until its entry is evicted or invalidated. Since the cache has a fixed number of entries, that\u0027s bounded and harmless, but a sentence saying so would stop someone later wondering whether it leaks a transient module\u0027s objects.",
+      "revId": "18113943d7c30c2182b131812a3b231bdb49d61e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
