@@ -76,8 +76,14 @@ jobs:
           shared-key: test
       - name: Install the pinned toolchain
         run: bin/mise install
+      # The debugger tests fail, not skip, when CI is set and these are
+      # missing.
+      - name: Install the debuggers
+        run: sudo apt-get update && sudo apt-get install -y gdb lldb
       - name: Test
         run: bin/mise run test
+      - name: Debugger tests, optimised
+        run: bin/mise run test-debugger-optimised
 
   docs:
     runs-on: ubuntu-latest

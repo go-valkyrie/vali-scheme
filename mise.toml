@@ -34,6 +34,11 @@ run = [
     "VALI_NO_OPT=1 cargo test --workspace --test regressions",
 ]
 
+[tasks.test-debugger-optimised]
+description = "Run the native debugger tests on an optimised build with full debug info, where the interpreter's locals are hardest to read (needs gdb and lldb on Linux)"
+env = { CARGO_PROFILE_RELEASE_DEBUG = "2" }
+run = "cargo test -p vali-runtime --release --features native-frames --test debugger"
+
 [tasks.lint]
 description = "Check formatting and run Clippy with warnings as errors"
 run = [
@@ -52,7 +57,7 @@ run = "cargo deny check"
 
 [tasks.check]
 description = "Everything CI runs: lint, test, documentation and dependency checks"
-depends = ["lint", "test", "docs", "deny"]
+depends = ["lint", "test", "test-debugger-optimised", "docs", "deny"]
 
 [tasks.bench]
 description = "Run benchmarks/: exact counts, then the median of 9 timed runs, into target/vali-bench/latest"

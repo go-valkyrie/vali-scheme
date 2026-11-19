@@ -103,6 +103,26 @@ fn run_scheme() -> i64 {
         .unwrap()
 }
 
+/// Whether the debugger `name` is installed. When it is not, that is a
+/// skip on a developer's machine and a failure in CI, where `CI` is set:
+/// a skipped test there would pass without checking anything.
+#[cfg(target_os = "linux")]
+fn available(name: &str) -> bool {
+    if std::process::Command::new(name)
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{name} is not installed, and CI must run its tests"
+    );
+    eprintln!("{name} is not installed; skipping");
+    false
+}
+
 #[test]
 fn debugger_child() {
     if std::env::var_os(CHILD).is_none() {
@@ -114,12 +134,7 @@ fn debugger_child() {
 #[test]
 #[cfg(all(feature = "native-frames", target_arch = "x86_64", target_os = "linux"))]
 fn gdb_backtrace() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("gdb is not installed; skipping");
+    if !available("gdb") {
         return;
     }
     let exe = std::env::current_exe().unwrap();
@@ -168,12 +183,7 @@ fn gdb_backtrace() {
 #[test]
 #[cfg(all(feature = "native-frames", target_arch = "x86_64", target_os = "linux"))]
 fn lldb_backtrace() {
-    if std::process::Command::new("lldb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("lldb is not installed; skipping");
+    if !available("lldb") {
         return;
     }
     let exe = std::env::current_exe().unwrap();
@@ -220,6 +230,7 @@ fn lldb_backtrace() {
 }
 
 /// The extensions in `tools/debugger/`.
+#[cfg(target_os = "linux")]
 fn extension(name: &str) -> String {
     format!("{}/../../tools/debugger/{name}", env!("CARGO_MANIFEST_DIR"))
 }
@@ -227,6 +238,7 @@ fn extension(name: &str) -> String {
 /// What the extensions show of the four frames of `f` and their slots,
 /// with or without native frames: their names and positions, from the
 /// line table, and their slots as Scheme writes them.
+#[cfg(target_os = "linux")]
 fn check_scheme_frames(text: &str) {
     assert!(text.contains("#0 f (debugger.scm:2:5)"), "{text}");
     for n in 1..=3 {
@@ -248,12 +260,7 @@ fn check_scheme_frames(text: &str) {
 #[test]
 #[cfg(target_os = "linux")]
 fn gdb_shows_scheme_frames() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("gdb is not installed; skipping");
+    if !available("gdb") {
         return;
     }
     let output = std::process::Command::new("gdb")
@@ -294,12 +301,7 @@ fn gdb_shows_scheme_frames() {
 #[test]
 #[cfg(target_os = "linux")]
 fn lldb_shows_scheme_frames() {
-    if std::process::Command::new("lldb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("lldb is not installed; skipping");
+    if !available("lldb") {
         return;
     }
     let output = std::process::Command::new("lldb")
