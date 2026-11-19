@@ -210,6 +210,11 @@ pub struct Module {
     pub sources: Vec<Box<str>>,
     /// The function that runs the module's body.
     pub body: u32,
+    /// The SHA-256 of what the module was made from, if its maker has
+    /// one: of the IR's encoding for a library the compiler made, so
+    /// telling it from another build needs none of the converted code.
+    /// [`Module::fingerprint`] is this when it is set.
+    pub digest: Option<[u8; 32]>,
 }
 
 impl std::hash::Hash for Constant {
@@ -441,19 +446,28 @@ impl Drop for Constant {
 }
 
 impl Module {
-    /// A 128-bit digest of the whole module, code, constants and debug
-    /// information included, that is the same for equal modules (floating
-    /// point constants by their bits). A host that has loaded a module and
-    /// dropped its bytecode can still tell whether another is the same one.
-    /// Deterministic within a build of Vali, not across builds, and not a
-    /// defence against a module made to collide: it guards against mixing
-    /// up two builds of a library by accident.
-    pub fn fingerprint(&self) -> u128 {
+    /// A 256-bit digest that tells two builds of a module apart. A host
+    /// that has loaded a module and dropped its bytecode can still tell
+    /// whether another is the same one. It is the module's
+    /// [`digest`](Module::digest) if it has one: the compiler gives each
+    /// library the SHA-256 of its IR's encoding, which is the same however
+    /// the library was made, from source or from its artifact, so equal
+    /// digests mean the same IR. Otherwise (a module built by hand, or a
+    /// native library's) it is a digest of the whole module, code,
+    /// constants and debug information included, the same for equal
+    /// modules (floating point constants by their bits), deterministic
+    /// within a build of Vali and not across builds; that one is 128 bits,
+    /// not a cryptographic hash, and only guards against mixing up two
+    /// builds by accident.
+    pub fn fingerprint(&self) -> [u8; 32] {
         use std::hash::{Hash, Hasher};
 
+        if let Some(digest) = self.digest {
+            return digest;
+        }
         /// Two hashers fed alike, one keyed differently.
-        struct Digest(std::hash::DefaultHasher, std::hash::DefaultHasher);
-        impl Hasher for Digest {
+        struct Pair(std::hash::DefaultHasher, std::hash::DefaultHasher);
+        impl Hasher for Pair {
             fn write(&mut self, bytes: &[u8]) {
                 self.0.write(bytes);
                 self.1.write(bytes);
@@ -462,10 +476,13 @@ impl Module {
                 self.0.finish()
             }
         }
-        let mut digest = Digest(Default::default(), Default::default());
+        let mut digest = Pair(Default::default(), Default::default());
         digest.1.write_u8(0xa5);
         self.hash(&mut digest);
-        (u128::from(digest.0.finish()) << 64) | u128::from(digest.1.finish())
+        let mut out = [0u8; 32];
+        out[..8].copy_from_slice(&digest.0.finish().to_le_bytes());
+        out[8..16].copy_from_slice(&digest.1.finish().to_le_bytes());
+        out
     }
 }
 
