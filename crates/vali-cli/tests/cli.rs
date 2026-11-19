@@ -4,10 +4,21 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// `vali`, with a cache directory of its own so tests never touch the
+/// user's.
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vali"));
+    command.env(
+        "VALI_CACHE_DIR",
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli-default-cache"),
+    );
+    command
+}
+
 /// Runs `vali` with `input` on standard input: its exit code, standard
 /// output and standard error.
 fn vali(input: &str) -> (Option<i32>, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vali"))
+    let mut child = command()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -55,20 +66,14 @@ fn end_of_input_ends_it() {
 
 #[test]
 fn usage() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vali"))
-        .arg("--nonsense")
-        .output()
-        .expect("vali runs");
+    let output = command().arg("--nonsense").output().expect("vali runs");
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown option --nonsense"));
 }
 
 #[test]
 fn help_documents_the_flags() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vali"))
-        .arg("--help")
-        .output()
-        .expect("vali runs");
+    let output = command().arg("--help").output().expect("vali runs");
     assert_eq!(output.status.code(), Some(0));
     let help = String::from_utf8_lossy(&output.stdout);
     for flag in [
@@ -100,7 +105,7 @@ fn directory(name: &str, files: &[(&str, &str)]) -> PathBuf {
 
 /// Runs `vali` with `args`, with nothing on standard input.
 fn run(args: &[&str]) -> (Option<i32>, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_vali"))
+    let output = command()
         .args(args)
         .env_remove("VALI_LIBRARY_PATH")
         .env("VALI_TEST_VARIABLE", "granted")
@@ -198,7 +203,7 @@ fn the_library_path_variable_is_searched() {
             ),
         ],
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_vali"))
+    let output = command()
         .arg(path(&dir, "main.scm"))
         .env("VALI_LIBRARY_PATH", path(&dir, "lib"))
         .stdin(Stdio::null())
@@ -262,7 +267,7 @@ fn a_program_reads_standard_input() {
             "(import (scheme base) (scheme write)) (write (read-line))",
         )],
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vali"))
+    let mut child = command()
         .arg(path(&dir, "cat.scm"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -466,7 +471,7 @@ fn load_reads_a_file_only_when_reading_is_granted() {
 #[test]
 fn the_repl_takes_the_same_flags() {
     let dir = directory("repl", &[("lib/greet/hello.sld", GREETER)]);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vali"))
+    let mut child = command()
         .args(["-I", &path(&dir, "lib"), "--allow-clock", "repl"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
