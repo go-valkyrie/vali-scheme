@@ -97,7 +97,7 @@ impl<S: Strategy> Cx<S> {
         // SAFETY: passed on to the caller.
         let closure = unsafe { Value::from_raw(*fp.sub(1)) };
         // SAFETY: as above.
-        match unsafe { self.procedure_code(closure) }.map(|c| &c.kind) {
+        match unsafe { self.procedure_code(closure) }.map(|c| c.kind()) {
             Ok(Kind::Bytecode { slots, .. }) => usize::from(*slots),
             _ => 0,
         }

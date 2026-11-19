@@ -2,16 +2,19 @@
 //!
 //! A [`Code`] describes one procedure: its name, its arity, and either its
 //! bytecode or a Rust function. Bytecode descriptors live in a [`Loaded`]
-//! module, shared and immutable once built, outside every heap (ADR 0008
-//! #6); each isolate that loads the module keeps its own [`Instance`], with
-//! its constants and variables. The JIT will add an entry point here that
-//! tier-up replaces.
+//! module, outside every heap (ADR 0008 #6); each isolate that loads the
+//! module keeps its own [`Instance`], with its constants and variables.
+//! A library's functions are converted when first called, and until then
+//! their descriptors are [`Kind::Lazy`] (ADR 0017 #2); that change, and the
+//! entry point the JIT will add, are what a descriptor's interior mutability
+//! is for.
 
+use std::cell::{OnceCell, UnsafeCell};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use vali_bytecode::{Arity, Constant, Export, Function, Module, Variable};
+use vali_bytecode::{Arity, Constant, Converter, Export, Function, Module, Shape, Variable};
 
 use crate::cx::Cx;
 use crate::debug::{DebugFunction, DebugLayout, DebugStr};
@@ -28,11 +31,17 @@ pub type NativeFn<S> = fn(&mut Cx<S>, &[Value]) -> Result<Value, Error>;
 #[repr(C)]
 pub struct Code<S: Strategy> {
     /// What Vali's debugger extensions read (`debug`); it points into
-    /// `name` and into the module that owns this descriptor.
-    pub(crate) debug: DebugFunction,
+    /// `name` and into the module that owns this descriptor. A function not
+    /// converted yet has no frame size and no line table (0 and null) until
+    /// its first call fills them in (`Code::converted`); a debugger sees
+    /// the function as one that has not run.
+    pub(crate) debug: UnsafeCell<DebugFunction>,
     pub(crate) name: Box<str>,
     pub(crate) arity: Arity,
-    pub(crate) kind: Kind<S>,
+    /// What the procedure is; a [`Kind::Lazy`] becomes a
+    /// [`Kind::Bytecode`] on its first call and never changes again.
+    /// Read it with [`Code::kind`].
+    kind: UnsafeCell<Kind<S>>,
     /// Calls so far, for tier-up. Approximate under contention.
     pub(crate) calls: AtomicU32,
     /// The return address of frames that call out of this function's
@@ -52,6 +61,15 @@ pub(crate) enum Kind<S: Strategy> {
         /// Its index in its module, for its positions.
         index: u32,
     },
+    /// A function of a module that converts its functions as they are first
+    /// called, not called yet: calling it converts it, and makes this
+    /// [`Kind::Bytecode`] (ADR 0017 #2).
+    Lazy {
+        /// The module the function belongs to.
+        module: *const Loaded<S>,
+        /// Its index in its module.
+        index: u32,
+    },
     Native(NativeFn<S>),
     /// A Rust function from a native library (ADR 0016), which works with
     /// any strategy.
@@ -67,16 +85,20 @@ pub(crate) enum Kind<S: Strategy> {
 }
 
 // SAFETY: the raw pointers point into the `Loaded` module that owns this
-// descriptor, which is immutable once built and kept alive by every isolate
-// that loaded it.
+// descriptor, which is kept alive by every isolate that loaded it.
 unsafe impl<S: Strategy> Send for Code<S> {}
-// SAFETY: as above; the only mutable field is an atomic.
+// SAFETY: `kind` and `debug` change once, as the function is first called
+// (`Code::converted`), by the one thread that runs the isolate; a module is
+// not shared between isolates yet (ADR 0008 #6), and one that is must keep
+// that change to one thread or make it atomic. The other mutable field is
+// an atomic.
 unsafe impl<S: Strategy> Sync for Code<S> {}
 
 impl<S: Strategy> fmt::Debug for Code<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self.kind {
+        let kind = match self.kind() {
             Kind::Bytecode { .. } => "bytecode",
+            Kind::Lazy { .. } => "lazy",
             Kind::Native(_) => "native",
             Kind::Bridge(_) => "bridge",
             Kind::Catch => "catch",
@@ -101,12 +123,57 @@ impl<S: Strategy> Code<S> {
         let name: Box<str> = name.into();
         Code {
             // The name's bytes stay where they are as the box moves.
-            debug: DebugFunction::native(&Self::DEBUG_LAYOUT, &name),
+            debug: UnsafeCell::new(DebugFunction::native(&Self::DEBUG_LAYOUT, &name)),
             name,
             arity,
-            kind,
+            kind: UnsafeCell::new(kind),
             calls: AtomicU32::new(0),
             stub: crate::trampoline::resume(),
+        }
+    }
+
+    /// What the procedure is now.
+    ///
+    /// The reference must not be kept across anything that may convert this
+    /// function, which a call does: copy out what is needed first.
+    #[inline(always)]
+    pub(crate) fn kind(&self) -> &Kind<S> {
+        // SAFETY: `kind` changes only in `converted`, which no reference
+        // from here outlives (see above).
+        unsafe { &*self.kind.get() }
+    }
+
+    /// Whether the procedure is a Scheme function, converted or not.
+    pub(crate) fn is_scheme(&self) -> bool {
+        matches!(self.kind(), Kind::Bytecode { .. } | Kind::Lazy { .. })
+    }
+
+    /// Makes this a bytecode function, with `function`'s code, which
+    /// `module` owns and keeps where it is: its first call has converted it
+    /// (`Loaded::convert`). Its frame size and line table become what a
+    /// debugger reads.
+    ///
+    /// # Safety
+    ///
+    /// No reference from [`Code::kind`] may be live, and this must be a
+    /// [`Kind::Lazy`] of `module`.
+    pub(crate) unsafe fn converted(
+        &self,
+        module: *const Loaded<S>,
+        index: u32,
+        function: &Function,
+    ) {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            (*self.debug.get()).slots = u32::from(function.slots);
+            (*self.debug.get()).positions = function.positions.as_ptr();
+            (*self.debug.get()).positions_len = function.positions.len();
+            *self.kind.get() = Kind::Bytecode {
+                module,
+                code: function.code.as_ptr(),
+                slots: function.slots,
+                index,
+            };
         }
     }
 
@@ -151,6 +218,10 @@ impl<S: Strategy> Code<S> {
 /// trees, so they would have to move into the shared part then, and only
 /// each isolate's built copy would stay per isolate. Until something
 /// shares one, nothing keeps them.
+///
+/// A module made lazy (`Loaded::new` with a converter) has the code of its
+/// body only: each other function gets its own as it is first called
+/// (`Loaded::convert`).
 pub(crate) struct Loaded<S: Strategy> {
     /// The function that runs the module's body.
     pub(crate) body: u32,
@@ -166,9 +237,12 @@ pub(crate) struct Loaded<S: Strategy> {
     fingerprint: Option<[u8; 32]>,
     /// Its functions as they run: rewritten under precise counting
     /// (`vali_bytecode::ownership`), as given otherwise. Each carries the
-    /// positions and scopes of its own code, which backtraces read.
-    code: Box<[Function]>,
+    /// positions and scopes of its own code, which backtraces read. Empty
+    /// until a lazy module's function is first called; set once.
+    code: Box<[OnceCell<Function>]>,
     pub(crate) functions: Box<[Code<S>]>,
+    /// What converts the functions of a lazy module.
+    lazy: Option<Lazy>,
     /// The module's source names, as the debugger extensions read them;
     /// they point into `sources`. Only debuggers read it, through the
     /// pointers each function's `DebugFunction` holds.
@@ -176,10 +250,33 @@ pub(crate) struct Loaded<S: Strategy> {
     debug_sources: Box<[DebugStr]>,
 }
 
+/// What a lazy module needs to convert a function.
+struct Lazy {
+    converter: Converter,
+    /// The functions with no code, but their arity and free variables, for
+    /// checking the code of each as it is converted.
+    functions: Box<[Function]>,
+    /// How many constants the module has, which its code may name.
+    constants: usize,
+}
+
+// SAFETY: the cells of `code` are filled by the one thread that runs the
+// isolate (see `Code`'s `Sync`), and read only after; the rest is immutable.
+unsafe impl<S: Strategy> Sync for Loaded<S> {}
+
 impl<S: Strategy> Loaded<S> {
     /// Function `index` as it runs: rewritten under precise counting.
+    /// `None` if there is none, or it is a lazy module's and has not been
+    /// called.
     pub(crate) fn function(&self, index: usize) -> Option<&Function> {
-        self.code.get(index)
+        self.code.get(index)?.get()
+    }
+
+    /// How many functions of the module have been converted: all of an
+    /// eager module's, and a lazy module's that have been called, and its
+    /// body.
+    pub(crate) fn converted(&self) -> usize {
+        self.code.iter().filter(|c| c.get().is_some()).count()
     }
 
     /// The index of the variable the module exports as `name`.
@@ -195,16 +292,70 @@ impl<S: Strategy> Loaded<S> {
         self.fingerprint == Some(module.fingerprint())
     }
 
-    /// Builds the descriptors for `module`, which must be valid, placing
-    /// ownership operations in its code under precise counting. Returns them
-    /// with the module's constants, which only the caller needs, to build.
-    /// Only a `library` is given a digest.
+    /// Converts function `index`, which `Kind::Lazy` says has not been, to
+    /// bytecode, and makes its descriptor a bytecode function's. Under
+    /// precise counting it places the ownership operations in the code, as
+    /// loading an eager module does. Returns the bytes of Rust memory the
+    /// code takes, for the caller to charge to the heap.
+    ///
+    /// # Safety
+    ///
+    /// No reference from `Code::kind` of this function may be live.
+    pub(crate) unsafe fn convert(&self, index: usize) -> Result<usize, String> {
+        let lazy = self
+            .lazy
+            .as_ref()
+            .ok_or("a function of an eager module is not converted")?;
+        let shape = Shape {
+            constants: lazy.constants,
+            variables: &self.variables,
+            functions: &lazy.functions,
+            sources: self.sources.len(),
+        };
+        let given = lazy
+            .converter
+            .convert(&shape, index as u32)
+            .map_err(|e| e.to_string())?;
+        let function = if S::PRECISE {
+            let rewritten = vali_bytecode::ownership::insert_one(&given)
+                .map_err(|e| format!("placing ownership operations: {e}"))?;
+            // The code that runs is validated too, not only the code given.
+            vali_bytecode::check_rewritten(&shape, index as u32, &given, &rewritten)
+                .map_err(|e| format!("after placing ownership operations: {e}"))?;
+            rewritten
+        } else {
+            given
+        };
+        let bytes = 4 * function.code.len() + std::mem::size_of_val(&*function.positions) + 128;
+        let cell = &self.code[index];
+        if cell.set(function).is_err() {
+            return Err("the function is converted already".into());
+        }
+        let function = cell.get().expect("just set");
+        // SAFETY: passed on to the caller; the code stays where it is in
+        // the cell, which lives as long as this module.
+        unsafe { self.functions[index].converted(self, index as u32, function) };
+        Ok(bytes)
+    }
+
+    /// Builds the descriptors for `module`, which must be valid (for a lazy
+    /// one, as far as `validate_lazy` checks it), placing ownership
+    /// operations in its code under precise counting. A module with a
+    /// `converter` has its functions but the body converted as they are
+    /// first called. Returns the descriptors with the module's constants,
+    /// which only the caller needs, to build. Only a `library` is given a
+    /// digest.
     pub(crate) fn new(
         module: Module,
+        converter: Option<Converter>,
         transient: bool,
         library: bool,
     ) -> Result<(Arc<Loaded<S>>, Vec<Constant>), String> {
-        let owned: Option<Vec<Function>> = if S::PRECISE {
+        let lazy = converter.is_some();
+        let body = module.body as usize;
+        // Under precise counting the code that runs is rewritten: all of an
+        // eager module's, the body of a lazy one.
+        let owned: Option<Vec<Function>> = if S::PRECISE && !lazy {
             let functions = vali_bytecode::ownership::insert(&module)
                 .map_err(|e| format!("placing ownership operations: {e}"))?;
             // The code that runs is validated too, not only the code given.
@@ -225,19 +376,52 @@ impl<S: Strategy> Loaded<S> {
             })
             .collect();
         let fingerprint = library.then(|| module.fingerprint());
+        let constants_len = module.constants.len();
         let Module {
             constants,
             variables,
             exports,
-            functions,
+            mut functions,
             sources,
-            body,
             ..
         } = module;
-        // Under precise counting the given functions go here, their code,
-        // positions, scopes and inlined copies with them: the rewritten ones
-        // carry their own.
-        let code: Box<[Function]> = owned.unwrap_or(functions).into();
+        let mut cells: Vec<OnceCell<Function>> = Vec::new();
+        let lazy = match converter {
+            Some(converter) => {
+                let stub = header(&functions[body]);
+                let given = std::mem::replace(&mut functions[body], stub);
+                let ready = if S::PRECISE {
+                    let rewritten = vali_bytecode::ownership::insert_one(&given)
+                        .map_err(|e| format!("placing ownership operations: {e}"))?;
+                    let shape = Shape {
+                        constants: constants_len,
+                        variables: &variables,
+                        functions: &functions,
+                        sources: sources.len(),
+                    };
+                    vali_bytecode::check_rewritten(&shape, body as u32, &given, &rewritten)
+                        .map_err(|e| format!("after placing ownership operations: {e}"))?;
+                    rewritten
+                } else {
+                    given
+                };
+                cells.resize_with(functions.len(), OnceCell::new);
+                let _ = cells[body].set(ready);
+                Some(Lazy {
+                    converter,
+                    functions: functions.into(),
+                    constants: constants_len,
+                })
+            }
+            None => {
+                // Under precise counting the given functions go here, their
+                // code, positions, scopes and inlined copies with them: the
+                // rewritten ones carry their own.
+                cells.extend(owned.unwrap_or(functions).into_iter().map(OnceCell::from));
+                None
+            }
+        };
+        let code: Box<[OnceCell<Function>]> = cells.into();
         // Named marker stubs only with native frames: without them, every
         // frame returns to the shared stub, and nothing is registered with
         // debuggers (ADR 0004 #6). A module freed once nothing refers to it
@@ -256,41 +440,66 @@ impl<S: Strategy> Loaded<S> {
                 .iter()
                 .zip(names)
                 .enumerate()
-                .map(|(i, (f, name))| Code {
+                .map(|(i, (cell, name))| {
                     // The name, code, positions and sources stay where they
                     // are as their owners move into the `Loaded`.
-                    debug: DebugFunction {
+                    let mut debug = DebugFunction {
                         version: crate::debug::DEBUG_VERSION,
-                        slots: u32::from(f.slots),
+                        slots: 0,
                         layout: Self::debug_layout(),
                         name: DebugStr::of(&name),
-                        positions: f.positions.as_ptr(),
-                        positions_len: f.positions.len(),
+                        positions: std::ptr::null(),
+                        positions_len: 0,
                         sources: debug_sources.as_ptr(),
                         sources_len: debug_sources.len(),
-                    },
-                    name,
-                    arity: f.arity,
-                    kind: Kind::Bytecode {
-                        module: this,
-                        code: f.code.as_ptr(),
-                        slots: f.slots,
-                        index: i as u32,
-                    },
-                    calls: AtomicU32::new(0),
-                    stub: stubs
-                        .as_ref()
-                        .map_or_else(crate::trampoline::resume, |s| s.resume(i)),
+                    };
+                    let (arity, kind) = match cell.get() {
+                        Some(f) => {
+                            debug.slots = u32::from(f.slots);
+                            debug.positions = f.positions.as_ptr();
+                            debug.positions_len = f.positions.len();
+                            (
+                                f.arity,
+                                Kind::Bytecode {
+                                    module: this,
+                                    code: f.code.as_ptr(),
+                                    slots: f.slots,
+                                    index: i as u32,
+                                },
+                            )
+                        }
+                        None => {
+                            let lazy = lazy.as_ref().expect("only a lazy module has gaps");
+                            (
+                                lazy.functions[i].arity,
+                                Kind::Lazy {
+                                    module: this,
+                                    index: i as u32,
+                                },
+                            )
+                        }
+                    };
+                    Code {
+                        debug: UnsafeCell::new(debug),
+                        name,
+                        arity,
+                        kind: UnsafeCell::new(kind),
+                        calls: AtomicU32::new(0),
+                        stub: stubs
+                            .as_ref()
+                            .map_or_else(crate::trampoline::resume, |s| s.resume(i)),
+                    }
                 })
                 .collect();
             Loaded {
-                body,
+                body: body as u32,
                 variables: variables.into(),
                 exports: exports.into(),
                 sources,
                 fingerprint,
                 code,
                 functions,
+                lazy,
                 debug_sources,
             }
         });
@@ -300,6 +509,20 @@ impl<S: Strategy> Loaded<S> {
     /// The strategy's layout, for the debugger extensions.
     fn debug_layout() -> &'static DebugLayout {
         &Code::<S>::DEBUG_LAYOUT
+    }
+}
+
+/// `function` with no code: what checking the others needs of it.
+fn header(function: &Function) -> Function {
+    Function {
+        name: None,
+        arity: function.arity,
+        slots: 0,
+        free: function.free,
+        code: Vec::new(),
+        positions: Vec::new(),
+        inlined: Vec::new(),
+        scopes: Vec::new(),
     }
 }
 

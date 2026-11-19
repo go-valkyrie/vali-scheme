@@ -18,8 +18,8 @@ use std::cell::UnsafeCell;
 use vali_abi::{Header, Tag, TypeCode, data};
 
 use vali_bytecode::{
-    Arity, Constant, Link as VariableLink, Module, Opcode, field_d, field_e_signed, fields,
-    validate,
+    Arity, Constant, Converted, Converter, LazyModule, Link as VariableLink, Module, Opcode,
+    field_d, field_e_signed, fields, validate, validate_lazy,
 };
 
 use crate::code::{Cell, Code, Instance, Kind, Loaded, ModuleId, NativeFn};
@@ -249,12 +249,30 @@ pub(crate) fn constant_number(constant: &Constant) -> Option<vali_num::Number> {
     }
 }
 
+/// The error of calling the Scheme function `code` with `argc` arguments it
+/// does not take.
+fn arity_error<S: Strategy>(code: &Code<S>, argc: usize) -> Error {
+    let arity = code.arity;
+    Error::scheme(format!(
+        "{}: wrong number of arguments: expected {}{}{}, got {argc}",
+        code.name,
+        arity.required,
+        if arity.optional > 0 {
+            format!(" to {}", arity.required + arity.optional)
+        } else {
+            String::new()
+        },
+        if arity.rest { " or more" } else { "" },
+    ))
+}
+
 /// An error if `code` is `%catch`, `%call/cc` or `%continue` and does
 /// not take `argc` arguments. Function entry checks every other kind; these
 /// read their arguments straight from the call window, so a call with too
 /// few would read past it.
 fn control_arity<S: Strategy>(code: &Code<S>, argc: usize) -> Result<(), Error> {
-    if matches!(code.kind, Kind::Catch | Kind::Capture | Kind::Resume) && !code.arity.accepts(argc)
+    if matches!(*code.kind(), Kind::Catch | Kind::Capture | Kind::Resume)
+        && !code.arity.accepts(argc)
     {
         return Err(Error::scheme(format!(
             "{}: wrong number of arguments: got {argc}",
@@ -272,7 +290,7 @@ fn frames_of<S: Strategy>(code: &Code<S>, pc: usize) -> Vec<crate::handle::Frame
         name: name.to_owned(),
         position,
     };
-    let Kind::Bytecode { module, index, .. } = code.kind else {
+    let Kind::Bytecode { module, index, .. } = *code.kind() else {
         return vec![frame(code.name(), None)];
     };
     // SAFETY: a function's descriptor points to the module that owns it,
@@ -390,7 +408,7 @@ impl<S: Strategy> Cx<S> {
     /// exports it; a global one shares the global's cell, which a host
     /// defines, before or after.
     pub fn load(&mut self, module: Module) -> Result<ModuleId, Error> {
-        self.load_module(module, false, false).map(ModuleId)
+        self.load_module(module, None, false, false).map(ModuleId)
     }
 
     /// As [`load`](Cx::load), for a module that is a library, which
@@ -398,7 +416,48 @@ impl<S: Strategy> Cx<S> {
     /// takes a digest of the module, which costs about a quarter of loading
     /// it.
     pub fn load_library(&mut self, module: Module) -> Result<ModuleId, Error> {
-        self.load_module(module, false, true).map(ModuleId)
+        self.load_module(module, None, false, true).map(ModuleId)
+    }
+
+    /// As [`load_library`](Cx::load_library), for a module that converts
+    /// its functions as they are first called (ADR 0017 #2): only its body
+    /// is converted and validated now. A function's first call converts,
+    /// checks and, under precise counting, rewrites it, then runs it; the
+    /// error of one that cannot be converted, which only a converter bug
+    /// causes, is raised there, naming the function. A debugger sees a
+    /// function not called yet with no frame size and no line table.
+    pub fn load_lazy(&mut self, lazy: LazyModule) -> Result<ModuleId, Error> {
+        let LazyModule { module, converter } = lazy;
+        self.load_module(module, Some(converter), false, true)
+            .map(ModuleId)
+    }
+
+    /// [`load_library`](Cx::load_library) or [`load_lazy`](Cx::load_lazy),
+    /// whichever `library` is.
+    pub fn load_converted(&mut self, library: Converted) -> Result<ModuleId, Error> {
+        match library {
+            Converted::Eager(module) => self.load_library(module),
+            Converted::Lazy(lazy) => self.load_lazy(lazy),
+        }
+    }
+
+    /// The frame size and line table length a debugger would read for the
+    /// Scheme procedure `procedure` (`DebugFunction`): both 0 until a lazy
+    /// module's function is first called. For tests.
+    #[doc(hidden)]
+    pub fn debug_function(&self, procedure: &Handle) -> Option<(u32, usize)> {
+        let value = self.get(procedure).ok()?;
+        // SAFETY: a valid value.
+        let code = unsafe { self.procedure_code(value) }.ok()?;
+        // SAFETY: `debug` changes only as the function converts.
+        let debug = unsafe { &*code.debug.get() };
+        Some((debug.slots, debug.positions_len))
+    }
+
+    /// How many of the functions of the module `id` have been converted: all
+    /// of an eager module's, and a lazy module's body and those called.
+    pub fn converted_functions(&self, id: ModuleId) -> usize {
+        self.instances[id.0].loaded.converted()
     }
 
     /// Loads `module`, which is freed once nothing refers to it, and
@@ -456,7 +515,7 @@ impl<S: Strategy> Cx<S> {
                 .iter()
                 .map(|f| 4 * f.code.len() + 64)
                 .sum::<usize>();
-        let id = self.load_module(module, true, false)?;
+        let id = self.load_module(module, None, true, false)?;
         S::charge(self.heap_mut(), rust_bytes);
         let instance = &self.instances[id];
         let body = &instance.loaded.functions[instance.loaded.body as usize] as *const Code<S>;
@@ -471,19 +530,25 @@ impl<S: Strategy> Cx<S> {
     fn load_module(
         &mut self,
         module: Module,
+        converter: Option<Converter>,
         transient: bool,
         library: bool,
     ) -> Result<usize, Error> {
         // Nothing runs code of a retired instance here: it was running
         // frames or holding closures only until it was freed.
         self.instances.empty_graveyard();
-        validate(&module)
-            .map_err(|e| Error::scheme(format!("invalid bytecode in {}: {e}", module.name)))?;
+        // A lazy module's other functions are checked as they are converted.
+        let valid = if converter.is_some() {
+            validate_lazy(&module)
+        } else {
+            validate(&module)
+        };
+        valid.map_err(|e| Error::scheme(format!("invalid bytecode in {}: {e}", module.name)))?;
         // Modules link to the primitives as they load, so the first load
         // installs them.
         self.install_primitives()?;
         let name = module.name.clone();
-        let (loaded, trees) = Loaded::<S>::new(module, transient, library)
+        let (loaded, trees) = Loaded::<S>::new(module, converter, transient, library)
             .map_err(|e| Error::scheme(format!("invalid bytecode in {name}: {e}")))?;
         let mut constants = Vec::with_capacity(trees.len());
         for constant in &trees {
@@ -1119,7 +1184,7 @@ impl<S: Strategy> Cx<S> {
     /// `fp` must be a bytecode function's frame.
     unsafe fn suspended_slots(&self, fp: *mut u64) -> usize {
         // SAFETY: passed on to the caller: slot 0 holds the frame's closure.
-        match unsafe { self.procedure_code(slot(fp, 0)) }.map(|c| &c.kind) {
+        match unsafe { self.procedure_code(slot(fp, 0)) }.map(|c| c.kind()) {
             Ok(Kind::Bytecode { slots, .. }) => usize::from(*slots),
             _ => 0,
         }
@@ -1430,7 +1495,7 @@ impl<S: Strategy> Cx<S> {
         // SAFETY: a valid value.
         let ok = argc == 1
             && matches!(unsafe { self.procedure_code(receiver) }, Ok(code)
-                if matches!(code.kind, Kind::Bytecode { .. })
+                if code.is_scheme()
                     && code.arity.accepts(1)
                     && code.arity.required + code.arity.optional >= 1);
         if ok {
@@ -1604,7 +1669,7 @@ impl<S: Strategy> Cx<S> {
         // tag is checked before the closure is read.
         let code = unsafe { self.procedure_code(slot(fp, 0)) }
             .unwrap_or_else(|_| panic!("corrupt frame at {at}: slot 0 holds no closure"));
-        let Kind::Bytecode { slots, .. } = code.kind else {
+        let Kind::Bytecode { slots, .. } = *code.kind() else {
             // A tail call to a Rust procedure leaves it in slot 0 for the
             // return that follows.
             return;
@@ -1632,22 +1697,12 @@ impl<S: Strategy> Cx<S> {
     /// `fp` must point to a frame whose slots 0 to `argc` hold the closure
     /// and arguments.
     unsafe fn enter(&mut self, code: &Code<S>, fp: *mut u64, argc: usize) -> Result<(), Error> {
-        let Kind::Bytecode { slots, .. } = code.kind else {
+        let Kind::Bytecode { slots, .. } = *code.kind() else {
             unreachable!("only bytecode functions are entered");
         };
         let arity = code.arity;
         if !arity.accepts(argc) {
-            return Err(Error::scheme(format!(
-                "{}: wrong number of arguments: expected {}{}{}, got {argc}",
-                code.name,
-                arity.required,
-                if arity.optional > 0 {
-                    format!(" to {}", arity.required + arity.optional)
-                } else {
-                    String::new()
-                },
-                if arity.rest { " or more" } else { "" },
-            )));
+            return Err(arity_error(code, argc));
         }
         let slots = usize::from(slots);
         // The frame, and its header, may go where the stack has not been
@@ -1689,6 +1744,31 @@ impl<S: Strategy> Cx<S> {
             return Err(Error::OutOfFuel);
         }
         Ok(())
+    }
+
+    /// Converts `code` to bytecode if it is a function of a lazy module that
+    /// has not been called (`Kind::Lazy`), charging the heap for what the
+    /// code takes; for any other it does nothing. Called with the procedure
+    /// it is about to call, so nothing refers to its `kind`.
+    #[cold]
+    #[inline(never)]
+    fn convert_lazy(&mut self, code: &Code<S>) -> Result<(), Error> {
+        let Kind::Lazy { module, index } = *code.kind() else {
+            return Ok(());
+        };
+        // SAFETY: a function's descriptor points to the module that owns it,
+        // which outlives it; the one reference to `kind` was copied from.
+        let converted = unsafe { (*module).convert(index as usize) };
+        match converted {
+            Ok(bytes) => {
+                S::charge(self.heap_mut(), bytes);
+                Ok(())
+            }
+            Err(e) => Err(Error::scheme(format!(
+                "{}: cannot convert to bytecode: {e}",
+                code.name
+            ))),
+        }
     }
 
     /// Records where the interpreter is, for a debugger's extensions to read
@@ -1747,7 +1827,7 @@ impl<S: Strategy> Cx<S> {
         // left by a procedure that failed would hold values the next
         // collection may free, for the next Rust procedure to call.
         self.task.tail_call = None;
-        let result = match &code.kind {
+        let result = match code.kind() {
             // A primitive works on raw heap words, so a panic in one may
             // leave an object half-updated for Scheme code to reach. It
             // poisons the isolate instead of becoming a condition, unlike a
@@ -1888,7 +1968,7 @@ impl<S: Strategy> Cx<S> {
                         module,
                         code: words,
                         ..
-                    } = $callee.kind
+                    } = *$callee.kind()
                     else {
                         unreachable!("only bytecode functions are switched to");
                     };
@@ -1978,7 +2058,7 @@ impl<S: Strategy> Cx<S> {
                         pc = position_resume(position) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
                         if S::PRECISE
-                            && let Kind::Bytecode { slots, .. } = caller.kind
+                            && let Kind::Bytecode { slots, .. } = *caller.kind()
                         {
                             frame_slots = usize::from(slots).max(base + 4);
                         }
@@ -2002,7 +2082,8 @@ impl<S: Strategy> Cx<S> {
                         let code = self
                             .procedure_code(hook)
                             .expect("the raise procedure is a procedure");
-                        let Kind::Bytecode { slots, .. } = code.kind else {
+                        self.convert_lazy(code)?;
+                        let Kind::Bytecode { slots, .. } = *code.kind() else {
                             unreachable!("the raise procedure is a Scheme procedure");
                         };
                         let base = if S::PRECISE {
@@ -2132,7 +2213,7 @@ impl<S: Strategy> Cx<S> {
                             attempt!(control_arity(callee, argc));
                             callee
                         };
-                        match callee.kind {
+                        match *callee.kind() {
                             Kind::Catch => {
                                 // `(%catch thunk handler)`: note where to
                                 // call the handler, then call the thunk,
@@ -2254,6 +2335,22 @@ impl<S: Strategy> Cx<S> {
                                 self.store(fp, base + 3, result);
                                 pc = (resume & !CATCH) as usize;
                             }
+                            Kind::Lazy { .. } => {
+                                // Not converted yet: do that, and call it
+                                // again, now bytecode.
+                                if !callee.arity.accepts(argc) {
+                                    fail!(arity_error(callee, argc));
+                                }
+                                self.debug_at(fp, pc);
+                                attempt!(self.convert_lazy(callee));
+                                next = Next::Call {
+                                    direct,
+                                    base,
+                                    argc,
+                                    resume,
+                                };
+                                continue;
+                            }
                             Kind::Bytecode { slots, .. } => {
                                 let needed = usize::from(slots).max(argc + 1);
                                 let mut callee_fp = fp.sub(base + 3);
@@ -2338,7 +2435,7 @@ impl<S: Strategy> Cx<S> {
                             attempt!(control_arity(callee, argc));
                             callee
                         };
-                        match callee.kind {
+                        match *callee.kind() {
                             Kind::Catch => {
                                 // As a tail call, the handler takes this
                                 // frame's place in its caller, and the thunk
@@ -2459,6 +2556,17 @@ impl<S: Strategy> Cx<S> {
                                     S::retain(self.heap_mut(), result);
                                 }
                                 next = Next::Return(result);
+                                continue;
+                            }
+                            Kind::Lazy { .. } => {
+                                // Not converted yet: do that, and call it
+                                // again, now bytecode.
+                                if !callee.arity.accepts(argc) {
+                                    fail!(arity_error(callee, argc));
+                                }
+                                self.debug_at(fp, pc);
+                                attempt!(self.convert_lazy(callee));
+                                next = Next::TailCall { argc, direct };
                                 continue;
                             }
                             Kind::Bytecode { slots, .. } => {
@@ -2600,7 +2708,7 @@ impl<S: Strategy> Cx<S> {
                         pc = position_resume(position) as usize;
                         let caller = attempt!(self.procedure_code(slot(fp, 0)));
                         if S::PRECISE
-                            && let Kind::Bytecode { slots, .. } = caller.kind
+                            && let Kind::Bytecode { slots, .. } = *caller.kind()
                         {
                             frame_slots = usize::from(slots);
                         }
@@ -2700,7 +2808,7 @@ impl<S: Strategy> Cx<S> {
                             if value == Value::UNBOUND {
                                 let closure = slot(fp, 0);
                                 let Kind::Bytecode { module, .. } =
-                                    attempt!(self.procedure_code(closure)).kind
+                                    *attempt!(self.procedure_code(closure)).kind()
                                 else {
                                     unreachable!()
                                 };
@@ -2734,7 +2842,7 @@ impl<S: Strategy> Cx<S> {
                                 })
                                 .collect();
                             let current = attempt!(self.procedure_code(slot(fp, 0)));
-                            let Kind::Bytecode { module, .. } = current.kind else {
+                            let Kind::Bytecode { module, .. } = *current.kind() else {
                                 unreachable!()
                             };
                             let loaded: &Loaded<S> = &*module;
@@ -3060,8 +3168,9 @@ impl<S: Strategy> Cx<S> {
                             // another module's closures are not this code's
                             // to change.
                             let own = matches!(
-                                self.procedure_code(closure).map(|c| &c.kind),
-                                Ok(Kind::Bytecode { module, .. }) if *module as usize == current_module
+                                self.procedure_code(closure).map(|c| c.kind()),
+                                Ok(Kind::Bytecode { module, .. } | Kind::Lazy { module, .. })
+                                    if *module as usize == current_module
                             );
                             if !own {
                                 fail!(Error::scheme(
