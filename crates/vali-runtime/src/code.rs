@@ -163,7 +163,7 @@ pub(crate) struct Loaded<S: Strategy> {
     /// The module's digest (`Module::fingerprint`), for a library, which is
     /// what `Cx::is_loaded_from` compares: nothing asks about a program's
     /// body or an evaluated module, so they take none.
-    fingerprint: Option<u128>,
+    fingerprint: Option<[u8; 32]>,
     /// Its functions as they run: rewritten under precise counting
     /// (`vali_bytecode::ownership`), as given otherwise. Each carries the
     /// positions and scopes of its own code, which backtraces read.

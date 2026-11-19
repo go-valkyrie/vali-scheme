@@ -170,6 +170,7 @@ pub fn module(random: &mut impl Random) -> Module {
         functions,
         sources: Vec::new(),
         body: 0,
+        digest: None,
     }
 }
 

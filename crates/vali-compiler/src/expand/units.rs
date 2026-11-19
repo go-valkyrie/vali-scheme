@@ -564,7 +564,11 @@ impl Expander {
                 "it links {name}, which only Vali's own libraries may"
             )));
         }
-        let module = converted(&ir)?;
+        let mut module = converted(&ir)?;
+        // The digest that tells this build from another is the IR's
+        // encoding's, as `library` computes it for a library made from
+        // source.
+        module.digest = Some(Digest::of(section("invoke")?).0);
         // The unit goes in first: what it exports names it.
         let index = self.units.len();
         self.units.push(Unit {

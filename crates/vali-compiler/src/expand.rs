@@ -587,7 +587,7 @@ impl Expander {
         let unit = self.units.len() - 1;
         self.units[unit].source = source;
         if !round_trip() {
-            return Ok(module);
+            return self.digested(unit, module);
         }
         // Written, dropped and loaded again, so what follows runs on what
         // the artifact holds.
@@ -595,6 +595,24 @@ impl Expander {
         self.units.pop();
         let module = self.load_library(identity, &bytes, own, source)?;
         self.units[unit].round_tripped = true;
+        Ok(module)
+    }
+
+    /// `module`, the code of library `unit`, with the digest that tells it
+    /// from another build: that of its IR's encoding, which is what its
+    /// artifact holds, so a library loaded from one has the same.
+    fn digested(&mut self, unit: usize, mut module: Module) -> Result<Module> {
+        let Some(ir) = self.units[unit].ir.clone() else {
+            return Ok(module);
+        };
+        let identity = &self.units[unit].identity;
+        let bytes = vali_dist::encode(&ir).map_err(|e| CompileError {
+            message: format!("{identity}: {e}"),
+            span: None,
+            location: None,
+        })?;
+        module.digest = Some(vali_dist::Digest::of(&bytes).0);
+        self.units[unit].module = Some(module.clone());
         Ok(module)
     }
 
