@@ -146,6 +146,13 @@ primitives! {
     SetCdr = "set-cdr!", 2, MUTATE;
     IsNull = "null?", 1, Effects::PURE;
     IsPair = "pair?", 1, Effects::PURE;
+    // Immutable pairs (SRFI 116) have no writes, so reading one is not a
+    // `READ`: no write can change what an `icar` returns, so a pass may
+    // move or merge them.
+    Ipair = "ipair", 2, Effects::ALLOC;
+    Icar = "icar", 1, RAISE;
+    Icdr = "icdr", 1, RAISE;
+    IsIpair = "ipair?", 1, Effects::PURE;
     MakeVector = "make-vector", 2, NUMERIC;
     VectorRef = "vector-ref", 2, ACCESS;
     VectorSet = "vector-set!", 3, MUTATE;

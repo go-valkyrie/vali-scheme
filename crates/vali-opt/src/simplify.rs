@@ -98,6 +98,8 @@ fn fold(value: &Value, pool: &mut Pool<'_>) -> Option<Operand> {
         Primitive::Not => Constant::Boolean(matches!(constant(pool, 0)?, Constant::Boolean(false))),
         Primitive::IsNull => Constant::Boolean(matches!(constant(pool, 0)?, Constant::EmptyList)),
         Primitive::IsPair => Constant::Boolean(matches!(constant(pool, 0)?, Constant::Pair(..))),
+        // No constant is an immutable pair: the format has no such constant.
+        Primitive::IsIpair => Constant::Boolean(constant(pool, 0).map(|_| false)?),
         // `car`, `cdr` and `vector-ref` of a constant are not folded: a
         // quoted pair or vector can be mutated (`set-car!`, `vector-set!`),
         // so its contents at compile time need not be its contents when the

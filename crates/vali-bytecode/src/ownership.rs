@@ -174,8 +174,11 @@ fn effect(instruction: &Instruction) -> Effect {
         | I::Not { dst, src }
         | I::IsNull { dst, src }
         | I::IsPair { dst, src }
+        | I::IsIpair { dst, src }
         | I::Car { dst, pair: src }
         | I::Cdr { dst, pair: src }
+        | I::Icar { dst, pair: src }
+        | I::Icdr { dst, pair: src }
         | I::VectorLength { dst, vector: src }
         | I::AddImm { dst, a: src, .. }
         | I::SubImm { dst, a: src, .. } => reads(&[src], Some(dst)),
@@ -218,6 +221,11 @@ fn effect(instruction: &Instruction) -> Effect {
         | I::NumEq { dst, a, b }
         | I::Eq { dst, a, b }
         | I::Cons {
+            dst,
+            car: a,
+            cdr: b,
+        }
+        | I::Ipair {
             dst,
             car: a,
             cdr: b,
@@ -442,6 +450,7 @@ fn immediate(instruction: &Instruction) -> bool {
             | I::Not { .. }
             | I::IsNull { .. }
             | I::IsPair { .. }
+            | I::IsIpair { .. }
             | I::VectorLength { .. }
     )
 }

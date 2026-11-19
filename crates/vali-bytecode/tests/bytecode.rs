@@ -124,6 +124,14 @@ fn examples() -> Vec<I> {
         I::SetCdr { pair: 1, value: 2 },
         I::IsNull { dst: 1, src: 2 },
         I::IsPair { dst: 1, src: 2 },
+        I::Ipair {
+            dst: 1,
+            car: 2,
+            cdr: 3,
+        },
+        I::Icar { dst: 1, pair: 2 },
+        I::Icdr { dst: 1, pair: 2 },
+        I::IsIpair { dst: 1, src: 2 },
         I::MakeVector {
             dst: 1,
             len: 2,
