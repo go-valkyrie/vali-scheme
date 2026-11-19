@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": true,
+      "key": {
+        "uuid": "725832ec_cc0f0fb0",
+        "filename": "fuzz/fuzz_targets/ir.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 30,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:46:55Z",
+      "side": 1,
+      "message": "Still applies in patch set 2, and correctly so for now: 1260816 hasn\u0027t merged, so `validate` has no size limits on main yet. I\u0027ll leave this open as the reminder. Whichever of the two lands second should switch this to `validate_structure`.",
+      "parentUuid": "268b45f8_2124a9ba",
+      "revId": "3391e39e091e7dc35ab4138ffa279acdfaf19d84",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": false,
       "key": {
         "uuid": "0e6e63ea_0b757e35",
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T17:14:28Z",
       "side": 1,
       "message": "With `NoSource`, every library here is one of Vali\u0027s own, so the mutated artifact loads with `own` set. That\u0027s the trusted path: it skips the `%`-primitive and native-link checks on the code and its transformers (`links_internal`, and the `Binding::Primitive` rule in `check_export`). Those checks are exactly what an untrusted artifact meets, since `own` comes from the loader and an artifact can\u0027t claim it. Mutated transformer code can also reach internal primitives that no user artifact could link.\n\nA second mode would cover the untrusted path: compile a small user library from a `Map`-style loader once, at startup, with `write: true`, and mutate its artifact\u0027s sections the same way. It could be picked by a bit of the input, so one corpus covers both.",
+      "revId": "3391e39e091e7dc35ab4138ffa279acdfaf19d84",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "418e2edd_304831c9",
+        "filename": "fuzz/fuzz_targets/library.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 44,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:46:55Z",
+      "side": 1,
+      "message": "Done in patch set 2: the top bit of the first byte picks a small user library, served by `UserLoader` as a host\u0027s would be and so not Vali\u0027s own, which meets the checks a trusted artifact skips. One corpus covers both modes, and the seeds example writes both.",
+      "parentUuid": "0e6e63ea_0b757e35",
       "revId": "3391e39e091e7dc35ab4138ffa279acdfaf19d84",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
