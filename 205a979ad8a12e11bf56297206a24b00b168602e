@@ -1,0 +1,72 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "a56d2ef3_3e56d6a2",
+        "filename": "crates/vali-test/src/lib.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 462,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:51:54Z",
+      "side": 1,
+      "message": "When a name has a part that isn\u0027t a plain symbol, `parts` is `None` and `unwrap_or_default()` extends the path with nothing, so `set_extension` turns `.../lib` into `.../lib.sld`. Every such name, `(srfi 1)` for one, would then be served `lib.sld` if that file ever existed. Nothing is there today, but returning `None` for a rejected name says what\u0027s meant:\n\n    let Some(parts) \u003d parts else { return Ok(None) };\n\n(or whatever this branch\u0027s early return looks like).",
+      "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "52e5c731_4f6140e0",
+        "filename": "tests/conformance/r7rs/known-failures.scm",
+        "patchSetId": 1
+      },
+      "lineNbr": 13,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:51:54Z",
+      "side": 1,
+      "message": "Coordination: 1260761 (exact zero imaginary part reads as real) fixes this entry, and 1260760 (write symbols that read as numbers between bars) fixes the six `|+i|` … `|+NaN.0|` entries from line 48 on. All three changes start from d763607. Whichever of them lands after this one turns its entries into XPASS failures, so that change needs to delete them as it lands, or this one rebased onto them.\n\nSeparately, the issues behind several entries exist now (#47 to #52 in the new tracker). Putting the number in the reason would point whoever fixes one at the entry to delete.",
+      "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "09280cc4_dbf0d0f7",
+        "filename": "tests/conformance/r7rs/lib/chibi/test.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 105,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:51:54Z",
+      "side": 1,
+      "message": "The verdict only exists if the run reaches the outermost `test-end`. If it ends without getting there, the program finishes with status 0 and the test passes, with every failure it recorded unreported. That happens if an upstream update adds a `test-begin` without its `test-end`, or a `skipped-lines.txt` entry blanks one.\n\nA cheap guard: have `conformance.rs` require the summary line in the output, or have the shim exit non-zero unless it was printed (for instance `(exit 2)` as the file\u0027s last form, which a correct run never reaches because `test-end` exits first). Requiring a minimum number of passed cases would also catch a suite that silently shrank.",
+      "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "fd7502aa_54a5bec2",
+        "filename": "tests/conformance/r7rs/lib/scheme/r5rs.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 14,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T13:51:54Z",
+      "side": 1,
+      "message": "The null environment lacks the auxiliary syntax its forms need: `else` and `\u003d\u003e` for `cond` and `case`, `unquote` and `unquote-splicing` for `quasiquote`, and `...` and `_` for `syntax-rules`. In `(eval \u0027(cond (else 1)) (null-environment 5))`, `cond` matches `else` against `(scheme base)`\u0027s binding, and the evaluated code\u0027s `else` is unbound there, so the clause isn\u0027t recognised. The suite may not reach it, but a shim that claims to be `(scheme r5rs)` should include them.",
+      "revId": "205a979ad8a12e11bf56297206a24b00b168602e",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
