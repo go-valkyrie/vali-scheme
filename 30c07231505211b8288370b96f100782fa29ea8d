@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "c94bda03_7805cdde",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 2
+      },
+      "lineNbr": 1075,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:38:15Z",
+      "side": 1,
+      "message": "This rule refuses a user library that uses `define-record-type`. The macro from `(scheme base)` expands to calls of `%make-record-type`, `%make-record`, `%record?`, `%record-ref` and the rest (`lib/scheme/base.sld:183-201`). Those calls land in the user library\u0027s own IR as `Primitive` links, so loading its artifact fails:\n\n```\nlib:(test probe): it links %make-record-type, which only Vali\u0027s own libraries may\nlib:(test probe): the transformer probe-m links %make-record-type, which only Vali\u0027s own libraries may\n```\n\n- **First message:** `(define-record-type point (make-point x) point? (x point-x))` at phase 0. Main fails the same way, so this half predates the change.\n- **Second message:** a `syntax-case`-style transformer that defines a record type in its body. Main loads it; the new transformer check refuses it.\n- `guard` and `parameterize` load fine in both places, because they call `(scheme base)` definitions (`Imported` links), not primitives.\n\nThere\u0027s no fallback to compiling from source: `compile_program_with` returns the load error.\n\nHow I checked: I compiled `(define-library (test probe) (import (scheme base)) (export probe) (begin ...))` with `Artifacts { write: true }`, then compiled the same program with `reading(\u0026artifacts)`, using the helpers in `tests/it/artifacts.rs`. I ran it on this patch set and on main.\n\nOne fix covers both sections: allow the `%` primitives that Vali\u0027s own exported macros put into user code. They can be collected from the own libraries\u0027 syntax exports, or kept as a fixed list next to `base.sld`. That\u0027s only safe if those primitives check their arguments, since a hostile artifact could then call them directly; the record primitives take the type as an argument, so it\u0027s worth checking that `record_ref` and `record_set` reject a mismatched type or an out-of-range index. Either way, a test that round-trips a user library with a record type would catch this. A follow-up change is fine, since the phase-0 half is already on main.",
+      "revId": "30c07231505211b8288370b96f100782fa29ea8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
