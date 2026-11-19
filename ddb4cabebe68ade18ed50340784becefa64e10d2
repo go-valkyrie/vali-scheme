@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "7eabdba8_2850d35c",
+        "filename": "crates/vali-bytecode/src/convert.rs",
+        "patchSetId": 2
+      },
+      "lineNbr": 111,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T19:08:08Z",
+      "side": 1,
+      "message": "Nothing here checks that the converted function\u0027s arity and free-variable count equal the stub\u0027s, which is `shape.functions[index]`. The eager path never needed that check: `validate` reads one `Function` for both its own code and the targets of other functions\u0027 `closure` and direct calls. The lazy path splits them. Every call site and closure in the module was validated against the stub, the runtime descriptor\u0027s arity (used by `enter`\u0027s check) is the stub\u0027s, and this code is validated only against its own arity and free count.\n\nThey agree by construction, since both come from the same IR function through `arity_of` and `f.free.len()`. But the point of validating run format is not to trust the converter (ADR 0017 #13, \"defence in depth\"), and a mismatch would be memory-unsafe. A closure is allocated with the stub\u0027s free count, which `closure` was validated against, while this code\u0027s free-variable reads are validated against its own count, so one higher reads past the closure object. A different arity would also break `call-direct`, which checks no arity at run time.\n\n`check_rewritten` already holds the ownership pass to exactly this: `(arity, slots, free)` unchanged. One line here would do the same for conversion and cover every lazy caller:\n\n```\nlet stub \u003d \u0026shape.functions[index as usize];\nif (converted.arity, converted.free) !\u003d (stub.arity, stub.free) { return Err(...) }\n```",
+      "revId": "ddb4cabebe68ade18ed50340784becefa64e10d2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
