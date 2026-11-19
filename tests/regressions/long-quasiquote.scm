@@ -24,7 +24,7 @@
 
 ;; A flat list with nothing to unquote.
 (define n 100000)
-(define m 20000)
+(define m 100000)
 (define flat (qq (iota* n)))
 (test-equal n (length flat))
 (test-equal (iota* n) flat)
