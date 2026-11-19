@@ -30,6 +30,7 @@
 (test-assert (memq 'srfi-1 (features)))
 (test-assert (memq 'srfi-64 (features)))
 (test-assert (memq 'srfi-88 (features)))
+(test-assert (memq 'srfi-128 (features)))
 (test-assert (memq 'srfi-132 (features)))
 (test-assert (not (memq 'srfi-9999 (features))))
 (test-equal 'srfi-1 probe)

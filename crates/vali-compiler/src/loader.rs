@@ -295,6 +295,7 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["srfi", "87"], include_str!("../lib/srfi/87.sld")),
     (&["srfi", "88"], include_str!("../lib/srfi/88.sld")),
     (&["srfi", "111"], include_str!("../lib/srfi/111.sld")),
+    (&["srfi", "128"], include_str!("../lib/srfi/128.sld")),
     (&["srfi", "132"], include_str!("../lib/srfi/132.sld")),
     (&["srfi", "141"], include_str!("../lib/srfi/141.sld")),
     (&["srfi", "145"], include_str!("../lib/srfi/145.sld")),
