@@ -12,6 +12,8 @@ use std::alloc::{self, Layout};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use crate::asan;
+
 /// How many words a segment holds, unless a frame needs more.
 pub(crate) const SEGMENT_WORDS: usize = 8 * 1024;
 
@@ -147,6 +149,8 @@ impl View {
 
 impl Drop for Segment {
     fn drop(&mut self) {
+        // The allocator may hand the block out again.
+        asan::unpoison(self.base.as_ptr(), self.words * 8);
         // SAFETY: allocated in `new` with this layout.
         unsafe { alloc::dealloc(self.base.as_ptr() as *mut u8, Self::layout(self.words)) };
     }

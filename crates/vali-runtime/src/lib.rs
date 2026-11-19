@@ -9,6 +9,7 @@
 //! - [`Handle`]: how Rust code holds Scheme values. Handles are `Send`,
 //!   `Sync` and `'static`, and are used through their isolate's context.
 
+mod asan;
 pub mod bridge;
 mod code;
 mod continuations;

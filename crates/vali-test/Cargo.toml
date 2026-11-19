@@ -20,6 +20,11 @@ vali-syntax.workspace = true
 vali-dist.workspace = true
 vali-opt.workspace = true
 
+[features]
+# Lets AddressSanitizer see inside the runtime's pages and stack segments.
+# For the fuzz build under `-Zsanitizer=address` only.
+asan = ["vali-runtime/asan"]
+
 [[test]]
 name = "regressions"
 harness = false
