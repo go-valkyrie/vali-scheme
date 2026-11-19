@@ -99,6 +99,7 @@ pub(crate) enum Core {
     Begin,
     Lambda,
     Let,
+    LetStar,
     Letrec,
     Set,
     Define,
@@ -123,6 +124,7 @@ const CORE: &[(&str, Core)] = &[
     ("begin", Core::Begin),
     ("lambda", Core::Lambda),
     ("let", Core::Let),
+    ("let*", Core::LetStar),
     ("letrec", Core::Letrec),
     ("letrec*", Core::Letrec),
     ("set!", Core::Set),
@@ -1164,6 +1166,7 @@ impl Expander {
             }
             Core::Lambda => self.lambda(None, items, span),
             Core::Let => self.let_(keyword, args, span),
+            Core::LetStar => self.let_star(keyword, args, span),
             Core::Letrec => self.letrec(keyword, args, span),
             Core::Set => {
                 let [target, value] = args else {
@@ -1381,6 +1384,32 @@ impl Expander {
                 span,
             )),
         }
+    }
+
+    /// `(let* ((id init) ...) body ...)`: each binding inside the one
+    /// before, which is nested `let`s, built here in one pass. As a macro
+    /// that expands to a `let` and a `let*` it took a step for each binding,
+    /// each rebuilding the bindings after it, so time and memory grew with
+    /// the square of their number.
+    fn let_star(&mut self, keyword: &str, args: &[Syntax], span: Span) -> Result<Expr> {
+        let [bindings, body @ ..] = args else {
+            return Err(error(
+                format!("{keyword}: expected bindings and a body"),
+                span,
+            ));
+        };
+        let bindings = self.bindings(bindings, keyword)?;
+        let let_ = || Syntax::identifier("let", self.core, span, None);
+        let empty = Syntax::list(Vec::new(), None, self.core, span, None);
+        let mut nested = vec![let_(), empty];
+        nested.extend(body.iter().cloned());
+        let mut nested = Syntax::list(nested, None, self.core, span, None);
+        for (id, init) in bindings.into_iter().rev() {
+            let binding = Syntax::list(vec![id, init], None, self.core, span, None);
+            let bindings = Syntax::list(vec![binding], None, self.core, span, None);
+            nested = Syntax::list(vec![let_(), bindings, nested], None, self.core, span, None);
+        }
+        self.expr(&nested)
     }
 
     /// `(letrec ((id init) ...) body ...)`, and `letrec*`: each init sees

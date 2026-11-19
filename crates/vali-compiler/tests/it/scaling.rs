@@ -96,6 +96,14 @@ fn nested_lets_rebinding_one_name_compile_in_linear_time() {
 }
 
 #[test]
+fn a_long_let_star_compiles_in_linear_time() {
+    grows_linearly("a long let*", 1_000, |n| {
+        let bindings: String = (0..n).map(|i| format!("(x{i} {i}) ")).collect();
+        compile_alone(&format!("(import (scheme base)) (let* ({bindings}) x0)"));
+    });
+}
+
+#[test]
 fn nested_lambdas_compile_in_linear_time() {
     grows_linearly("nested lambdas", 4_000, |n| {
         compile_alone(&nest(n, |i| format!("((lambda (x{i}) "), "x0", ") 1)"));
