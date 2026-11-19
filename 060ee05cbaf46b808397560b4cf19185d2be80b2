@@ -1,0 +1,106 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "9df6e9b9_be764596",
+        "filename": "crates/vali-compiler/src/expand/artifact.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 712,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:03:39Z",
+      "side": 1,
+      "message": "`depths()` accepts any `u64` that fits a `usize`, and so do the template ellipsis counts read further down. A depth drives `value_match`\u0027s recursion (phase.rs), and an ellipsis count feeds `drivers`\u0027 arithmetic (pattern.rs).\n\nReproduced: `tmpl`\u0027s compiled template depth set to `u64::MAX`, then a call with a list nested a million deep, made through `%syntax-build`, a primitive a `syntax-case` transformer links legitimately. That aborted with \"has overflowed its stack\" (`value_match` at depth 18446744073709541687). With the original depth of 1 it\u0027s refused cleanly. The existing \"template depth \u003d MAX is refused\" test only passes because of a different error (\"match is corrupt\").\n\nBound depths and ellipsis counts at decode by `MAX_DECODED_NESTING`. Real ones are small.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "d2299aa5_2ca2da91",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 506,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:03:39Z",
+      "side": 1,
+      "message": "Loading never checks that the decoded export\u0027s `macros` and `compiled` entries belong to the library being loaded. A `MacroId` names its unit, and a compiled key names its unit too. So a library can ship an entry under another unit\u0027s id or key, and `import_syntax` copies it in with `own: None`, first one wins.\n\nReproduced: `(test evil)`\u0027s export carried a macro under greet\u0027s `MacroId` that expands to `\"hijacked\"`. A library importing evil, then greet, got evil\u0027s version of greet\u0027s `twice`.\n\nFix: at load, refuse any macro whose `id.unit` isn\u0027t this unit\u0027s index, and any compiled key other than `record.key`. Then `own: None` is safe, since every export holds only its own.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "fd0ae896_787e3d39",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 561,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:03:39Z",
+      "side": 1,
+      "message": "This rule (no `%` primitives and no `Native` links outside Vali\u0027s own libraries) covers the `invoke` section only. A procedure transformer\u0027s IR in the syntax export goes straight to `converted` (transformers.rs) and loads into the phase isolate unchecked. So any library\u0027s macro can link any `%` primitive, or any registered native library, at expansion time. The same check should run on transformer IR, allowing what `syntax-case` itself links: `%syntax-match`, `%syntax-build` and `%quote-syntax`.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "406bfb68_2b43654a",
+        "filename": "crates/vali-compiler/src/pattern.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 669,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:03:39Z",
+      "side": 1,
+      "message": "`inner + count` here, and `inner + more` a few lines down, overflow when an ellipsis count comes from the artifact. With the outer count of `((a ...) ...)` set to `u64::MAX`, debug and test builds panicked with \"attempt to add with overflow\" on the expander thread, outside any native catch. Release builds wrap and report a macro error instead. Bounding counts at decode (artifact.rs) fixes it. `checked_add` here would make it independent of that.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "7e03c328_c69db5dd",
+        "filename": "crates/vali-compiler/src/pattern.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 698,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:03:39Z",
+      "side": 1,
+      "message": "`Pattern::remap`, and `Template::remap` below it, recurse once per level with no `stacker::maybe_grow`, though `build` and the walk at the top of the file use it. So the decoder\u0027s 2,000-level limit doesn\u0027t stop the remap from overflowing a small stack.\n\nReproduced: a `twice` clause pattern 1,999 lists deep aborted on a 2 MB test thread (opt-level 1), with thousands of `Pattern::remap` frames in gdb. 500, 999 and 1,500 were fine. Source patterns are capped at 1,000, so this is new with the doubled limit. The existing deep tests use 200,000, which decode refuses, so nothing exercises the limit itself. Wrap both in `maybe_grow` (or lower the limit), and add a test at the limit.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "cf968f0d_f271630b",
+        "filename": "crates/vali-compiler/src/phase.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 362,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:03:39Z",
+      "side": 1,
+      "message": "Recursion once per depth level, with no `stacker`. With the depth bounded at decode (artifact.rs) this is fine. Otherwise it needs `maybe_grow`, or to become a loop.",
+      "revId": "060ee05cbaf46b808397560b4cf19185d2be80b2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
