@@ -23,7 +23,7 @@
 //! Numbers are written as their external representation, which reading
 //! gives back exactly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use vali_dist::{DecodeError, Reader, Writer};
@@ -1150,12 +1150,15 @@ fn max_template_var(t: &Template) -> usize {
 }
 
 /// What a library's `library` section holds: who it is, what it imports,
-/// and what it exports.
+/// what it exports, and which of its private definitions it publishes
+/// (ADR 0012 #9). A definition is exported, published or private, and the
+/// last is every one that is neither.
 pub(super) struct LibraryRecord {
     pub(super) identity: String,
     pub(super) key: String,
     pub(super) imports: Vec<usize>,
     pub(super) interface: HashMap<String, Binding>,
+    pub(super) published: HashSet<String>,
 }
 
 /// Encodes a library's record, naming units by their identities.
@@ -1180,6 +1183,12 @@ pub(super) fn encode_library(record: &LibraryRecord, identities: &[String]) -> R
     for name in names {
         e.w.str(name);
         e.binding(&record.interface[name])?;
+    }
+    let mut published: Vec<&String> = record.published.iter().collect();
+    published.sort();
+    e.w.usize(published.len());
+    for name in published {
+        e.w.str(name);
     }
     Ok(e.w.finish())
 }
@@ -1220,12 +1229,21 @@ pub(super) fn decode_library(
                 return Err(d.r.error(format!("{name} is exported twice")));
             }
         }
+        let n = d.r.count(1)?;
+        let mut published = HashSet::with_capacity(n);
+        for _ in 0..n {
+            let name = d.r.str()?.to_owned();
+            if !published.insert(name.clone()) {
+                return Err(d.r.error(format!("{name} is published twice")));
+            }
+        }
         d.r.end()?;
         Ok(LibraryRecord {
             identity,
             key,
             imports,
             interface,
+            published,
         })
     })();
     record.map_err(|e: DecodeError| CompileError {

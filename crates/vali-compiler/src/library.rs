@@ -123,6 +123,10 @@ pub(crate) struct ExportSpec {
 pub(crate) struct LibraryForm {
     pub(crate) name: LibraryName,
     pub(crate) exports: Vec<ExportSpec>,
+    /// The definitions its `publish` declarations name: private ones that
+    /// code its macros generate into other libraries may reference, which
+    /// the compiler's own inference cannot see (ADR 0012 #9).
+    pub(crate) publishes: Vec<ExportSpec>,
     pub(crate) imports: Vec<ImportSet>,
     /// The body's forms, in order.
     pub(crate) body: Vec<Datum>,
@@ -302,6 +306,7 @@ pub(crate) fn library_form(d: &Datum) -> Result<Option<LibraryForm>> {
             let mut form = LibraryForm {
                 name: library_name(name)?,
                 exports: Vec::new(),
+                publishes: Vec::new(),
                 imports: Vec::new(),
                 body: Vec::new(),
                 span: d.span,
@@ -317,6 +322,18 @@ pub(crate) fn library_form(d: &Datum) -> Result<Option<LibraryForm>> {
                     Some("export") => {
                         for spec in rest {
                             form.exports.push(export_spec(spec)?);
+                        }
+                    }
+                    Some("publish") => {
+                        for name in rest {
+                            let Some(id) = symbol(name) else {
+                                return Err(error("publish: expected an identifier", name.span));
+                            };
+                            form.publishes.push(ExportSpec {
+                                internal: id.to_owned(),
+                                external: id.to_owned(),
+                                span: name.span,
+                            });
                         }
                     }
                     Some("import") => {
@@ -364,6 +381,7 @@ pub(crate) fn library_form(d: &Datum) -> Result<Option<LibraryForm>> {
             Ok(Some(LibraryForm {
                 name: library_name(name)?,
                 exports,
+                publishes: Vec::new(),
                 imports,
                 body: body.to_vec(),
                 span: d.span,

@@ -8,6 +8,14 @@ pub(super) struct Unit {
     pub(super) identity: String,
     /// What it exports, by external name.
     pub(super) interface: HashMap<String, Binding>,
+    /// The private variables it defines that code it generates into other
+    /// libraries may reference, which are linkable though not exported
+    /// (`published`).
+    pub(super) published: HashSet<String>,
+    /// The names of the variables it defines that other libraries' code may
+    /// link: those it exports and those it publishes. Filled in when the
+    /// unit is finished.
+    pub(super) linkable: HashSet<String>,
     /// The units it imports, which its instances need first.
     pub(super) imports: Vec<usize>,
     /// Its compiled module, once there is one. A library's converts to
@@ -51,6 +59,25 @@ pub(super) struct Unit {
     /// Whether it was compiled, then written and loaded again
     /// (`round_trip`).
     pub(super) round_tripped: bool,
+}
+
+impl Unit {
+    /// Settles what other libraries' code may link: the variables it
+    /// defines that it exports, and those it publishes, which are the
+    /// private ones among `published`.
+    pub(super) fn seal(&mut self, index: usize) {
+        let exported: HashSet<String> = self
+            .interface
+            .values()
+            .filter_map(|b| match b {
+                Binding::Variable(owner, name) if *owner == index => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        self.published.retain(|name| !exported.contains(name));
+        self.linkable = exported;
+        self.linkable.extend(self.published.iter().cloned());
+    }
 }
 
 /// Where what an expander has compiled ends (`Expander::mark`).
@@ -234,7 +261,9 @@ impl Expander {
         validate(&module).map_err(|e| error(format!("{identity}: {e}"), form.span))?;
         self.units.push(Unit {
             identity: identity.to_owned(),
+            linkable: interface.keys().cloned().collect(),
             interface,
+            published: HashSet::new(),
             imports: Vec::new(),
             module: Some(Converted::Eager(module.clone())),
             own: false,
@@ -308,6 +337,13 @@ impl Expander {
         let mut state = self.swap_state(ContextState::empty(self.core_scope, self.core));
         match owner {
             ContextOwner::Unit(unit) => {
+                if !self.units[unit].repl {
+                    let key = self.units[unit].key.clone();
+                    let inferred = super::published::infer(&mut state, unit, &key)?;
+                    let u = &mut self.units[unit];
+                    u.published.extend(inferred);
+                    u.seal(unit);
+                }
                 // Kept as the unit's syntax export for as long as the
                 // expander lives, so without the caches that only saved time.
                 state.context.clear_caches();
@@ -481,6 +517,7 @@ impl Expander {
             key: u.key.clone(),
             imports: u.imports.clone(),
             interface: u.interface.clone(),
+            published: u.published.clone(),
         };
         artifact::encode_library(&record, &identities).map_err(|message| CompileError {
             message: format!("{}: {message}", u.identity),
@@ -539,6 +576,8 @@ impl Expander {
             span: None,
             location: None,
         };
+        // What the libraries it links publish must be settled.
+        self.finish_context()?;
         let (artifact, depends) = decode_library_artifact(bytes).map_err(fail)?;
         let section = |name: &str| {
             artifact
@@ -593,6 +632,7 @@ impl Expander {
                 "it links {name}, an isolate global, which only a REPL's input may"
             )));
         }
+        self.check_links(&ir).map_err(|e| fail(format!("it {e}")))?;
         let ir = Arc::new(ir);
         let mut module = converted_library(&ir, true)?;
         // The digest that tells this build from another is the IR's
@@ -604,6 +644,8 @@ impl Expander {
         self.units.push(Unit {
             identity: identity.to_owned(),
             interface: HashMap::new(),
+            published: HashSet::new(),
+            linkable: HashSet::new(),
             imports: Vec::new(),
             module: Some(module.clone()),
             own,
@@ -640,6 +682,8 @@ impl Expander {
             unit.source = recorded;
             unit.instantiated = instantiated;
             unit.interface = record.interface;
+            unit.published = record.published;
+            unit.seal(index);
             unit.syntax = Some(Arc::new(syntax));
             // Writing it again would give these bytes, so they are what its
             // importers' artifacts hash, without encoding it again.
@@ -653,6 +697,30 @@ impl Expander {
             return Err(e);
         }
         Ok(module)
+    }
+
+    /// Checks that every library variable `ir` links is accessible: its
+    /// library is loaded and exports or publishes the name, and only then.
+    /// What is private to a library is unreachable from the code of
+    /// another, whatever that code says (ADR 0012 #9). Returns what the
+    /// first link that is not does wrong, to follow "it".
+    fn check_links(&self, ir: &vali_dist::Module) -> std::result::Result<(), String> {
+        let mut units: HashMap<&str, Option<usize>> = HashMap::new();
+        for g in &ir.globals {
+            let vali_dist::GlobalLink::Imported(library) = &g.link else {
+                continue;
+            };
+            let Some(unit) = *units
+                .entry(library)
+                .or_insert_with(|| self.unit_of(library))
+            else {
+                return Err(format!("links {library}, which is not loaded"));
+            };
+            if !self.units[unit].linkable.contains(&*g.name) {
+                return Err(format!("links {library}'s private {}", g.name));
+            }
+        }
+        Ok(())
     }
 
     /// Checks that what a library's record and syntax export bind is there to
@@ -683,16 +751,18 @@ impl Expander {
         }
         // A transformer runs in the expander's isolate, so what its code
         // links is held to what a library's own may, and it may not touch
-        // the isolate's globals.
+        // the isolate's globals or link what another library keeps private.
         for m in syntax.macros.values() {
-            if let Transformer::Procedure(p) = &m.transformer
-                && let Some(name) = links_repl(&p.ir)
-            {
-                return Err(format!(
-                    "the transformer {} links {name}, an isolate global, which only a \
-                     REPL's input may",
-                    m.name
-                ));
+            if let Transformer::Procedure(p) = &m.transformer {
+                if let Some(name) = links_repl(&p.ir) {
+                    return Err(format!(
+                        "the transformer {} links {name}, an isolate global, which only a \
+                         REPL's input may",
+                        m.name
+                    ));
+                }
+                self.check_links(&p.ir)
+                    .map_err(|e| format!("the transformer {} {e}", m.name))?;
             }
         }
         if !own {
@@ -960,6 +1030,8 @@ impl Expander {
         self.units.push(Unit {
             identity: identity.to_owned(),
             interface: HashMap::new(),
+            published: HashSet::new(),
+            linkable: HashSet::new(),
             imports: imported,
             module: None,
             own: std::mem::take(&mut self.next_own),
@@ -1290,12 +1362,14 @@ fn shape(state: &ContextState, set: ScopeSetId) -> ([usize; 5], bool) {
 /// another could contradict. The scopes a library's own definitions are
 /// bound under are not a mapping of anyone's.
 ///
-/// This keeps an export's bindings honest; it is not a privacy boundary. A
-/// crafted artifact can add a scope that binds none of its definitions, so
-/// it is not in `own_scopes`, and bind the variable under it: that matches
-/// the owner's entry as a real import's scope does, and the loader cannot
-/// tell the two apart. The artifact's code can link the variable by name
-/// anyway (ADR 0012 #9).
+/// This keeps an export's bindings honest; it does not keep a variable
+/// private. A crafted artifact can add a scope that binds none of its
+/// definitions, so it is not in `own_scopes`, and bind the variable under
+/// it: that matches the owner's entry as a real import's scope does, and
+/// the loader cannot tell the two apart. What keeps the variable private is
+/// that the owner neither exports nor publishes it, so no code of another
+/// library may link it: the loader refuses a link (`check_links`), and the
+/// expander refuses a reference to it (`Expander::variable`; ADR 0012 #9).
 fn reproduces(
     owner: &ContextState,
     syntax: &ContextState,
