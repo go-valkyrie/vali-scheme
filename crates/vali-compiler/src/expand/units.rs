@@ -343,6 +343,19 @@ impl Expander {
                     let u = &mut self.units[unit];
                     u.published.extend(inferred);
                     u.seal(unit);
+                    // A library's importers need its own syntax only, and
+                    // import its imports' from their exports, as for one
+                    // loaded from an artifact. Keeping the whole context,
+                    // which holds everything it imported, made a chain of
+                    // libraries take memory and time quadratic in its
+                    // length.
+                    if self.by_name.values().any(|&named| named == unit) {
+                        state = self.pruned_export(unit, &state)?;
+                        let u = &mut self.units[unit];
+                        u.pruned = true;
+                        // Compiled here, not loaded from an artifact.
+                        u.round_tripped = true;
+                    }
                 }
                 // Kept as the unit's syntax export for as long as the
                 // expander lives, so without the caches that only saved time.

@@ -11,3 +11,4 @@ mod libraries;
 mod limits;
 mod lower;
 mod repl;
+mod scaling;
