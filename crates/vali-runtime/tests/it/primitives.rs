@@ -96,6 +96,55 @@ fn equivalence() {
 }
 
 #[test]
+fn immutable_pairs() {
+    let mut cx = cx();
+    let make = cx.primitive("ipair").unwrap();
+    let icar = cx.primitive("icar").unwrap();
+    let icdr = cx.primitive("icdr").unwrap();
+    let is_ipair = cx.primitive("ipair?").unwrap();
+    let is_pair = cx.primitive("pair?").unwrap();
+    let one = cx.read("1 ()").unwrap();
+    let list = cx.call(&make, &one).unwrap();
+    let two = cx.read("2").unwrap();
+    let args = [two[0].clone(), list.clone()];
+    let list2 = cx.call(&make, &args).unwrap();
+    assert_eq!(cx.write_string(&list2).unwrap(), "#<ilist 2 1>");
+    let improper = cx.read("1 2").unwrap();
+    let dotted = cx.call(&make, &improper).unwrap();
+    assert_eq!(cx.write_string(&dotted).unwrap(), "#<ilist 1 . 2>");
+    let mixed = cx.read("1 (2)").unwrap();
+    let mixed = cx.call(&make, &mixed).unwrap();
+    assert_eq!(cx.write_string(&mixed).unwrap(), "#<ilist 1 . (2)>");
+    let t = |cx: &mut Cx<NoCollection>, f, v: &_| {
+        let r = cx.call(f, std::slice::from_ref(v)).unwrap();
+        cx.write_string(&r).unwrap()
+    };
+    assert_eq!(t(&mut cx, &is_ipair, &list2), "#t");
+    assert_eq!(t(&mut cx, &is_pair, &list2), "#f");
+    assert_eq!(t(&mut cx, &icar, &list2), "2");
+    assert_eq!(t(&mut cx, &icdr, &list2), "#<ilist 1>");
+    let pair = cx.read("(1)").unwrap().remove(0);
+    assert_eq!(t(&mut cx, &is_ipair, &pair), "#f");
+    assert!(cx.call(&icar, &[pair]).is_err());
+    // equal? is structural between ipairs, eqv? is identity, and an ipair
+    // is never equal to a pair.
+    let again = {
+        let a = cx.read("2").unwrap().remove(0);
+        let tail = cx.call(&make, &one).unwrap();
+        cx.call(&make, &[a, tail]).unwrap()
+    };
+    let equal = cx.primitive("equal?").unwrap();
+    let eqv = cx.primitive("eqv?").unwrap();
+    let same = cx.call(&equal, &[list2.clone(), again.clone()]).unwrap();
+    assert_eq!(cx.write_string(&same).unwrap(), "#t");
+    let same = cx.call(&eqv, &[list2.clone(), again]).unwrap();
+    assert_eq!(cx.write_string(&same).unwrap(), "#f");
+    let pair = cx.read("(2 1)").unwrap().remove(0);
+    let same = cx.call(&equal, &[list2, pair]).unwrap();
+    assert_eq!(cx.write_string(&same).unwrap(), "#f");
+}
+
+#[test]
 fn vectors() {
     let mut cx = cx();
     assert_eq!(ok(&mut cx, "vector", "1 a"), "#(1 a)");
