@@ -1,0 +1,123 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "a2e6de5f_cede568d",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 11,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "\"The owner wants three things\" is followed by four items (hot module replacement is the fourth).",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6d4de5fb_7750ca14",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 27,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "\"Does not rewrite code\" isn\u0027t quite true any more: under precise counting a module\u0027s run-format code is rewritten as it loads (`vali_bytecode::ownership`; ADR 0003, as 1260820 says). The point here, that caches never patch code, still holds. Something like \"loading fills in per-module tables, and nothing patches code to cache\" would be exact.",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "a8f0c6e3_75ce15cc",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 57,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "What does `shape-root` do at `max_shapes`? Extension falls back to dictionary mode, but dictionary mode needs a root, since the dictionary shape is per root. So a new class, prototype or singleton at the cap can\u0027t be given one. If it raises `LimitExceeded`, catchable as ADR 0023\u0027s caps are, it\u0027s worth saying so. Note that it then hits the per-object roots of item 5 (Ruby singletons, `setPrototypeOf`) too, until collectable shapes land.",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "861e1262_8fe2f2ee",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 81,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "A hit on a cached `(slot-of o\u0027 i)` loads the validity cell and, if it\u0027s set, reads slot `i` of `o\u0027`. The cell is cleared by the library, and a library is untrusted code: any front end\u0027s runtime, an ES runtime included. If it fails to clear a cell, through a bug or on purpose, and `o\u0027` has since moved to dictionary mode (a delete of any property but the last-added one, item 3), the hit still reads slot `i`. Past the inline slots that\u0027s index `i - inline` of what `props` now points at: the dictionary table, not a slot vector. Its layout and length are different, so the read is out of bounds or reads table internals.\n\nThat makes memory safety depend on the library, which item 13 (\"no artifact has to be trusted\") and the consequence on line 147 (\"a bad hook is slow, not unsafe\") say it doesn\u0027t. The re-check on line 147 happens only when the entry is filled.\n\nA fix that keeps the hit cheap is to record `o\u0027`\u0027s shape in the entry and compare it on every hit. That\u0027s one more load and compare, and V8 checks the holder\u0027s map for the same reason. Then a stale cell can only give a stale but in-bounds value, which is the library\u0027s semantic bug and not a VM safety problem. Bounds-checking `i` against `o\u0027`\u0027s current shape on each hit would work too, but costs more than the compare.",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "5815b728_d3d0526f",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 96,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "Two lifetime points for the site tables, which live with a converted function outside the heap but hold heap references (effective methods, validity cells, and the `o\u0027` of a resolution):\n\n- **Cycle collection.** Trial deletion only sees edges it can describe. For a transient module (`eval`, `load_transient`), a cache entry that points at a closure of one of the module\u0027s own functions makes a cycle through a table the collector can\u0027t see, and the module is never freed. That\u0027s the same problem `load_transient` already refuses `call-direct` modules for (\"it would refer to its own module for ever\"). The table\u0027s references should be described as children of the module\u0027s heap object, or caching should be off in transient modules. \"Counted as any other heap reference\" (line 143) needs that to be true.\n- **Dependents lists.** Shapes, generics, classes and cells list the sites that cache them (item 12). When a function\u0027s table is freed (lazy conversion #55 makes that routine, as do transient modules), its sites have to leave those lists, or the lists need to hold sites weakly. Otherwise an invalidation writes into a freed table.",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "ba8b2c63_2d82df97",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 111,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "Item 14 says both that the ES runtime \"interns an ES string key as a symbol on the way in\", and that \"keys that arrive as data and stay strings in a dictionary-mode object are not interned\". It needs one exact rule. Symbols aren\u0027t collected yet (#46), so interning computed keys taken from data (`obj[k] \u003d v` over parsed JSON) grows the symbol table with input until ADR 0023\u0027s cap stops the program.\n\nOne rule that works: intern a key that is a literal, or already an interned symbol (a lookup, not a new symbol), and keep any other computed string key as a string. That moves the object to dictionary mode, which its data-shaped keys would cause anyway. Also, strings compared by content in a dictionary table are mutable in Scheme, so the table should copy, or freeze, a string key when it\u0027s inserted.",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "82ad04e8_1cf45d77",
+        "filename": "docs/adr/0024-objects-shapes-and-dispatch.md",
+        "patchSetId": 2
+      },
+      "lineNbr": 147,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:32:18Z",
+      "side": 1,
+      "message": "See the comment on item 8: re-checking `o\u0027`\u0027s shape when the entry is filled doesn\u0027t cover `o\u0027` changing shape later. The hit has to check it too, or the claim here depends on the library clearing its validity cells.",
+      "revId": "bf956b5c4c46618eb022b8040cfb6a10eb0bde8d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
