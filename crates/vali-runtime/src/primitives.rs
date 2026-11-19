@@ -534,7 +534,10 @@ fn vector_fill<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Err
 
 /// `(apply f a ... list)`: asks the VM to tail-call `f`.
 fn apply<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
-    let (&last, rest) = args[1..].split_last().unwrap_or((&Value::EMPTY_LIST, &[]));
+    // The arity is at least two: the procedure and the list (R7RS 6.10).
+    let (&last, rest) = args[1..]
+        .split_last()
+        .expect("apply takes the procedure and a list");
     let mut call_args = rest.to_vec();
     call_args.extend(elements(cx, "apply", last)?);
     // SAFETY: the procedure and the arguments are values `apply` was
@@ -580,7 +583,7 @@ fn table<S: Strategy>() -> Vec<(&'static str, Arity, NativeFn<S>)> {
         ("assoc", Arity::exactly(2), assoc),
         ("list-tail", Arity::exactly(2), list_tail),
         ("list-ref", Arity::exactly(2), list_ref),
-        ("apply", at_least(1), apply),
+        ("apply", at_least(2), apply),
         ("vector->list", Arity::exactly(1), vector_to_list),
         ("list->vector", Arity::exactly(1), list_to_vector),
         ("vector-fill!", Arity::exactly(2), vector_fill),
