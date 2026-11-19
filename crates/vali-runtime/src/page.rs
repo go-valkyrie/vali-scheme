@@ -38,12 +38,21 @@ impl fmt::Display for OutOfMemory {
 
 impl std::error::Error for OutOfMemory {}
 
-/// How a heap is set up.
+/// How a heap is set up, and the resource limits of the isolate that owns
+/// it: one configuration type for all of them (ADR 0023). `None` is
+/// unlimited.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeapConfig {
     /// The most memory the heap may take from the system, in bytes, counting
     /// whole pages and large objects.
     pub max_bytes: Option<usize>,
+    /// The most symbols and keywords together an isolate may intern. A
+    /// symbol counts for as long as the isolate lives, so a long-lived
+    /// isolate that interns without bound reaches this for good (ADR 0023).
+    pub max_symbols: Option<usize>,
+    /// The most runtime syntax objects an isolate may hold at once, counting
+    /// the ones whose heap object has not been freed (ADR 0023).
+    pub max_syntaxes: Option<usize>,
 }
 
 /// Hands out pages and large objects, counts them against the heap's limit,
@@ -51,6 +60,9 @@ pub struct HeapConfig {
 pub struct PageSource {
     limit: usize,
     used: usize,
+    /// Memory the runtime holds outside the pages and charged here (ADR
+    /// 0023): it counts against the limit like the pages do.
+    external: usize,
     /// Every block, by address, with its layout.
     blocks: HashMap<usize, Layout>,
 }
@@ -73,6 +85,7 @@ impl PageSource {
         PageSource {
             limit: config.max_bytes.unwrap_or(usize::MAX),
             used: 0,
+            external: 0,
             blocks: HashMap::new(),
         }
     }
@@ -80,6 +93,25 @@ impl PageSource {
     /// How many bytes the source has handed out.
     pub fn bytes_used(&self) -> usize {
         self.used
+    }
+
+    /// Charges `bytes` of memory held outside the pages against the limit
+    /// (ADR 0023). It fails when the pages and the charges together would
+    /// pass it; a heap that can give pages back does so and tries again
+    /// (`PageHeap::charge_external`).
+    pub fn charge_external(&mut self, bytes: usize) -> Result<(), OutOfMemory> {
+        match self.external.checked_add(bytes) {
+            Some(total) if total.saturating_add(self.used) <= self.limit => {
+                self.external = total;
+                Ok(())
+            }
+            _ => Err(OutOfMemory),
+        }
+    }
+
+    /// Gives back `bytes` charged with [`PageSource::charge_external`].
+    pub fn release_external(&mut self, bytes: usize) {
+        self.external = self.external.saturating_sub(bytes);
     }
 
     /// A fresh page, `PAGE_BYTES` long and aligned to `PAGE_BYTES`.
@@ -104,7 +136,7 @@ impl PageSource {
 
     fn block(&mut self, layout: Layout) -> Result<NonNull<u8>, OutOfMemory> {
         let used = self.used.checked_add(layout.size()).ok_or(OutOfMemory)?;
-        if used > self.limit {
+        if used.saturating_add(self.external) > self.limit {
             return Err(OutOfMemory);
         }
         // SAFETY: the layout has a non-zero size: a page, or an object of at
@@ -124,6 +156,7 @@ impl PageSource {
     pub unsafe fn free_large(&mut self, block: NonNull<u8>, _bytes: usize) {
         if let Some(layout) = self.blocks.remove(&(block.as_ptr() as usize)) {
             self.used -= layout.size();
+            asan::unpoison(block.as_ptr(), layout.size());
             // SAFETY: allocated with exactly this layout, freed once.
             unsafe { alloc::dealloc(block.as_ptr(), layout) };
         }

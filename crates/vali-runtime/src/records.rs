@@ -250,10 +250,10 @@ pub(crate) fn record_set<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<
 impl<S: Strategy> Cx<S> {
     /// A record type named `name` with `fields`, made by the runtime.
     fn internal_type(&mut self, name: &str, fields: &[&str]) -> Result<Value, Error> {
-        let name = self.intern(name)?;
+        let name = self.intern_internal(name)?;
         let mut list = Value::EMPTY_LIST;
         for field in fields.iter().rev() {
-            let field = self.intern(field)?;
+            let field = self.intern_internal(field)?;
             // SAFETY: valid values; nothing is collected meanwhile.
             list = unsafe { self.cons_raw(field, list) }?;
         }

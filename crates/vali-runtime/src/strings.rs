@@ -458,17 +458,26 @@ fn symbol_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value
 
 fn string_to_symbol<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = string_arg(cx, "string->symbol", args[0])?.to_owned();
-    Ok(cx.intern(&name)?)
+    cx.intern(&name)
 }
 
 // SRFI 88 keywords: interned like symbols, each a name without its colon.
 
 impl<S: Strategy> Cx<S> {
     /// The keyword named `name`, its colon left out.
-    pub(crate) fn keyword_raw(&mut self, name: &str) -> Result<Value, OutOfMemory> {
+    pub(crate) fn keyword_raw(&mut self, name: &str) -> Result<Value, Error> {
         if let Some(&v) = self.keywords.get(name) {
             return Ok(v);
         }
+        self.reserve_name(name)?;
+        let made = self.new_keyword(name);
+        if made.is_err() {
+            self.release_rust_bytes(crate::cx::name_entry_bytes(name));
+        }
+        made
+    }
+
+    fn new_keyword(&mut self, name: &str) -> Result<Value, Error> {
         let string = self.string_raw(name, true)?;
         let v = self.new_object(TypeCode::Keyword, 1, 0)?;
         // SAFETY: just allocated with its one field.
@@ -506,7 +515,7 @@ fn keyword_to_string<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Valu
 
 fn string_to_keyword<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     let name = string_arg(cx, "string->keyword", args[0])?.to_owned();
-    Ok(cx.keyword_raw(&name)?)
+    cx.keyword_raw(&name)
 }
 
 // Characters.

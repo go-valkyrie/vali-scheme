@@ -92,6 +92,14 @@ unsafe impl Allocate for NoCollection {
         heap.bytes_used()
     }
 
+    fn charge_external(heap: &mut BumpHeap, bytes: usize) -> Result<(), OutOfMemory> {
+        heap.pages.charge_external(bytes)
+    }
+
+    fn release_external(heap: &mut BumpHeap, bytes: usize) {
+        heap.pages.release_external(bytes);
+    }
+
     fn pool_pair_page(heap: &mut BumpHeap, _words: usize) -> Result<(usize, usize), OutOfMemory> {
         heap.pool_pair_page()
     }

@@ -145,6 +145,7 @@ fn run_with<S: Strategy>(m: &vali_bytecode::Module) -> Result<String, String> {
     let r = catch_unwind(AssertUnwindSafe(|| {
         let mut cx = Cx::<S>::new(&HeapConfig {
             max_bytes: Some(256 << 20),
+            ..Default::default()
         });
         cx.set_fuel_limit(Some(5_000_000));
         cx.set_max_stack_bytes(8 << 20);

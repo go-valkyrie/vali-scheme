@@ -51,7 +51,7 @@ pub use counting::{
     PreciseSideCounts,
 };
 pub use cx::Cx;
-pub use handle::{Error, Frame, Handle, Position, SchemeError};
+pub use handle::{Error, Frame, Handle, Limit, Position, SchemeError};
 pub use isolate::Isolate;
 pub use no_collection::{BumpHeap, NoCollection};
 pub use page::{

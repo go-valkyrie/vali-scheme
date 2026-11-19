@@ -7,5 +7,6 @@ mod bridges;
 mod compile;
 mod hostile;
 mod libraries;
+mod limits;
 mod lower;
 mod repl;

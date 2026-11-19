@@ -7,6 +7,7 @@
 
 mod handles;
 mod isolate;
+mod limits;
 mod linking;
 mod objects;
 mod ownership;
