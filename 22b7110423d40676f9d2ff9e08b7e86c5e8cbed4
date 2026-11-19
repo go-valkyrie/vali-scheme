@@ -1,0 +1,55 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "cdd986dd_f058d702",
+        "filename": "docs/adr/0025-weak-references-and-ephemerons.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 78,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T18:55:54Z",
+      "side": 1,
+      "message": "Key ownership fixes the value → key cycle, but creates the opposite case: an ephemeron that\u0027s reachable only from its own value is kept alive by its key.\n\nSay the value refers to the ephemeron, directly or through something that holds it. With true ephemeron semantics, the value is reachable only through a reachable ephemeron, and the ephemeron is reachable only through the value, so a tracer collects both even while the key lives. Here the entry makes the value a counted child of the key, so key → value → ephemeron is a path from a live object. Counting never frees the ephemeron (the value refers to it), and trial deletion can\u0027t either, because the value\u0027s entry reference is attributed to the key, outside the candidate set. Both stay until the key dies. Item 7\u0027s \"the value is then alive while both the key and the ephemeron are\" is true, but the ephemeron\u0027s own life can rest on the value.\n\nThe common shape is SRFI 125\u0027s `ephemeral-keys` table whose values close over the table: a memoising cache whose entries capture it, or a registry whose records point back to their registry. The table holds the ephemerons, and each value reaches the table, so the whole table lives as long as its longest-lived key, long after the program dropped it. It\u0027s the mirror image of the CPython leak in the survey: CPython keeps keys alive through values, and this keeps holders alive through values, when the key outlives them. Neither has the fixed point a tracer runs.\n\nI don\u0027t think there\u0027s a cheap fix inside counting, which is the record\u0027s own argument for option 1. But the record should say this in item 7 and in the Consequences, and question 2 should weigh it: key-owned values trade the value-refers-to-key leak for this one. For tables in particular, which leak matters more in practice (a value referring to its key, or a value referring to its table) decides whether option 1 or option 3 is the better slice 2.",
+      "revId": "22b7110423d40676f9d2ff9e08b7e86c5e8cbed4",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c0d5488b_1e0c1c21",
+        "filename": "docs/adr/0025-weak-references-and-ephemerons.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 103,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T18:55:54Z",
+      "side": 1,
+      "message": "ADR 0024 patch set 3 no longer clears dependents lists through a weak flag. A site\u0027s block unlinks itself from intrusive lists when its table is freed, and freeing a shape clears the sites on its own list through a free hook. Collectable shapes still need weak transition edges from this record, but not \"the table\u0027s flag for the dependents-list clearing\". Worth aligning the two records so the slices don\u0027t promise each other different mechanisms.",
+      "revId": "22b7110423d40676f9d2ff9e08b7e86c5e8cbed4",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "808e75ed_271ec8b6",
+        "filename": "docs/adr/0025-weak-references-and-ephemerons.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 110,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T18:55:54Z",
+      "side": 1,
+      "message": "A third bullet belongs beside these two: an ephemeron reachable only from its own value (or from something its value reaches, such as the table holding it) lives as long as its key, which a tracer would not allow. See the comment on item 7.",
+      "revId": "22b7110423d40676f9d2ff9e08b7e86c5e8cbed4",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
