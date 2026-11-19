@@ -15,8 +15,6 @@
 (define known-failures
   '(
     ;; 6.2 Numbers
-    ("(real? -2.5+0.0i) => #t"
-     "#48: gap: -2.5+0i reads as -2.5+0.0i, so real? is false; R7RS 6.2.6 says an exact zero imaginary part makes it real")
     ("(sqrt -1.0-0.0i) => 0.0+1.0i"
      "upstream: -1.0-0.0i is below the branch cut, so 0.0-1.0i, which Vali returns, is the C99 answer; R7RS does not say")
     ("(string->number \"#x4000000000000001/3e1\") => #f"
