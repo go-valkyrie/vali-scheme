@@ -1,0 +1,259 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "eb360421_67b4e9cf",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 153,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Every comparator must have a hash function, but the spec allows requiring one only \"unless the equality predicate of the comparator is eq?, eqv?, equal?, string\u003d?, or string-ci\u003d?\". `(set (make-comparator #t eq? #f #f) \u0027a \u0027b)` raises \"comparator has no hash function\", and so do eqv?, equal? and string\u003d?. When `(comparator-hashable? c)` is false, make the table from the equality predicate, `(make-hash-table (comparator-equality-predicate c))`, for which (srfi 125) supplies the hash. In `sob-hash` (1308), use the table\u0027s hash function.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "6c500708_498f1a5a",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 311,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Performance: `sob-decrement!` leaves a 0 count and `sob-cleanup!` then scans the whole table, so each `set-delete!`, `bag-decrement!` and `set-search!` remove or update is O(n). Deleting all elements one at a time is quadratic. On the debug CLI, 250 / 500 / 1000 elements take 1.4 / 4.3 / 12.1 s, while adjoining them takes 0.05 / 0.10 / 0.14 s. The cleanup pass was there because deleting while iterating was unsafe, and iteration now runs over a snapshot. Delete the entry here when the count reaches ≤ 0, which also fixes the `update` bug at 484.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "634aec23_344d2211",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 484,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "`set-search!` with `update` to an element the comparator finds equal removes it. The decrement takes the entry to 0, `sob-increment!` (302) finds the entry and, for a set, leaves it, and cleanup deletes it. With a string-ci comparator:\n\n```scheme\n(set-search! (set ci \"abc\" \"def\") \"ABC\" (lambda (ins ign) (ins \u0027new)) (lambda (x upd rem) (upd \"ABC\" \u0027done)))\n```\n\nThis leaves size 1, and `set-member` of \"abc\" is `absent`. Expected: size 2, holding \"ABC\". Removing an entry as soon as its count reaches 0 (see the comment at 311) fixes this too.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "ec6ee401_bf2c7d95",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 977,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Nit: with one argument, `set-union`, `set-intersection` (1030), `set-difference` (1076) and `bag-sum` (1122) return the argument itself. The spec says newly allocated, and `(set-adjoin! (set-union s) 99)` then changes `s`. Return `(sob-copy sob1)`.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "e868bdea_56ed4e34",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1177,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "`set-xor!` and `bag-xor!` (called with `result` \u003d `sob1`, 1210 and 1216) lose the elements only the second argument has. Pass 1 adds sob2-only keys to sob1. Pass 2 then iterates sob1, finds them in both, writes |v−v| \u003d 0, and cleanup removes them.\n\n- `(set-\u003elist (set-xor! (set c 1 2) (set c 2 3)))` gives `(1)`, expected `(1 3)`. The pure `set-xor` gets it right.\n- `(set-xor! (set c) (set c 5))` gives `()`.\n\nThe sample has the same bug, and the regression test only xors equal sets. Snapshot both before writing, or add sob2\u0027s keys absent from sob1 after scanning sob1. Test presence, not count.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "17d3327c_728f82c6",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1227,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "`valid-n`\u0027s answer is ignored (1232, 1237), and nothing stops a count reaching 0 or below, so bags end up holding zero or negative counts.\n\n- `(bag-product 0 (bag c \u0027a \u0027a))` has size 0, yet `bag-empty?` is #f and `bag-contains? \u0027a` is #t.\n- `(bag-increment! (bag c) \u0027a 0)` leaves `((a . 0))`.\n- `bag-product -1` gives a negative size, and 1/2 a fractional one.\n- `alist-\u003ebag` (1294) accepts zero counts too.\n\nRaise when `valid-n` fails, and delete an entry instead of storing a count ≤ 0.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "5eb4d85b_8352f289",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1308,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "`sob-hash` hashes each element with the element comparator\u0027s hash. With the default comparator that is `default-hash`, which starts a fresh budget on every call. Since `set-comparator` is registered (1323), a set that reaches itself through a vector never finishes hashing:\n\n```scheme\n(define v (vector #f)) (define s (set c v)) (vector-set! v 0 s) (default-hash v)\n```\n\nThis was still running after 30 s, while a plain circular vector hashes at once. 128.sld promises that deep and circular data cannot hang its hashes. Hash the size plus a bounded number of element hashes.\n\nSeparately, `sob-fold` visits each element of a bag once per copy, so hashing a bag costs its total count, not its unique size. Add `count × hash(element)` once per entry, modulo the limit.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "89094493_6f87ad86",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1323,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Registering these changes `default-hash` for the whole program. (srfi 128) (128.sld:347) hashes with `%equal-hash` until something is registered and with `%slow-hash` after, and this is the first standard library to register (146 does too).\n\nSo a table built with the default comparator before (srfi 113) loads loses its keys:\n\n```scheme\n;; (mylib table): (define table (make-hash-table (make-default-comparator)))\n;;                (hash-table-set! table \u0027(1 2 3) \u0027value)\n(import (scheme base) (scheme write) (srfi 125) (mylib table) (srfi 113))\n(write (hash-table-ref/default table \u0027(1 2 3) \u0027missing))\n```\n\nThis prints `missing`, and `value` without the (srfi 113) import. Default hashing of structures also gets much slower once `%slow-hash` takes over.\n\nThe spec doesn\u0027t require registering: post-finalization note 3 removed it. Don\u0027t register, or first make `default-hash` give the same answer whether or not anything is registered (in 128). That would be a change of its own, ahead of this one.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "eb9bebfa_89d97aa3",
+        "filename": "crates/vali-compiler/lib/srfi/146.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 734,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Suggestion: `mapping-catenate` trusts its precondition, and breaking it corrupts the mapping for good. `(mapping-catenate c (mapping c 5 \u0027a) 1 \u0027b (mapping c 0 \u0027z))` gives an alist of `((5 . a) (1 . b) (0 . z))`, after which `mapping-contains?` on 5 is #f and `mapping-set` on 5 makes a second 5. The spec only says \"it is an error\", but checking max(m1) \u003c key \u003c min(m2) costs O(log n) and turns the corruption into an error.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "1823a31c_1b4c674f",
+        "filename": "crates/vali-compiler/lib/srfi/146.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 762,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Two problems with this hash.\n\n**It doesn\u0027t terminate on circular data.** It hashes every value with the value comparator\u0027s hash, which for `mapping-comparator` is `default-hash`, with a fresh budget each call. Since `mapping-comparator` is registered (776), `default-hash` recurses into mappings without end:\n\n```scheme\n(define v (vector #f)) (define m (mapping c 1 v)) (vector-set! v 0 m) (default-hash v)\n```\n\nThis was still running after 30 s. Left longer it dies with a fatal \"stack overflow\", which `guard` can\u0027t catch. A plain circular vector hashes at once, as 128.sld promises. `make-hashmap-comparator` (hash.sld:451) has the same shape.\n\n**It claims a hash it can\u0027t compute.** It is offered whenever the value comparator is hashable (771), but it also needs the key comparator\u0027s hash. So `(comparator-hashable? mapping-comparator)` is #t, yet with `m \u003d (mapping (make-comparator real? \u003d \u003c #f) 1 \u0027a 2 \u0027b)`, `(comparator-hash mapping-comparator m)` raises \"comparator has no hash function\". So does `default-hash` of anything holding such a mapping.\n\nFix for both: hash the size and the key hashes of at most a few keys, leaving values out. Equal mappings have equal keys, so that stays consistent with `mapping\u003d?`. Use only the size when the key comparator can\u0027t hash.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "012763dc_f1e25f24",
+        "filename": "crates/vali-compiler/lib/srfi/146.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 776,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "As on 113.sld:1323: registering makes 128\u0027s `default-hash` switch to `%slow-hash` for the whole program. Tables built with the default comparator before this library loads lose their keys, and default hashing gets slower. The spec no longer requires registering (post-finalization note).",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "39322246_e292a63b",
+        "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 17,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Nit: hashmaps can\u0027t be keys of mappings, since the hashmap comparator has no ordering. `(mapping c (hashmap c 1 2) \u0027a (hashmap c 3 4) \u0027b)` raises \"comparator has no ordering\". Reword the comment.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "b28f5e9f_5c696143",
+        "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 59,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "SRFI 146\u0027s comparator restrictions require a hash function only \"unless the equality predicate of the comparator is eq?, eqv?, equal?, string\u003d?, or string-ci\u003d?\". So `(hashmap-ref (hashmap (make-comparator string? string\u003d? #f #f) \"a\" 1 \"b\" 2) \"b\")` should give 2, but it raises \"the comparator of a hashmap needs a hash function\", as does `(make-comparator #t equal? #f #f)`. The regression test asserts that at line 527. When the comparator can\u0027t hash, make the table from its equality predicate (`(make-hash-table equality)`; 125 supplies the hash for those five), keep the comparator in the record, and have the hashmap comparator use `hash-table-hash-function`. The same applies to 113 (113.sld:153).",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "e3367024_f6d32b0f",
+        "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 91,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "`%set!` keeps the old key when the new one is equal under the comparator. With a string-ci comparator, `(hashmap-keys (hashmap-set (hashmap ci \"A\" 1) \"a\" 2))` gives `(\"A\")`, where `mapping-set` gives `(\"a\")`. The spec says the previous association \"is deleted\", and `hashmap-replace` already deletes first for that reason (165). This affects `hashmap-set(!)`, `-update(!)` and `-update/default(!)`. Delete the key before `hash-table-set!`.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "5391aa22_ece856c1",
+        "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 360,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:24:39Z",
+      "side": 1,
+      "message": "Nit: this relies on `values` evaluating its operands left to right, since the filtered copy must be made before `remove!` changes `m`. Vali does that today, but a `let*` would make it explicit.",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
