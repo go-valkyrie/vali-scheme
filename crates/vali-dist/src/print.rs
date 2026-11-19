@@ -125,6 +125,11 @@ impl fmt::Display for Constant {
                         }
                         f.write_str(")")?;
                     }
+                    Constant::Labelled(n, inner) => {
+                        write!(f, "#{n}=")?;
+                        pending.push(Datum::Constant(inner));
+                    }
+                    Constant::LabelRef(n) => write!(f, "#{n}#")?,
                 },
             }
         }

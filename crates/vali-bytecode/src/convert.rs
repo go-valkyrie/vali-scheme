@@ -118,6 +118,7 @@ fn constant(c: &ir::Constant) -> Constant {
         Ratio,
         Complex,
         Vector(usize),
+        Labelled(u32),
     }
     let mut tasks = vec![Task::Visit(c)];
     let mut out: Vec<Constant> = Vec::new();
@@ -158,7 +159,16 @@ fn constant(c: &ir::Constant) -> Constant {
                     tasks.push(Task::Vector(items.len()));
                     tasks.extend(items.iter().rev().map(Task::Visit));
                 }
+                ir::Constant::Labelled(n, inner) => {
+                    tasks.push(Task::Labelled(*n));
+                    tasks.push(Task::Visit(inner));
+                }
+                ir::Constant::LabelRef(n) => out.push(Constant::LabelRef(*n)),
             },
+            Task::Labelled(n) => {
+                let inner = out.pop().expect("a part");
+                out.push(Constant::Labelled(n, Box::new(inner)));
+            }
             Task::Pair => {
                 let (a, b) = two(&mut out);
                 out.push(Constant::Pair(a, b));

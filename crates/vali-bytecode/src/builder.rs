@@ -230,7 +230,10 @@ impl ModuleBuilder {
     ///
     /// If the pool would exceed 65,536 constants.
     pub fn constant(&mut self, constant: Constant) -> u16 {
-        let mutable = matches!(constant, Constant::Pair(..) | Constant::Vector(_));
+        let mutable = matches!(
+            constant,
+            Constant::Pair(..) | Constant::Vector(_) | Constant::Labelled(..)
+        );
         let found = if mutable {
             None
         } else {

@@ -71,6 +71,31 @@ fn datums_convert_both_ways() {
 }
 
 #[test]
+fn quoted_data_keeps_its_sharing_and_cycles() {
+    let mut cx = cx();
+    // Only what `quote` takes is a constant: sharing and cycles inside it
+    // become labels, and code around it is copied as before.
+    for (text, expected) in [
+        ("(quote (#0=(1) #0#))", "(quote (#0=(1) #0#))"),
+        ("(quote #0=(a . #0#))", "(quote #0=(a . #0#))"),
+        ("(quote (a . #0=(b #0#)))", "(quote (a . #0=(b #0#)))"),
+        ("(quote #0=#(1 #0#))", "(quote #0=#(1 #0#))"),
+        ("(quote (#0=\"s\" #0#))", "(quote (#0=\"s\" #0#))"),
+        ("(quote (1 (2)))", "(quote (1 (2)))"),
+        ("((#0=(1)) (quote #0#))", "(((1)) (quote (1)))"),
+    ] {
+        let v = cx.read(text).unwrap().remove(0);
+        // SAFETY: the handle keeps it valid.
+        let datum = unsafe { cx.value_datum(cx.get(&v).unwrap(), span()) }.unwrap();
+        assert_eq!(datum.to_string(), expected, "{text}");
+    }
+    // A cycle outside a quotation is still no datum.
+    let cycle = cx.read("(f #0=(1 . #0#))").unwrap().remove(0);
+    // SAFETY: as above.
+    assert!(unsafe { cx.value_datum(cx.get(&cycle).unwrap(), span()) }.is_none());
+}
+
+#[test]
 fn partly_wrapped_values_become_syntax() {
     let mut cx = cx();
     let mut scopes = ScopeContext::new();

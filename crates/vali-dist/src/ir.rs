@@ -104,6 +104,16 @@ pub enum Constant {
     Vector(Vec<Constant>),
     /// An immutable bytevector.
     Bytevector(Vec<u8>),
+    /// A constant that other parts of the same top-level constant refer
+    /// back to, or whose own parts do (`#n=` in source). Labels are
+    /// numbered from 0 in the order they are defined, which is the order
+    /// of a pre-order walk, so a [`Constant::LabelRef`] always follows the
+    /// label it names or sits inside it. Referring back is what keeps
+    /// sharing and cycles: the tree itself never contains a cycle.
+    Labelled(u32, Box<Constant>),
+    /// The constant labelled `n`, defined earlier in the same top-level
+    /// constant (`#n#` in source): the same object, not a copy.
+    LabelRef(u32),
 }
 
 impl Constant {
@@ -113,6 +123,9 @@ impl Constant {
             Constant::Ratio(a, b) | Constant::Complex(a, b) | Constant::Pair(a, b) => {
                 out.push(std::mem::replace(&mut **a, Constant::EmptyList));
                 out.push(std::mem::replace(&mut **b, Constant::EmptyList));
+            }
+            Constant::Labelled(_, inner) => {
+                out.push(std::mem::replace(&mut **inner, Constant::EmptyList));
             }
             Constant::Vector(items) => out.append(items),
             _ => {}
@@ -128,6 +141,7 @@ impl Constant {
                 [&**a, &**b].get(index).copied()
             }
             Constant::Vector(items) => items.get(index),
+            Constant::Labelled(_, inner) => [&**inner].get(index).copied(),
             _ => None,
         }
     }
@@ -149,9 +163,11 @@ impl Constant {
             Constant::Symbol(s) => Constant::Symbol(s.clone()),
             Constant::Keyword(s) => Constant::Keyword(s.clone()),
             Constant::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
+            Constant::LabelRef(n) => Constant::LabelRef(*n),
             Constant::Ratio(..)
             | Constant::Complex(..)
             | Constant::Pair(..)
+            | Constant::Labelled(..)
             | Constant::Vector(_) => {
                 return None;
             }
@@ -177,6 +193,9 @@ impl Constant {
             Constant::Pair(..) => {
                 let (a, b) = two();
                 Constant::Pair(a, b)
+            }
+            Constant::Labelled(n, _) => {
+                Constant::Labelled(*n, Box::new(parts.pop().expect("one part")))
             }
             _ => Constant::Vector(parts),
         }
@@ -255,6 +274,10 @@ impl PartialEq for Constant {
                     pending.push((a2, b2));
                     pending.push((a1, b1));
                 }
+                (Constant::Labelled(n, x), Constant::Labelled(m, y)) if n == m => {
+                    pending.push((x, y));
+                }
+                (Constant::LabelRef(x), Constant::LabelRef(y)) if x == y => {}
                 (Constant::Vector(x), Constant::Vector(y)) if x.len() == y.len() => {
                     pending.extend(x.iter().zip(y).rev());
                 }
