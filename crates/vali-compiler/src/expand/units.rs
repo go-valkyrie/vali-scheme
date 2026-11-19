@@ -564,6 +564,11 @@ impl Expander {
                 "it links {name}, which only Vali's own libraries may"
             )));
         }
+        if let Some(name) = links_repl(&ir) {
+            return Err(fail(format!(
+                "it links {name}, an isolate global, which only a REPL's input may"
+            )));
+        }
         let mut module = converted(&ir)?;
         // The digest that tells this build from another is the IR's
         // encoding's, as `library` computes it for a library made from
@@ -652,7 +657,19 @@ impl Expander {
             ));
         }
         // A transformer runs in the expander's isolate, so what its code
-        // links is held to what a library's own may.
+        // links is held to what a library's own may, and it may not touch
+        // the isolate's globals.
+        for m in syntax.macros.values() {
+            if let Transformer::Procedure(p) = &m.transformer
+                && let Some(name) = links_repl(&p.ir)
+            {
+                return Err(format!(
+                    "the transformer {} links {name}, an isolate global, which only a \
+                     REPL's input may",
+                    m.name
+                ));
+            }
+        }
         if !own {
             let mut allowed = vec![QUOTE_SYNTAX, SYNTAX_MATCH, SYNTAX_BUILD];
             allowed.extend(MACRO_PRIMITIVES);
@@ -667,11 +684,70 @@ impl Expander {
                 }
             }
         }
-        let bindings = record
-            .interface
-            .values()
-            .chain(syntax.table.entries().map(|(_, _, _, binding)| binding));
-        for binding in bindings {
+        // The variables of another library this export may name: what that
+        // library's interface exports, and, in the syntax export only, what
+        // came in when this library imported it, which a macro's template
+        // may need (see `reproduces`). Its other variables are its own: no
+        // export of another library reaches them.
+        let exported_by = |owner: usize| -> HashSet<&str> {
+            self.units.get(owner).map_or_else(HashSet::new, |u| {
+                u.interface
+                    .values()
+                    .filter_map(|b| match b {
+                        Binding::Variable(o, n) if *o == owner => Some(n.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        };
+        let mut exported: HashMap<usize, HashSet<&str>> = HashMap::new();
+        let mut brought: HashMap<usize, Brought<'_>> = HashMap::new();
+        let own_scopes = own_scopes(syntax, index);
+        let interface = record.interface.values().map(|b| (None, b));
+        let table = syntax
+            .table
+            .entries()
+            .map(|(symbol, set, _, binding)| (Some((symbol, set)), binding));
+        for (entry, binding) in interface.chain(table) {
+            match binding {
+                Binding::Global(name) => {
+                    return Err(format!(
+                        "it binds {name}, an isolate global, which only a REPL's input may"
+                    ));
+                }
+                Binding::Variable(owner, name) if *owner != index => {
+                    let unit = self.units.get(*owner).filter(|u| !u.repl).ok_or_else(|| {
+                        format!("it binds {name} of a library that is not loaded")
+                    })?;
+                    let names = exported
+                        .entry(*owner)
+                        .or_insert_with(|| exported_by(*owner));
+                    if names.contains(name.as_str()) {
+                        continue;
+                    }
+                    let theirs = unit.syntax.as_deref();
+                    let kept = entry.zip(theirs).is_some_and(|((symbol, set), theirs)| {
+                        reproduces(
+                            theirs,
+                            syntax,
+                            &own_scopes,
+                            brought
+                                .entry(*owner)
+                                .or_insert_with(|| Brought::of(*owner, theirs, syntax)),
+                            symbol,
+                            set,
+                            name,
+                        )
+                    });
+                    if !kept {
+                        return Err(format!(
+                            "it binds {name} of {}, which does not export it",
+                            unit.identity
+                        ));
+                    }
+                }
+                _ => {}
+            }
             match binding {
                 Binding::Macro(id) => {
                     let defined = |syntax: &ContextState| syntax.macros.contains_key(id);
@@ -1087,4 +1163,142 @@ fn links_internal(ir: &vali_dist::Module, allowed: &[&str]) -> Option<String> {
                 || matches!(g.link, vali_dist::GlobalLink::Native(_))
         })
         .map(|g| g.name.to_string())
+}
+
+/// The first of `ir`'s globals that is an isolate global, a REPL's variable:
+/// no library's code may link one, since it would read or assign what the
+/// host and other code keep there.
+fn links_repl(ir: &vali_dist::Module) -> Option<String> {
+    ir.globals
+        .iter()
+        .find(|g| matches!(g.link, vali_dist::GlobalLink::Repl))
+        .map(|g| g.name.to_string())
+}
+
+/// The scopes `syntax` binds its own definitions and macros under, other
+/// than the core forms': what a library's own identifiers carry, which
+/// what it imported never does.
+fn own_scopes(syntax: &ContextState, index: usize) -> HashSet<Scope> {
+    let mut scopes = HashSet::new();
+    for (_, set, _, binding) in syntax.table.entries() {
+        let own = match binding {
+            Binding::Variable(owner, _) => *owner == index,
+            Binding::Macro(id) => id.unit as usize == index,
+            _ => false,
+        };
+        if own {
+            scopes.extend(syntax.context.scopes(set).iter().copied());
+        }
+    }
+    scopes.remove(&syntax.core_scope);
+    scopes
+}
+
+/// What importing a library brought in, as `reproduces` matches it: the
+/// scope sets its own syntax export binds each symbol to each of its
+/// variables under, and the mapping so far from its scopes to this one's,
+/// forwards and the scopes mapped to.
+#[derive(Default)]
+struct Brought<'a> {
+    bound: HashMap<(&'a str, &'a str), Vec<ScopeSetId>>,
+    forward: HashMap<Scope, Scope>,
+    taken: HashSet<Scope>,
+}
+
+impl<'a> Brought<'a> {
+    fn of(owner_index: usize, owner: &'a ContextState, syntax: &ContextState) -> Self {
+        let mut brought = Brought::default();
+        for (symbol, set, _, binding) in owner.table.entries() {
+            if let Binding::Variable(o, name) = binding
+                && *o == owner_index
+            {
+                brought
+                    .bound
+                    .entry((symbol.as_str(), name.as_str()))
+                    .or_default()
+                    .push(set);
+            }
+        }
+        brought.forward.insert(owner.core_scope, syntax.core_scope);
+        brought.taken.insert(syntax.core_scope);
+        brought
+    }
+}
+
+/// Whether `symbol` bound under `set` in `syntax` to the variable `name` of
+/// `owner`, one it does not export, is what importing `owner` brought in:
+/// `owner`'s own syntax export binds that name to that variable under
+/// scopes that this one's map onto, one to one, by kind, with the core
+/// forms' scope the same (`remap_export`). `brought` holds the mapping so
+/// far, from `owner`'s scopes to this one's; the scopes a library's own
+/// definitions are bound under are not a mapping of anyone's.
+///
+/// This keeps an export's bindings honest; it is not a privacy boundary. A
+/// crafted artifact can add a scope that binds none of its definitions, so
+/// it is not in `own_scopes`, and bind the variable under it: that maps
+/// onto the owner's entry as a real import's scope does, and the loader
+/// cannot tell the two apart. The artifact's code can link the variable by
+/// name anyway (ADR 0012 #9).
+fn reproduces(
+    owner: &ContextState,
+    syntax: &ContextState,
+    own_scopes: &HashSet<Scope>,
+    brought: &mut Brought<'_>,
+    symbol: &str,
+    set: ScopeSetId,
+    name: &str,
+) -> bool {
+    let here = syntax.context.scopes(set);
+    if here.iter().any(|s| own_scopes.contains(s)) {
+        return false;
+    }
+    let Some(candidates) = brought.bound.get(&(symbol, name)) else {
+        return false;
+    };
+    let candidates = candidates.clone();
+    for their_set in candidates {
+        let there = owner.context.scopes(their_set);
+        if there.len() != here.len() {
+            continue;
+        }
+        // Each of theirs is already mapped to one of ours in `here`, or
+        // is matched to a scope of the same kind that nothing is mapped to.
+        let mut free: Vec<Scope> = here.to_vec();
+        let mut added = Vec::new();
+        let mut fits = true;
+        for &s in there {
+            match brought.forward.get(&s) {
+                Some(mapped) => match free.iter().position(|f| f == mapped) {
+                    Some(at) => {
+                        free.swap_remove(at);
+                    }
+                    None => {
+                        fits = false;
+                        break;
+                    }
+                },
+                None => {
+                    let kind = owner.context.kind(s);
+                    let Some(at) = free.iter().position(|f| {
+                        syntax.context.kind(*f) == kind && !brought.taken.contains(f)
+                    }) else {
+                        fits = false;
+                        break;
+                    };
+                    let f = free.swap_remove(at);
+                    brought.forward.insert(s, f);
+                    brought.taken.insert(f);
+                    added.push((s, f));
+                }
+            }
+        }
+        if fits {
+            return true;
+        }
+        for (s, f) in added {
+            brought.forward.remove(&s);
+            brought.taken.remove(&f);
+        }
+    }
+    false
 }
