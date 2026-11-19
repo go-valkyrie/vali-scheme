@@ -1,0 +1,72 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "52497eb1_9a3d1fbf",
+        "filename": "crates/vali-compiler/lib/srfi/116.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 11,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:19Z",
+      "side": 1,
+      "message": "Nit: the header says the procedures that don\u0027t walk the spine \"raise on\" dotted ilists, and that `iappend` keeps a non-empty tail. Neither holds:\n\n- `(ifold + 0 (ipair 1 2))` is 1.\n- `(imap - (ipair 1 2))` is `(-1)`.\n- `(iappend (ipair 1 2) (ilist 3))` is `(1 3)`, dropping the 2.\n\nThe SRFI makes these \"an error\", so correcting the comment is enough.",
+      "revId": "67466ad6527d84b5b1e1c52b96cb79bb4cc0586d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "f16e73e9_5f21e294",
+        "filename": "crates/vali-compiler/lib/srfi/116.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 270,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:19Z",
+      "side": 1,
+      "message": "`(apply iappend …)` hits the argument limit. `iconcatenate` of 10,000 one-element ilists raises \"too many arguments to fit in this stack segment\", and so does `iappend-map` (406) over 10,000 elements. SRFI 1\u0027s `concatenate`/`append-map` here handle that size. The SRFI gives `iconcatenate` exactly for lists too long for `apply`, and the commit says long ilists are as safe as long lists.\n\nLoop instead: start from the last ilist and `%rev-onto` the reversed earlier ones. `%map-results` already returns results last-first, so `iappend-map` can share the loop.",
+      "revId": "67466ad6527d84b5b1e1c52b96cb79bb4cc0586d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "7868565d_abcca187",
+        "filename": "crates/vali-compiler/lib/srfi/116.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 620,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:19Z",
+      "side": 1,
+      "message": "Passing `not-ipair?` as the list comparator\u0027s `empty?` makes every non-ipair \"empty\", so all non-ipairs are equal and sort before ipairs. With `c \u003d (make-improper-ilist-comparator (make-default-comparator))`:\n\n- `(\u003d? c 1 2)` is #t.\n- `(\u003d? c (ipair 1 2) (ipair 1 3))` is #t, because the tails 2 and 3 compare equal.\n- `(\u003c? c (ipair 1 \u0027()) 5)` is #f, and `(\u003c? c 5 (ipair 1 \u0027()))` is #t.\n- 1 and 2 hash alike.\n\nThe spec: \"the empty list precedes all ipairs, which precede all other objects. Ipairs are compared as if with (make-ipair-comparator comparator comparator). All other objects are compared using comparator.\" The regression test (368-370) only checks equal ipairs, which pass by accident. Write it directly with three ranks (() \u003c ipair \u003c other), recursing for ipairs and using `comparator` for the rest, with a hash to match.",
+      "revId": "67466ad6527d84b5b1e1c52b96cb79bb4cc0586d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "bac88221_e96fb197",
+        "filename": "crates/vali-compiler/lib/srfi/116.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 626,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:19Z",
+      "side": 1,
+      "message": "`ipair-comparator` and `ilist-comparator` compare elements with SRFI 128\u0027s default comparator, which knows nothing of ipairs: it compares them with `eqv?` and has no order for them.\n\n- `(\u003d? ilist-comparator (iq (1)) (iq (1)))` is #f, while `equal?` says #t.\n- `(\u003c? ilist-comparator (iq (1)) (iq (2)))` raises \"no ordering for this type of object\".\n\nSince `iq` makes every nested list an ilist, any ilist of ilists breaks, e.g. as a (srfi 146) key. The header (20) admits it, but the spec defines these over the default comparator. Use a library-local element comparator that recurses into ipairs (and hashes them), so that what other libraries get from `default-hash` doesn\u0027t change. On 1260924 I\u0027ve asked that standard libraries not register with `comparator-register-default!`.",
+      "revId": "67466ad6527d84b5b1e1c52b96cb79bb4cc0586d",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
