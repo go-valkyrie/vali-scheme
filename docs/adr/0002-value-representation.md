@@ -26,7 +26,7 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
 |---|---|---|
 | `000` | Fixnum, 61-bit two's complement | Arithmetic and comparison work on the word directly; the value is the word shifted right by 3 |
 | `001` | Pair | `car`, `cdr`, `pair?` and walking lists. A pair has no runtime header: two words, `car` and `cdr`, plus a header only if the memory strategy wants one (item 8) |
-| `010` | Closure | Every call's "is this callable?" check, and `procedure?` in contracts. The closure's first word points to its function, whose entry field tier-up replaces, as HotSpot's methods do; a call is a tag test, two dependent loads and an indirect call |
+| `010` | Closure | Every call's "is this callable?" check, and `procedure?` in contracts. The closure's first word points to its function, whose entry field tier-up replaces, as HotSpot's methods do, and whose first call converts it if its library converts functions as they are called (ADR 0017 #10); a call is a tag test, two dependent loads and an indirect call |
 | `011` | Symbol | `symbol?`, and the case analysis that macros do |
 | `100` | String | `string?`, probably the most common contract on data |
 | `101` | Flonum | Boxed IEEE 754 binary64. Generic arithmetic's test after the fixnum test |
@@ -72,7 +72,7 @@ Type tests are frequent. Every call checks that its callee is callable. `car`, `
     |---|---|---|
     | Pair | `car`, `cdr` | None |
     | Flonum | The `f64` | None |
-    | Closure | A pointer to its function (bytecode, side tables, and the current entry point, shared between isolates and outside every heap), then the free variables | The free-variable count |
+    | Closure | A pointer to its function (bytecode, which a library's function gets on its first call, side tables, and the current entry point, shared between isolates and outside every heap), then the free variables | The free-variable count |
     | Symbol | The name (an immutable string) and a precomputed hash | Interned, uninterned or generated |
     | String | Byte length, character count, a pointer to the bytes, a pointer to index hints | Immutable, all ASCII |
 

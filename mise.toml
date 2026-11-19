@@ -16,7 +16,7 @@ description = "Build every crate"
 run = "cargo build --workspace --all-targets"
 
 [tasks.test]
-description = "Run every crate's tests, the native debugger tests with native frames on, the library tests on artifacts, the whole `it` binaries unoptimised, and the regressions and conformance suites unoptimised"
+description = "Run every crate's tests, the native debugger tests with native frames on, the library tests on artifacts, the whole `it` binaries, regressions and conformance suites unoptimised, and again with every function converted as its library loads"
 run = [
     # Not the examples: they have no tests, linking them costs time, and
     # Clippy (`lint`) already checks they compile. Naming the targets turns
@@ -33,6 +33,12 @@ run = [
     "VALI_NO_OPT=1 cargo test --workspace --test it",
     "VALI_NO_OPT=1 cargo test --workspace --test regressions",
     "VALI_NO_OPT=1 cargo test --workspace --test conformance",
+    # Libraries convert to bytecode as their functions are first called; the
+    # eager pass converts them whole as they load, so every other test also
+    # runs on code converted the other way.
+    "VALI_EAGER=1 cargo test --workspace --test it",
+    "VALI_EAGER=1 cargo test --workspace --test regressions",
+    "VALI_EAGER=1 cargo test --workspace --test conformance",
 ]
 
 [tasks.test-debugger-optimised]
