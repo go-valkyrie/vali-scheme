@@ -1,0 +1,140 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "85ffdcd9_10159fde",
+        "filename": "crates/vali-compiler/lib/srfi/127.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 64,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "Nit: `lseq?` never returns on a circular list, where `list?` says #f. A tortoise-and-hare walk would end.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "a406715a_eda525a8",
+        "filename": "crates/vali-compiler/lib/srfi/127.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 79,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "`lseq-take` (and `lseq-\u003egenerator` 105, `lseq-map` 120, `lseq-filter` 153) calls `lseq-cdr` on its source right after handing out an element, so it forces one element past what was asked for.\n\n- **Hang:** `(lseq-realize (lseq-take (lseq-filter (lambda (x) (\u003c x 3)) (generator-\u003elseq naturals)) 3))` never returns. Taking the third element makes the filter look for a fourth, which doesn\u0027t exist. `lseq-\u003egenerator` over the same filter hangs on its third call.\n- **Read-ahead:** with `cs \u003d (generator-\u003elseq (lambda () (read-char p)))` over \"abcdef\", `(lseq-realize (lseq-take cs 3))` gives `(a b c)`, but the next `(read-char p)` gives `#\\e`, not `#\\d`. `(lseq-car (lseq-map char-upcase cs))` reads two characters.\n\nThe sample has the same flaw. Advance the source at the start of the next call instead, e.g. a `started` flag and `(when started (set! lseq (lseq-cdr lseq)))` before `(lseq-car lseq)`, with `lseq-take` checking its count first. Apply that to all four and add the filter and port cases to the test.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "fe82c666_2438ba9a",
+        "filename": "crates/vali-compiler/lib/srfi/133.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 445,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "`vector-unfold!` (and `vector-unfold-right!`, 489) checks only that the indices are non-negative integers.\n\n- **Reversed range:** `(vector-unfold! f w 4 2)` silently does nothing.\n- **End past the vector:** `(vector-unfold! (lambda (i) \u0027x) v 1 5)` on `#(1 2 3)` raises only after storing, leaving `v` as `#(1 x x)`.\n- **Not a vector:** a non-vector is accepted when the range is empty.\n\n`check-type vector?` and `check-indices` before the first store.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "e358176d_8c35e1dd",
+        "filename": "crates/vali-compiler/lib/srfi/133.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 561,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "None of the triples is checked.\n\n- `(vector-append-subvectors (vector \u0027a \u0027b \u0027c \u0027d) 0 2 (vector \u0027d \u0027e \u0027f) 3 2 (vector \u0027x \u0027y) 0 1)` returns `#(a x)` instead of raising: start 3 \u003e end 2. A negative-length triple shrinks the total and moves the write position back, so the next subvector overwrites earlier output.\n- Other bad input fails with whatever error comes up first. A start of -1 gives a `vector-ref` range error, a flonum end gives a `make-vector` error, and an odd argument count gives \"cdr: expected a pair, got ()\".\n\nCheck each triple with `check-type vector?` and `check-indices`, and name the procedure for an odd count.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "7000f76b_ef4ce725",
+        "filename": "crates/vali-compiler/lib/srfi/133.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 860,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "Nit: `vector-skip-right` passes `vector-index-right` as the caller\u0027s name, so its type errors name the wrong procedure.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "545853a1_35d5acb1",
+        "filename": "crates/vali-compiler/lib/srfi/133.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 980,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "Nit: `pred?` is called twice per element, once by `vector-count` and again in the loop. A 4-element vector costs 8 calls. A predicate with state, e.g. #t only the first time it sees a value, then overruns the result: \"vector-set!: index 3 is out of range\". Call it once per element and keep the answers.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "7af6702a_7365b5cf",
+        "filename": "crates/vali-compiler/lib/srfi/133.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1003,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "The mutators here skip the project\u0027s literal-vector check: `vector-swap!`, `vector-reverse!` (1069), `vector-map!` (734), `vector-reverse-copy!` (1025), `vector-unfold!` (425) and `vector-unfold-right!` (469). literal-vectors-immutable.scm requires that \"every vector mutator raises\" on a literal, that \"an empty range still raises: the check comes before any store\", and that the message names the procedure. 132.sld meets this with `%check-mutable-vector`.\n\nHere `(vector-reverse! \u0027#(3 1 2) 1 1)` returns normally. Non-empty ranges raise \"vector-set!: the vector #(3 1 2) is immutable\", naming `vector-set!` rather than the procedure called, and `vector-map!` calls `f` once before that.\n\nImport `(only (vali primitive) %check-mutable-vector)` as 132.sld does, call it first in each mutator, and add these to that regression test (and 133.sld to ADR 0020 §7\u0027s table, beside 132).",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "56a7bb46_e1aade6f",
+        "filename": "crates/vali-compiler/lib/srfi/133.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1030,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:38:20Z",
+      "side": 1,
+      "message": "`vector-reverse-copy!` within one vector is wrong in three ways.\n\n- **Same start:** `(let ((v (vector 1 2 3 4 5))) (vector-reverse-copy! v 0 v 0 5) v)` gives `#(5 4 3 4 5)`, expected `#(5 4 3 2 1)`. `(vector-reverse-copy! v 1 v 1 4)` gives `#(1 4 3 4 5)`, expected `#(1 4 3 2 5)`. When tstart \u003d sstart, the check lets the call through and the loop reads elements it has already overwritten. SRFI 43 says that case behaves as `vector-reverse!`.\n- **Adjacent ranges:** on `#(1 2 3 4)`, `(vector-reverse-copy! v 2 v 0 2)` raises \"vector range for self-copying overlaps\" (expected `#(1 2 2 1)`). The bounds test uses `\u003c\u003d`.\n- **Overlapping ranges:** they raise, e.g. `(vector-reverse-copy! v 1 v 0 3)`, expected `#(1 3 2 1)`. SRFI 133 defines this procedure as \"like `vector-copy!`\", which must behave as if it copied through a temporary. The \"error if the ranges overlap\" rule is SRFI 43\u0027s.\n\nAll of this comes from the sample implementation, and the regression test never copies within one vector. Drop the overlap branch: after the range checks, `(vector-copy! target tstart source sstart send)` then `(vector-reverse! target tstart (+ tstart (- send sstart)))`. That\u0027s overlap-safe and allocates nothing. Add the cases above to the test.",
+      "revId": "b8ac22d5b0a55b684657d0706c0efe31172e334b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
