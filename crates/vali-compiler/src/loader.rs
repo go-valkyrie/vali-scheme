@@ -274,6 +274,10 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["scheme", "time"], include_str!("../lib/scheme/time.sld")),
     (&["vali", "exit"], include_str!("../lib/vali/exit.sld")),
     (
+        &["vali", "hash-nesting"],
+        include_str!("../lib/vali/hash-nesting.sld"),
+    ),
+    (
         &["vali", "pipeline"],
         include_str!("../lib/vali/pipeline.sld"),
     ),
@@ -298,6 +302,7 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["srfi", "87"], include_str!("../lib/srfi/87.sld")),
     (&["srfi", "88"], include_str!("../lib/srfi/88.sld")),
     (&["srfi", "111"], include_str!("../lib/srfi/111.sld")),
+    (&["srfi", "113"], include_str!("../lib/srfi/113.sld")),
     (&["srfi", "116"], include_str!("../lib/srfi/116.sld")),
     (&["srfi", "117"], include_str!("../lib/srfi/117.sld")),
     (&["srfi", "125"], include_str!("../lib/srfi/125.sld")),
@@ -307,6 +312,11 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["srfi", "133"], include_str!("../lib/srfi/133.sld")),
     (&["srfi", "141"], include_str!("../lib/srfi/141.sld")),
     (&["srfi", "145"], include_str!("../lib/srfi/145.sld")),
+    (&["srfi", "146"], include_str!("../lib/srfi/146.sld")),
+    (
+        &["srfi", "146", "hash"],
+        include_str!("../lib/srfi/146/hash.sld"),
+    ),
     (&["srfi", "158"], include_str!("../lib/srfi/158.sld")),
     (&["srfi", "197"], include_str!("../lib/srfi/197.sld")),
     (&["srfi", "227"], include_str!("../lib/srfi/227.sld")),
