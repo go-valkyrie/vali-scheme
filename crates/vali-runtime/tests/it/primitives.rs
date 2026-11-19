@@ -115,6 +115,17 @@ fn errors() {
     assert_eq!(message(&mut cx, "car", "1"), "car: expected a pair, got 1");
     assert!(message(&mut cx, "vector-ref", "#(a) 9").contains("out of range"));
     assert!(message(&mut cx, "length", "(1 . 2)").contains("a proper list"));
+    for name in ["length", "reverse", "list->vector", "memq"] {
+        let args = if name == "memq" {
+            "z #0=(a b . #0#)"
+        } else {
+            "#0=(a b c . #0#)"
+        };
+        assert!(
+            message(&mut cx, name, args).contains("circular"),
+            "{name} on a circular list"
+        );
+    }
     assert_eq!(
         message(&mut cx, "quotient", "1 0"),
         "quotient: division by zero"

@@ -82,22 +82,36 @@ fn list<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Error> {
     Ok(list)
 }
 
-/// The elements of a proper list, or an error naming `name`.
+/// The error for a circular `list` passed to `name`.
+fn circular_error(name: &str, list: Value) -> Error {
+    type_error(name, "a proper list, not a circular one", list)
+}
+
+/// The elements of a proper list, or an error naming `name`. A circular list
+/// is an error too, not a walk without end.
 pub(crate) fn elements<S: Strategy>(
     cx: &Cx<S>,
     name: &str,
-    mut list: Value,
+    list: Value,
 ) -> Result<Vec<Value>, Error> {
     let start = list;
+    let mut list = list;
     let mut items = Vec::new();
+    // The tortoise advances every other element, so a cycle is found within
+    // about twice its length plus the length of its tail.
+    let mut slow = list;
     while list.is_pair() {
         // SAFETY: a live pair.
         unsafe {
             items.push(cx.car(list));
             list = cx.cdr(list);
         }
-        if items.len() > 1 << 40 {
-            break;
+        if items.len() % 2 == 0 {
+            // SAFETY: the tortoise trails the walk through live pairs.
+            slow = unsafe { cx.cdr(slow) };
+            if slow == list {
+                return Err(circular_error(name, start));
+            }
         }
     }
     if list == Value::EMPTY_LIST {
@@ -287,6 +301,8 @@ fn member_by<S: Strategy>(
     same: fn(&Cx<S>, Value, Value) -> bool,
 ) -> Result<Value, Error> {
     let mut tail = list;
+    let mut slow = list;
+    let mut step = false;
     while tail.is_pair() {
         // SAFETY: a live pair.
         if same(cx, x, unsafe { cx.car(tail) }) {
@@ -294,6 +310,14 @@ fn member_by<S: Strategy>(
         }
         // SAFETY: a live pair.
         tail = unsafe { cx.cdr(tail) };
+        if step {
+            // SAFETY: the tortoise trails through live pairs.
+            slow = unsafe { cx.cdr(slow) };
+            if slow == tail {
+                return Err(circular_error(name, list));
+            }
+        }
+        step = !step;
     }
     if tail == Value::EMPTY_LIST {
         Ok(Value::FALSE)
