@@ -409,3 +409,97 @@ fn conversions_and_case() {
     .unwrap();
     assert_eq!(cx.write_string(&v).unwrap(), "#(0 0 0)");
 }
+
+#[test]
+fn hashes_agree_with_their_equivalences() {
+    let mut cx = cx();
+    // Each datum is read afresh for every call, so equal ones are different
+    // objects; the hashes are deterministic and in range.
+    let same = [
+        ("%equal-hash", "(1 \"a\" #(2 (3)))"),
+        ("%equal-hash", "#u8(1 2 3)"),
+        ("%equal-hash", "\"hello\""),
+        ("%eqv-hash", "123456789012345678901234567890"),
+        ("%eqv-hash", "1/3"),
+        ("%eqv-hash", "2.5"),
+        ("%eqv-hash", "1+2i"),
+        ("%eq-hash", "x"),
+        ("%eq-hash", "#\\a"),
+        ("%eq-hash", "42"),
+        ("%string-hash", "\"hello\""),
+        ("%symbol-hash", "hello"),
+    ];
+    for (name, datum) in same {
+        let first = ok(&mut cx, name, datum);
+        let second = ok(&mut cx, name, datum);
+        assert_eq!(first, second, "({name} {datum})");
+        let n: i64 = first.parse().unwrap();
+        assert!((0..1 << 60).contains(&n), "({name} {datum}) = {n}");
+    }
+    // Different values that must hash alike.
+    let alike = [
+        ("%number-hash", "2", "2.0"),
+        ("%number-hash", "1/2", "0.5"),
+        ("%number-hash", "0", "-0.0"),
+        ("%number-hash", "1+2i", "1.0+2.0i"),
+        (
+            "%number-hash",
+            "9223372036854775808",
+            "9223372036854775808.0",
+        ),
+        (
+            "%number-hash",
+            "-9223372036854775808",
+            "-9223372036854775808.0",
+        ),
+        ("%equal-hash", "2", "2.0"),
+        ("%equal-hash", "(1 2)", "(1.0 2)"),
+        ("%string-ci-hash", "\"Straße\"", "\"STRASSE\""),
+    ];
+    for (name, a, b) in alike {
+        assert_eq!(ok(&mut cx, name, a), ok(&mut cx, name, b), "{a} {b}");
+    }
+    // Different values that should hash apart.
+    let apart = [
+        ("%equal-hash", "(1 2)", "(2 1)"),
+        ("%equal-hash", "\"ab\"", "\"ba\""),
+        ("%number-hash", "1", "2"),
+        ("%number-hash", "1/2", "1/3"),
+        ("%string-hash", "\"a\"", "\"b\""),
+        ("%symbol-hash", "a", "b"),
+    ];
+    for (name, a, b) in apart {
+        assert_ne!(ok(&mut cx, name, a), ok(&mut cx, name, b), "{a} {b}");
+    }
+    assert!(call(&mut cx, "%string-hash", "x").is_err());
+    assert!(call(&mut cx, "%symbol-hash", "\"x\"").is_err());
+    assert!(call(&mut cx, "%number-hash", "\"x\"").is_err());
+}
+
+#[test]
+fn equal_hash_is_bounded_on_circular_and_deep_structure() {
+    let mut cx = cx();
+    // A circular list terminates.
+    let n: i64 = ok(&mut cx, "%equal-hash", "#0=(1 . #0#)").parse().unwrap();
+    assert!((0..1 << 60).contains(&n));
+    // Two different circular lists that `equal?` equates hash alike.
+    assert_eq!(
+        ok(&mut cx, "%equal-hash", "#0=(1 2 . #0#)"),
+        ok(&mut cx, "%equal-hash", "#0=(1 2 1 2 . #0#)"),
+    );
+    // A list nested 100,000 deep, built with `list` so the reader's own
+    // depth limit is not in play, hashes in bounded time without a stack
+    // overflow, and alike when built twice.
+    let list = cx.primitive("list").unwrap();
+    let equal_hash = cx.primitive("%equal-hash").unwrap();
+    let mut hashes = Vec::new();
+    for _ in 0..2 {
+        let mut nested = cx.read("()").unwrap().remove(0);
+        for _ in 0..100_000 {
+            nested = cx.call(&list, &[nested]).unwrap();
+        }
+        let h = cx.call(&equal_hash, &[nested]).unwrap();
+        hashes.push(cx.write_string(&h).unwrap());
+    }
+    assert_eq!(hashes[0], hashes[1]);
+}

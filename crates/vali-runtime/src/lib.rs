@@ -20,6 +20,7 @@ mod cycles;
 pub mod debug;
 mod epoch;
 mod handle;
+mod hashing;
 mod isolate;
 mod no_collection;
 mod numbers;

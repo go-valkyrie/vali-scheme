@@ -94,6 +94,18 @@ pub trait References: Allocate {
     #[inline(always)]
     fn release(_heap: &mut Self::Heap, _v: crate::Value) {}
 
+    /// A hash of the heap object `v` for `eq?` and `eqv?` tables, the same
+    /// for as long as `v` lives.
+    ///
+    /// The default is derived from the address, which holds because no
+    /// strategy moves objects (ADR 0003). A strategy that moves them must
+    /// override this to return a hash stored in the object (a lazily added
+    /// field, or a side table), or the tables built on it break.
+    #[inline(always)]
+    fn identity_hash(v: crate::Value) -> u64 {
+        v.address() >> 3
+    }
+
     /// The runtime holds `bytes` bytes outside the heap that live and die
     /// with an object it is about to allocate, as a module's code does: a
     /// counting strategy counts them as allocated, so epochs come as often
