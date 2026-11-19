@@ -35,6 +35,7 @@ use vali_runtime::{Cx, DeferredHeadered, Handle};
 
 mod artifact;
 mod context;
+mod quasiquote;
 mod transformers;
 mod units;
 
@@ -80,6 +81,9 @@ pub(crate) enum Core {
     LetrecSyntax,
     SyntaxRules,
     QuoteSyntax,
+    Quasiquote,
+    Unquote,
+    UnquoteSplicing,
     SyntaxCase,
     Syntax,
     Include,
@@ -102,6 +106,9 @@ const CORE: &[(&str, Core)] = &[
     ("letrec-syntax", Core::LetrecSyntax),
     ("syntax-rules", Core::SyntaxRules),
     ("quote-syntax", Core::QuoteSyntax),
+    ("quasiquote", Core::Quasiquote),
+    ("unquote", Core::Unquote),
+    ("unquote-splicing", Core::UnquoteSplicing),
     ("syntax-case", Core::SyntaxCase),
     ("syntax", Core::Syntax),
     ("include", Core::Include),
@@ -1176,6 +1183,11 @@ impl Expander {
                     span,
                 ))
             }
+            Core::Quasiquote => self.quasiquote(keyword, args, span),
+            Core::Unquote | Core::UnquoteSplicing => Err(error(
+                format!("{keyword}: misplaced auxiliary syntax"),
+                span,
+            )),
             Core::SyntaxCase => self.syntax_case(keyword, args, span),
             Core::Syntax => self.syntax_template(keyword, args, span),
         }
