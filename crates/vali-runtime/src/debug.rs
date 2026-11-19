@@ -4,20 +4,25 @@
 //! knowing how Rust lays out Vali's own types.
 //!
 //! The extensions, in `tools/debugger/`, find the innermost Scheme frame
-//! through the interpreter's `fp` and `pc` locals, from DWARF. From a
-//! frame, slot 0 is its closure, whose first word points to its function's
+//! through a [`DebugState`] the VM keeps for each isolate, reached from the
+//! exported symbol [`VALI_DEBUG_STATES_3`], which needs no debug information;
+//! where the build has full debug information they read the interpreter's
+//! `fp` and `pc` locals instead. From a frame, slot 0 is its closure, whose first word points to its function's
 //! `Code`, which starts with a [`DebugFunction`]; that points to its
 //! strategy's [`DebugLayout`]. Changing anything here changes
 //! [`DEBUG_VERSION`], which the extensions check.
 
 use crate::vm;
+use std::ptr::NonNull;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use vali_abi::immediate::{self, Marker, Subtag};
 use vali_abi::{Layout, Tag, TypeCode};
 use vali_bytecode::Position;
 
 /// The version of these structures, which the extensions check. Bumped
 /// whenever any of them, or what they describe, changes.
-pub const DEBUG_VERSION: u32 = 2;
+pub const DEBUG_VERSION: u32 = 3;
 
 /// A string the extensions read: a pointer to UTF-8 bytes and their length.
 #[repr(C)]
@@ -211,6 +216,133 @@ impl DebugFunction {
     }
 }
 
+/// Where an isolate's interpreter is, for a debugger to read.
+///
+/// The VM keeps one per isolate, and links them in a list that the exported
+/// [`VALI_DEBUG_STATES_3`] heads, so the extensions find it with one symbol
+/// and no debug information. `fp` and `pc` are the interpreter's, stored
+/// before each call that can leave its loop and stop a debugger in native
+/// code: Rust procedures, raising an error, growing the stack. Not at
+/// every instruction, so a debugger stopped inside the loop itself, or in
+/// an allocation, sees where it last left it.
+/// `fp` is 0 while the isolate runs no Scheme code.
+#[repr(C)]
+#[derive(Debug)]
+pub struct DebugState {
+    /// [`DEBUG_VERSION`].
+    pub version: u32,
+    reserved: u32,
+    /// The next isolate's record.
+    pub next: AtomicPtr<DebugState>,
+    /// The operating system's id for the thread running the isolate, in
+    /// the debuggers' terms (Linux's tid, macOS's thread id), or 0.
+    pub thread: AtomicU64,
+    /// The frame pointer of the innermost Scheme frame.
+    pub fp: AtomicU64,
+    /// The instruction it is at, an index into its function's code.
+    pub pc: AtomicU64,
+}
+
+/// The first isolate's [`DebugState`]; the extensions look this symbol up.
+/// A host that strips its symbols must keep it. It is named for
+/// [`DEBUG_VERSION`] (a test keeps the two in step), so a binary that links
+/// two incompatible versions of this crate does not define one symbol twice
+/// and the extensions can say which layout a host has.
+#[unsafe(no_mangle)]
+pub static VALI_DEBUG_STATES_3: AtomicPtr<DebugState> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Serialises changes to the list, which are rare: isolates being made and
+/// dropped. A debugger reads it without the lock, from a stopped process.
+static STATES: Mutex<()> = Mutex::new(());
+
+/// An isolate's entry in the list, removed when it drops.
+pub(crate) struct Registered(NonNull<DebugState>);
+
+// SAFETY: the record is only atomics, and lives until this drops.
+unsafe impl Send for Registered {}
+// SAFETY: as above.
+unsafe impl Sync for Registered {}
+
+impl std::fmt::Debug for Registered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Registered")
+    }
+}
+
+impl Registered {
+    /// A new record, first in the list.
+    pub(crate) fn new() -> Registered {
+        let state = NonNull::from(Box::leak(Box::new(DebugState {
+            version: DEBUG_VERSION,
+            reserved: 0,
+            next: AtomicPtr::new(std::ptr::null_mut()),
+            thread: AtomicU64::new(0),
+            fp: AtomicU64::new(0),
+            pc: AtomicU64::new(0),
+        })));
+        let _guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: just made, and not shared until it is linked.
+        unsafe {
+            state.as_ref().next.store(
+                VALI_DEBUG_STATES_3.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
+        VALI_DEBUG_STATES_3.store(state.as_ptr(), Ordering::Release);
+        Registered(state)
+    }
+
+    /// The record, which lives as long as `self`.
+    pub(crate) fn state(&self) -> *const DebugState {
+        self.0.as_ptr()
+    }
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        let _guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = self.0.as_ptr();
+        // SAFETY: every record in the list is alive: each is unlinked here
+        // before it is freed.
+        unsafe {
+            let next = (*mine).next.load(Ordering::Relaxed);
+            let mut link = &VALI_DEBUG_STATES_3;
+            loop {
+                let here = link.load(Ordering::Relaxed);
+                if here.is_null() {
+                    break;
+                }
+                if here == mine {
+                    link.store(next, Ordering::Release);
+                    break;
+                }
+                link = &(*here).next;
+            }
+            drop(Box::from_raw(mine));
+        }
+    }
+}
+
+/// The id of the calling thread, as the debuggers give it, or 0.
+pub(crate) fn thread_id() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `gettid` takes no arguments and cannot fail.
+        unsafe { libc::syscall(libc::SYS_gettid) as u64 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut id = 0u64;
+        // SAFETY: a null thread means the calling one; `id` is valid.
+        unsafe { libc::pthread_threadid_np(0, &mut id) };
+        id
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The extensions read this module's structures from Python. This test
@@ -239,6 +371,9 @@ for name in ["version", "tag_bits"] + layout.FIELDS + layout.ENCODING:
 for code, name in sorted(vali_debug.TYPE_NAMES.items()):
     print("type %d=%s" % (code, name))
 print("DEBUG_VERSION=%d" % vali_debug.DEBUG_VERSION)
+print("symbol=%s" % vali_debug.STATE_SYMBOL)
+for name, offset in sorted(vali_debug.STATE_FIELDS.items()):
+    print("state %s=%d" % (name, offset))
 "#;
 
     fn expected(l: &DebugLayout) -> Vec<(&'static str, u64)> {
@@ -286,6 +421,32 @@ print("DEBUG_VERSION=%d" % vali_debug.DEBUG_VERSION)
             ("type_vector", l.type_vector),
             ("type_bytevector", l.type_bytevector),
         ]
+    }
+
+    /// Whether the list `VALI_DEBUG_STATES_3` heads holds `state`.
+    fn listed(state: *const DebugState) -> bool {
+        let mut here = VALI_DEBUG_STATES_3.load(Ordering::Acquire);
+        while !here.is_null() {
+            if std::ptr::eq(here, state) {
+                return true;
+            }
+            // SAFETY: the list only holds live records, and the caller
+            // holds the ones it checks.
+            here = unsafe { (*here).next.load(Ordering::Acquire) };
+        }
+        false
+    }
+
+    #[test]
+    fn isolates_are_listed_while_they_live() {
+        let first = Registered::new();
+        let second = Registered::new();
+        let (a, b) = (first.state(), second.state());
+        assert!(listed(a) && listed(b));
+        drop(first);
+        assert!(!listed(a) && listed(b));
+        drop(second);
+        assert!(!listed(b));
     }
 
     #[test]
@@ -345,6 +506,29 @@ print("DEBUG_VERSION=%d" % vali_debug.DEBUG_VERSION)
             seen.get("DEBUG_VERSION").copied(),
             Some(DEBUG_VERSION.to_string().as_str())
         );
+        // Where it reads the VM's per-isolate record, and the symbol it
+        // finds that through.
+        use std::mem::offset_of;
+        let symbol = format!("VALI_DEBUG_STATES_{DEBUG_VERSION}");
+        assert_eq!(seen.get("symbol").copied(), Some(symbol.as_str()));
+        assert!(
+            include_str!("debug.rs").contains(&format!("pub static {symbol}:")),
+            "the exported static is not named for DEBUG_VERSION"
+        );
+        for (name, offset) in [
+            ("version", offset_of!(DebugState, version)),
+            ("next", offset_of!(DebugState, next)),
+            ("thread", offset_of!(DebugState, thread)),
+            ("fp", offset_of!(DebugState, fp)),
+            ("pc", offset_of!(DebugState, pc)),
+        ] {
+            let key = format!("state {name}");
+            assert_eq!(
+                seen.get(key.as_str()).copied(),
+                Some(offset.to_string().as_str()),
+                "vali_debug.py reads the record's {name} differently"
+            );
+        }
         // The names it prints for type codes.
         let types: Vec<(u8, &str)> = text
             .lines()

@@ -31,10 +31,16 @@ vali-syntax = { path = "crates/vali-syntax", version = "0.0.0" }
 [profile.test]
 opt-level = 1
 
-# The debugger extensions in tools/debugger/ read the interpreter's
-# locals from DWARF, so the runtime keeps full debug information in test
-# builds even when CI asks for line tables only
-# (CARGO_PROFILE_TEST_DEBUG): a per-package setting wins over that.
+# The debugger extensions in tools/debugger/ print typed values and read the
+# interpreter's locals where there is full debug information, so the runtime
+# keeps it in test builds even when CI asks for line tables only
+# (CARGO_PROFILE_TEST_DEBUG): a per-package setting wins over that. Without
+# it they work from the VM's records, which `mise run
+# test-debugger-optimised` tests, and so can this, in a test build:
+#   cargo test -p vali-runtime --test debugger \
+#     --config 'profile.test.package.vali-runtime.debug="line-tables-only"'
+# with CARGO_PROFILE_TEST_DEBUG=line-tables-only and
+# VALI_TEST_DEBUG_INFO=line-tables.
 [profile.test.package.vali-runtime]
 debug = "full"
 
