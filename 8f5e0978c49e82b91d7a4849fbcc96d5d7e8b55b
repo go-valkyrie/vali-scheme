@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "96c36b6d_036523cf",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 717,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:13:37Z",
+      "side": 1,
+      "message": "For a binding in the syntax export, the allowed set is the owner\u0027s exports plus everything the owner\u0027s own syntax table binds. A unit\u0027s syntax table is its whole context, though, and `define_global` (expand.rs) binds every top-level definition there, private ones included. So `bound` is in effect every top-level variable the owner has. A crafted syntax export can still bind an identifier, under the library\u0027s own scopes, to any private variable of a library it imports. Its macros can then expand, in an importer, to a read of that variable or a call to it. `set!` is refused for an imported variable, so this is read and call access, not assignment.\n\nA legitimate entry for another library\u0027s private variable is one that came in when this library imported it. It has that library\u0027s scopes, which this library\u0027s own identifiers don\u0027t carry, so a check could tell the two apart. Two ways to go:\n\n- Hold such entries to what the owner\u0027s own table has: the same name, bound under the same scopes after remapping. Or at least require that their scopes are not this library\u0027s own.\n- If that\u0027s more than this change should take on, narrow the claim. The commit message and ADR 0012 #9 say an export \"binds no variable another library keeps private\", and as built that holds for the interface only.",
+      "revId": "8f5e0978c49e82b91d7a4849fbcc96d5d7e8b55b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "59717701_1a6de271",
+        "filename": "docs/adr/0012-distributing-compiled-libraries.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 38,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:13:37Z",
+      "side": 1,
+      "message": "This is the claim the inline comment on `units.rs` is about: it holds for the interface, but a syntax export can still bind another library\u0027s private variables.",
+      "revId": "8f5e0978c49e82b91d7a4849fbcc96d5d7e8b55b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
