@@ -1,0 +1,55 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "aac0d120_2c63f5a0",
+        "filename": "crates/vali-runtime/src/cx.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 473,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:16Z",
+      "side": 1,
+      "message": "This is safe and public but reads the object a raw `Value` points to, and a `Value` is only valid until the next allocation. The `Cx` methods that take one are `pub unsafe fn`, and the check it wraps, `Vm::is_other` (vm.rs:1037), is `pub(crate)`. In safe code, a `Value` held across a collection makes it read a freed and reused block: a vector\u0027s `Value`, dropped, collected, then 64 ipairs allocated, reads as an ipair. 1260921 keeps this as a raw `get` inside the same safe fn.\n\nNothing outside the crate calls it, so `pub(crate)` is enough. Otherwise make it `pub unsafe fn` with a Safety section.",
+      "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "be573619_27a1d86e",
+        "filename": "crates/vali-runtime/src/primitives.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 59,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:16Z",
+      "side": 1,
+      "message": "Nit: `type_error` prints the value by address: `(icar (list 1))` says \"got #\u003cPair 0x5642b84412b8\u003e\". The likeliest new mistake, `(car (ilist 1))`, says \"got #\u003cOther 0x…\u003e\", which doesn\u0027t say it\u0027s an ipair and differs between runs. `wrong_type` (vm.rs:394) prints the written form. `car` already behaves this way, so this could be a follow-up covering both (1260919\u0027s vm.rs `icar`/`icdr` arms too).",
+      "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "86331990_3babe7bb",
+        "filename": "docs/adr/0002-value-representation.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 95,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:16Z",
+      "side": 1,
+      "message": "Nit: this row isn\u0027t indented like the rows above it, so it falls out of the list item\u0027s table and renders as a stray paragraph. Indent it four spaces.",
+      "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
