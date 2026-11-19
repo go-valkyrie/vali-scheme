@@ -322,8 +322,11 @@ pub fn check_function(
             | Instruction::Not { dst, src }
             | Instruction::IsNull { dst, src }
             | Instruction::IsPair { dst, src }
+            | Instruction::IsIpair { dst, src }
             | Instruction::Car { dst, pair: src }
             | Instruction::Cdr { dst, pair: src }
+            | Instruction::Icar { dst, pair: src }
+            | Instruction::Icdr { dst, pair: src }
             | Instruction::VectorLength { dst, vector: src } => slot(*dst) && slot(*src),
             Instruction::SetBox { cell: a, src: b }
             | Instruction::SetCar { pair: a, value: b }
@@ -436,6 +439,11 @@ pub fn check_function(
                 car: a,
                 cdr: b,
             }
+            | Instruction::Ipair {
+                dst,
+                car: a,
+                cdr: b,
+            }
             | Instruction::MakeVector {
                 dst,
                 len: a,
@@ -492,8 +500,12 @@ fn written_slot(instruction: &Instruction) -> Option<u16> {
         | Instruction::Not { dst, .. }
         | Instruction::IsNull { dst, .. }
         | Instruction::IsPair { dst, .. }
+        | Instruction::IsIpair { dst, .. }
         | Instruction::Car { dst, .. }
         | Instruction::Cdr { dst, .. }
+        | Instruction::Icar { dst, .. }
+        | Instruction::Icdr { dst, .. }
+        | Instruction::Ipair { dst, .. }
         | Instruction::VectorLength { dst, .. }
         | Instruction::LoadInt { dst, .. }
         | Instruction::LoadConstant { dst, .. }

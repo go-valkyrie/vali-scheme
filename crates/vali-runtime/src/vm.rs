@@ -3056,7 +3056,7 @@ impl<S: Strategy> Cx<S> {
                         Opcode::Car => {
                             let pair = slot(fp, b);
                             if !pair.is_pair() {
-                                fail!(type_error("car", "a pair", pair));
+                                fail!(wrong_type(self, "car", "a pair", pair));
                             }
                             self.store(fp, a, self.car(pair));
                             pc += 1;
@@ -3064,7 +3064,7 @@ impl<S: Strategy> Cx<S> {
                         Opcode::Cdr => {
                             let pair = slot(fp, b);
                             if !pair.is_pair() {
-                                fail!(type_error("cdr", "a pair", pair));
+                                fail!(wrong_type(self, "cdr", "a pair", pair));
                             }
                             self.store(fp, a, self.cdr(pair));
                             pc += 1;
@@ -3093,6 +3093,31 @@ impl<S: Strategy> Cx<S> {
                         }
                         Opcode::IsNull => {
                             self.store(fp, a, Value::boolean(slot(fp, b) == Value::EMPTY_LIST));
+                            pc += 1;
+                        }
+                        Opcode::Ipair => {
+                            let pair = attempt!(self.ipair_raw(slot(fp, b), slot(fp, c)));
+                            self.store(fp, a, pair);
+                            pc += 1;
+                        }
+                        Opcode::Icar => {
+                            let pair = slot(fp, b);
+                            if !self.is_ipair(pair) {
+                                fail!(wrong_type(self, "icar", "an immutable pair", pair));
+                            }
+                            self.store(fp, a, self.icar(pair));
+                            pc += 1;
+                        }
+                        Opcode::Icdr => {
+                            let pair = slot(fp, b);
+                            if !self.is_ipair(pair) {
+                                fail!(wrong_type(self, "icdr", "an immutable pair", pair));
+                            }
+                            self.store(fp, a, self.icdr(pair));
+                            pc += 1;
+                        }
+                        Opcode::IsIpair => {
+                            self.store(fp, a, Value::boolean(self.is_ipair(slot(fp, b))));
                             pc += 1;
                         }
                         Opcode::IsPair => {

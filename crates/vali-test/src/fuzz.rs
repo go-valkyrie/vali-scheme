@@ -233,7 +233,7 @@ fn random_instructions(
         let (a, b, c) = (s(), s(), s());
         let imm = random.next() as i8;
         let offset = 0;
-        let instruction = match random.below(44) {
+        let instruction = match random.below(48) {
             0 => I::Mov { dst: a, src: b },
             1 => I::LoadConstant {
                 dst: a,
@@ -321,6 +321,14 @@ fn random_instructions(
                 index: b,
                 value: c,
             },
+            44 => I::Ipair {
+                dst: a,
+                car: b,
+                cdr: c,
+            },
+            45 => I::Icar { dst: a, pair: b },
+            46 => I::Icdr { dst: a, pair: b },
+            47 => I::IsIpair { dst: a, src: b },
             _ => I::SetFree {
                 closure: a,
                 index: random.below(3) as u16,

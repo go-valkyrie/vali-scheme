@@ -248,3 +248,16 @@ fn allocations_are_not_folded_into_constants() {
         }
     }
 }
+
+#[test]
+fn immutable_pair_operations() {
+    // No constant is an immutable pair.
+    check(
+        "(import (scheme base) (only (vali primitive) ipair? icar)) (define (q) (ipair? '(1 2 3)))",
+        "fun f1 q () []:\n  return c1\n",
+    );
+    // `icar` may raise, so it stays when unused.
+    let kept =
+        ir("(import (scheme base) (only (vali primitive) ipair? icar)) (define (e x) (icar x) 1)");
+    assert!(kept.contains(" = icar v0"), "{kept}");
+}
