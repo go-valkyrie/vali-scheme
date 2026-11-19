@@ -4,7 +4,8 @@
 //! A syntax object is a Rust [`Syntax`]. The heap object of type `Syntax`
 //! holds an index into the context's table of them, so Scheme code can
 //! hold, pass and store syntax objects while Rust keeps their scopes and
-//! pending changes. The table only grows: nothing is collected yet.
+//! pending changes. The table is a slab: when the strategy frees the heap
+//! object, its slot is emptied and reused (`Cx::finalize`).
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -39,16 +40,25 @@ impl<S: Strategy> Cx<S> {
     /// A new heap object for `syntax`.
     pub fn syntax_raw(&mut self, syntax: Syntax) -> Result<Value, Error> {
         if let Some(max) = self.limits.max_syntaxes
-            && self.syntaxes.len() >= max
+            && self.live_syntaxes() >= max
         {
             return Err(Error::LimitExceeded(crate::Limit::Syntaxes));
         }
         self.check_rust_bytes(crate::cx::SYNTAX_SLOT_BYTES)?;
-        let index = Value::fixnum(self.syntaxes.len() as i64).expect("an index fits a fixnum");
         let v = self.new_object(TypeCode::Syntax, 1, 0)?;
+        let index = match self.free_syntaxes.pop() {
+            Some(i) => {
+                self.syntaxes[i] = Some(syntax);
+                i
+            }
+            None => {
+                self.syntaxes.push(Some(syntax));
+                self.syntaxes.len() - 1
+            }
+        };
+        let index = Value::fixnum(index as i64).expect("an index fits a fixnum");
         // SAFETY: the object was just allocated with its one field.
         unsafe { put(v, Self::LAYOUT.field(TypeCode::Syntax, 0), index.raw()) };
-        self.syntaxes.push(syntax);
         self.charge_rust_bytes(crate::cx::SYNTAX_SLOT_BYTES);
         Ok(v)
     }
@@ -71,7 +81,39 @@ impl<S: Strategy> Cx<S> {
         }
         // SAFETY: `v` is a live syntax object, whose field is its index.
         let index = unsafe { Value::from_raw(get(v, Self::LAYOUT.field(TypeCode::Syntax, 0))) };
-        self.syntaxes.get(usize::try_from(index.as_fixnum()?).ok()?)
+        self.syntaxes
+            .get(usize::try_from(index.as_fixnum()?).ok()?)?
+            .as_ref()
+    }
+
+    /// If `v` is a syntax object the strategy is freeing: the index of its
+    /// slot, which the object no longer reaches, so that a second call, as
+    /// a cycle collection may make, finds nothing.
+    pub(crate) fn retire_syntax(v: Value) -> Option<usize> {
+        // SAFETY: `v` is a live object; a syntax object has one field, its
+        // index.
+        unsafe {
+            if Self::object_type(v)? != TypeCode::Syntax {
+                return None;
+            }
+            let at = Self::LAYOUT.field(TypeCode::Syntax, 0);
+            let index = usize::try_from(Value::from_raw(get(v, at)).as_fixnum()?).ok()?;
+            put(v, at, Value::UNSPECIFIED.raw());
+            Some(index)
+        }
+    }
+
+    /// Frees the slot at `index`, whose heap object is gone.
+    pub(crate) fn remove_syntax(&mut self, index: usize) {
+        if self
+            .syntaxes
+            .get_mut(index)
+            .and_then(Option::take)
+            .is_some()
+        {
+            self.free_syntaxes.push(index);
+            self.release_rust_bytes(crate::cx::SYNTAX_SLOT_BYTES);
+        }
     }
 
     /// The datum `v` is, with `span` on every part, if it is one: a number,

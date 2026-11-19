@@ -172,3 +172,74 @@ fn rust_bytes_count_against_the_memory_limit<S: Strategy>() {
 fn the_memory_limit_stops_symbols() {
     under_every_strategy!(rust_bytes_count_against_the_memory_limit);
 }
+
+fn dropped_syntaxes_free_their_slots<S: Strategy>() {
+    let set = scope_set();
+    let mut cx = Cx::<S>::new(&HeapConfig {
+        max_syntaxes: Some(20),
+        ..Default::default()
+    });
+    for round in 0..50 {
+        for _ in 0..10 {
+            // Dropped at once, so the cap, which counts live slots, is
+            // never reached however many are made.
+            let h = cx.syntax(syntax(set, "x")).unwrap();
+            drop(h);
+        }
+        cx.collect_garbage();
+        assert!(cx.live_syntaxes() <= 10, "{} round {round}", S::NAME);
+    }
+    // The table stayed as small as the most that were alive at once.
+    assert!(
+        cx.syntax_slots() <= 20,
+        "{}: {}",
+        S::NAME,
+        cx.syntax_slots()
+    );
+    // A slot that was reused holds the new object.
+    let h = cx.syntax(syntax(set, "fresh")).unwrap();
+    assert_eq!(cx.write_string(&h).unwrap(), "#<syntax fresh>");
+}
+
+#[test]
+fn freed_syntax_objects_make_room_under_counting() {
+    dropped_syntaxes_free_their_slots::<DeferredHeadered>();
+    dropped_syntaxes_free_their_slots::<DeferredSideCounts>();
+    dropped_syntaxes_free_their_slots::<PreciseHeadered>();
+    dropped_syntaxes_free_their_slots::<PreciseSideCounts>();
+}
+
+#[test]
+fn without_counting_syntax_slots_stay_until_the_cap() {
+    let set = scope_set();
+    let mut cx = Cx::<NoCollection>::new(&HeapConfig {
+        max_syntaxes: Some(30),
+        ..Default::default()
+    });
+    for _ in 0..30 {
+        drop(cx.syntax(syntax(set, "x")).unwrap());
+        cx.collect_garbage();
+    }
+    assert_eq!(cx.syntax_slots(), 30);
+    assert_eq!(
+        cx.syntax(syntax(set, "x")).unwrap_err(),
+        Error::LimitExceeded(Limit::Syntaxes)
+    );
+}
+
+/// A freed object may be seen again, as one waiting in the cycle buffer is:
+/// its slot is retired only once.
+#[test]
+fn a_syntax_slot_is_retired_once() {
+    let set = scope_set();
+    let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+    let a = cx.syntax(syntax(set, "a")).unwrap();
+    drop(a);
+    cx.collect_garbage();
+    cx.collect_garbage();
+    let b = cx.syntax(syntax(set, "b")).unwrap();
+    let c = cx.syntax(syntax(set, "c")).unwrap();
+    assert_eq!(cx.write_string(&b).unwrap(), "#<syntax b>");
+    assert_eq!(cx.write_string(&c).unwrap(), "#<syntax c>");
+    assert_eq!(cx.syntax_slots(), 2);
+}
