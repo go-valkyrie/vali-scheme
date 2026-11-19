@@ -270,10 +270,19 @@ fn inlined(name: &str, argc: usize) -> bool {
     matches!(
         (name, argc),
         (
-            "car" | "cdr" | "null?" | "pair?" | "not" | "vector-length",
+            "car"
+                | "cdr"
+                | "null?"
+                | "pair?"
+                | "not"
+                | "vector-length"
+                | "icar"
+                | "icdr"
+                | "ipair?",
             1
         ) | (
             "cons"
+                | "ipair"
                 | "eq?"
                 | "<"
                 | "<="

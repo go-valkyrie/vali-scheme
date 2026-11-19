@@ -99,6 +99,10 @@ opcodes! {
     TailCallDirect = 47, "tail-call-direct";
     Move = 48, "move";
     Drop = 49, "drop";
+    Ipair = 50, "ipair";
+    Icar = 51, "icar";
+    Icdr = 52, "icdr";
+    IsIpair = 53, "ipair?";
 }
 
 impl Opcode {
@@ -221,6 +225,14 @@ pub enum Instruction {
     IsNull { dst: Slot, src: Slot },
     /// `dst ← (pair? src)`.
     IsPair { dst: Slot, src: Slot },
+    /// `dst ← (ipair car cdr)`: a new immutable pair (SRFI 116).
+    Ipair { dst: Slot, car: Slot, cdr: Slot },
+    /// `dst ← (icar ipair)`.
+    Icar { dst: Slot, pair: Slot },
+    /// `dst ← (icdr ipair)`.
+    Icdr { dst: Slot, pair: Slot },
+    /// `dst ← (ipair? src)`.
+    IsIpair { dst: Slot, src: Slot },
     /// `dst ← (make-vector len fill)`.
     MakeVector { dst: Slot, len: Slot, fill: Slot },
     /// `dst ← (vector-ref vector index)`.
@@ -382,6 +394,10 @@ impl Instruction {
             I::SetCdr { .. } => Opcode::SetCdr,
             I::IsNull { .. } => Opcode::IsNull,
             I::IsPair { .. } => Opcode::IsPair,
+            I::Ipair { .. } => Opcode::Ipair,
+            I::Icar { .. } => Opcode::Icar,
+            I::Icdr { .. } => Opcode::Icdr,
+            I::IsIpair { .. } => Opcode::IsIpair,
             I::MakeVector { .. } => Opcode::MakeVector,
             I::VectorRef { .. } => Opcode::VectorRef,
             I::VectorSet { .. } => Opcode::VectorSet,
@@ -436,8 +452,12 @@ impl Instruction {
             | I::Unbox { dst, src }
             | I::Not { dst, src }
             | I::IsNull { dst, src }
-            | I::IsPair { dst, src } => abc(code, op, dst, src, 0),
-            I::Car { dst, pair } | I::Cdr { dst, pair } => abc(code, op, dst, pair, 0),
+            | I::IsPair { dst, src }
+            | I::IsIpair { dst, src } => abc(code, op, dst, src, 0),
+            I::Car { dst, pair }
+            | I::Cdr { dst, pair }
+            | I::Icar { dst, pair }
+            | I::Icdr { dst, pair } => abc(code, op, dst, pair, 0),
             I::VectorLength { dst, vector } => abc(code, op, dst, vector, 0),
             I::Free { dst, index } => abc(code, op, dst, index, 0),
             I::SetBox { cell, src } => abc(code, op, cell, src, 0),
@@ -521,7 +541,7 @@ impl Instruction {
             I::AddImm { dst, a, imm } | I::SubImm { dst, a, imm } => {
                 abc(code, op, dst, a, u16::from(imm as u8));
             }
-            I::Cons { dst, car, cdr } => abc(code, op, dst, car, cdr),
+            I::Cons { dst, car, cdr } | I::Ipair { dst, car, cdr } => abc(code, op, dst, car, cdr),
             I::MakeVector { dst, len, fill } => abc(code, op, dst, len, fill),
             I::VectorRef { dst, vector, index } => abc(code, op, dst, vector, index),
             I::VectorSet {
@@ -708,6 +728,14 @@ impl Instruction {
                 car: b,
                 cdr: c,
             },
+            Opcode::Ipair => I::Ipair {
+                dst: a,
+                car: b,
+                cdr: c,
+            },
+            Opcode::Icar => I::Icar { dst: a, pair: b },
+            Opcode::Icdr => I::Icdr { dst: a, pair: b },
+            Opcode::IsIpair => I::IsIpair { dst: a, src: b },
             Opcode::Car => I::Car { dst: a, pair: b },
             Opcode::Cdr => I::Cdr { dst: a, pair: b },
             Opcode::SetCar => I::SetCar { pair: a, value: b },
@@ -760,8 +788,12 @@ impl fmt::Display for Instruction {
             | I::Unbox { dst, src }
             | I::Not { dst, src }
             | I::IsNull { dst, src }
-            | I::IsPair { dst, src } => write!(f, "{m} r{dst}, r{src}"),
-            I::Car { dst, pair } | I::Cdr { dst, pair } => write!(f, "{m} r{dst}, r{pair}"),
+            | I::IsPair { dst, src }
+            | I::IsIpair { dst, src } => write!(f, "{m} r{dst}, r{src}"),
+            I::Car { dst, pair }
+            | I::Cdr { dst, pair }
+            | I::Icar { dst, pair }
+            | I::Icdr { dst, pair } => write!(f, "{m} r{dst}, r{pair}"),
             I::VectorLength { dst, vector } => write!(f, "{m} r{dst}, r{vector}"),
             I::SetFree {
                 closure,
@@ -820,7 +852,9 @@ impl fmt::Display for Instruction {
             I::AddImm { dst, a, imm } | I::SubImm { dst, a, imm } => {
                 write!(f, "{m} r{dst}, r{a}, {imm}")
             }
-            I::Cons { dst, car, cdr } => write!(f, "{m} r{dst}, r{car}, r{cdr}"),
+            I::Cons { dst, car, cdr } | I::Ipair { dst, car, cdr } => {
+                write!(f, "{m} r{dst}, r{car}, r{cdr}")
+            }
             I::MakeVector { dst, len, fill } => write!(f, "{m} r{dst}, r{len}, r{fill}"),
             I::VectorRef { dst, vector, index } => write!(f, "{m} r{dst}, r{vector}, r{index}"),
             I::VectorSet {

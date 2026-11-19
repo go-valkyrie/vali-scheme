@@ -3095,6 +3095,31 @@ impl<S: Strategy> Cx<S> {
                             self.store(fp, a, Value::boolean(slot(fp, b) == Value::EMPTY_LIST));
                             pc += 1;
                         }
+                        Opcode::Ipair => {
+                            let pair = attempt!(self.ipair_raw(slot(fp, b), slot(fp, c)));
+                            self.store(fp, a, pair);
+                            pc += 1;
+                        }
+                        Opcode::Icar => {
+                            let pair = slot(fp, b);
+                            if !self.is_ipair(pair) {
+                                fail!(type_error("icar", "an immutable pair", pair));
+                            }
+                            self.store(fp, a, self.icar(pair));
+                            pc += 1;
+                        }
+                        Opcode::Icdr => {
+                            let pair = slot(fp, b);
+                            if !self.is_ipair(pair) {
+                                fail!(type_error("icdr", "an immutable pair", pair));
+                            }
+                            self.store(fp, a, self.icdr(pair));
+                            pc += 1;
+                        }
+                        Opcode::IsIpair => {
+                            self.store(fp, a, Value::boolean(self.is_ipair(slot(fp, b))));
+                            pc += 1;
+                        }
                         Opcode::IsPair => {
                             self.store(fp, a, Value::boolean(slot(fp, b).is_pair()));
                             pc += 1;

@@ -1369,6 +1369,7 @@ enum V {
     Unspec,
     Str(Rc<str>),
     Pair(Rc<RefCell<(V, V)>>),
+    Ipair(Rc<(V, V)>),
     Vector(Rc<RefCell<Vec<V>>>),
     Box(Rc<RefCell<V>>),
     Clo(Rc<Clo>),
@@ -1394,6 +1395,7 @@ fn eq(a: &V, b: &V) -> bool {
         (V::Nil, V::Nil) | (V::Unspec, V::Unspec) | (V::Prim, V::Prim) => true,
         (V::Str(x), V::Str(y)) => Rc::ptr_eq(x, y),
         (V::Pair(x), V::Pair(y)) => Rc::ptr_eq(x, y),
+        (V::Ipair(x), V::Ipair(y)) => Rc::ptr_eq(x, y),
         (V::Vector(x), V::Vector(y)) => Rc::ptr_eq(x, y),
         (V::Box(x), V::Box(y)) => Rc::ptr_eq(x, y),
         (V::Clo(x), V::Clo(y)) => Rc::ptr_eq(x, y),
@@ -1428,6 +1430,26 @@ fn write(v: &V, out: &mut String) {
                     other => {
                         out.push_str(" . ");
                         write(&other, out);
+                        break;
+                    }
+                }
+            }
+            out.push(')');
+        }
+        V::Ipair(p) => {
+            out.push_str("#i(");
+            let mut cur = p.clone();
+            loop {
+                write(&cur.0, out);
+                match &cur.1 {
+                    V::Nil => break,
+                    V::Ipair(next) => {
+                        out.push(' ');
+                        cur = next.clone();
+                    }
+                    other => {
+                        out.push_str(" . ");
+                        write(other, out);
                         break;
                     }
                 }
@@ -1669,6 +1691,18 @@ impl<'m> Interp<'m> {
                     Primitive::Eq => V::Bool(eq(&a[0], &a[1])),
                     Primitive::Not => V::Bool(matches!(a[0], V::Bool(false))),
                     Primitive::Cons => V::Pair(Rc::new(RefCell::new((a[0].clone(), a[1].clone())))),
+                    Primitive::Ipair => V::Ipair(Rc::new((a[0].clone(), a[1].clone()))),
+                    Primitive::Icar | Primitive::Icdr => match &a[0] {
+                        V::Ipair(p) => {
+                            if *op == Primitive::Icar {
+                                p.0.clone()
+                            } else {
+                                p.1.clone()
+                            }
+                        }
+                        _ => return Err(Stop::Error("icar".into())),
+                    },
+                    Primitive::IsIpair => V::Bool(matches!(a[0], V::Ipair(_))),
                     Primitive::Car | Primitive::Cdr => match &a[0] {
                         V::Pair(p) => {
                             let p = p.borrow();

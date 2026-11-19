@@ -314,6 +314,57 @@ fn closures_and_boxes() {
     assert_eq!(cx.call(&b, &[]).unwrap().as_fixnum(), Some(1));
 }
 
+/// `(define (f a b) (let ((x (ipair a (ipair b b)))) (cons (ipair? x) (cons (pair? x) (icar (icdr x))))))`
+/// and `(define (g x) (icar x))`.
+#[test]
+fn immutable_pair_instructions() {
+    let mut cx = cx();
+    let m = module("ipairs", |m| {
+        let mut f = FunctionBuilder::new(Some("f"), Arity::exactly(2), 8, 0);
+        f.emit(I::Ipair {
+            dst: 3,
+            car: 2,
+            cdr: 2,
+        })
+        .emit(I::Ipair {
+            dst: 3,
+            car: 1,
+            cdr: 3,
+        })
+        .emit(I::IsIpair { dst: 4, src: 3 })
+        .emit(I::IsPair { dst: 5, src: 3 })
+        .emit(I::Icdr { dst: 6, pair: 3 })
+        .emit(I::Icar { dst: 6, pair: 6 })
+        .emit(I::Cons {
+            dst: 6,
+            car: 5,
+            cdr: 6,
+        })
+        .emit(I::Cons {
+            dst: 6,
+            car: 4,
+            cdr: 6,
+        })
+        .emit(I::Return { src: 6 });
+        let f = m.function(f.finish().unwrap());
+        let mut g = FunctionBuilder::new(Some("g"), Arity::exactly(1), 3, 0);
+        g.emit(I::Icar { dst: 2, pair: 1 })
+            .emit(I::Return { src: 2 });
+        let g = m.function(g.finish().unwrap());
+        vec![("f", f), ("g", g)]
+    });
+    let id = cx.load(m).unwrap();
+    cx.run(id).unwrap();
+    let f = cx.variable(id, "f").unwrap();
+    let g = cx.variable(id, "g").unwrap();
+    let r = cx.call(&f, &[int(1), int(2)]).unwrap();
+    assert_eq!(cx.write_string(&r).unwrap(), "(#t #f . 2)");
+    match cx.call(&g, &[int(1)]) {
+        Err(Error::Scheme(e)) => assert_eq!(e.message, "icar: expected an immutable pair, got 1"),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// `(define (f a #!optional b . rest) (cons a (cons b rest)))`.
 #[test]
 fn optional_and_rest_arguments() {

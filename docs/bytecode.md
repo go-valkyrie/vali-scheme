@@ -138,6 +138,17 @@ Conditional branches continue to the next instruction when their condition holds
 | 42 | `vector-set v, i, x` | `a b c` | `(vector-set! v i x)` |
 | 43 | `vector-length dst, v` | `a b` | `dst ← (vector-length v)` |
 
+### Immutable pairs
+
+| Opcode | Mnemonic | Layout | Meaning |
+|---|---|---|---|
+| 50 | `ipair dst, a, b` | `a b c` | `dst ← (ipair a b)`: a new immutable pair (SRFI 116, ADR 0002 #14) |
+| 51 | `icar dst, ipair` | `a b` | `dst ← (icar ipair)`; an error if `ipair` is not an immutable pair |
+| 52 | `icdr dst, ipair` | `a b` | `dst ← (icdr ipair)`; likewise |
+| 53 | `ipair? dst, src` | `a b` | `dst ← (ipair? src)` |
+
+An immutable pair is an object with a header, so `icar` and `icdr` check the header's type code, where `car` and `cdr` check a tag.
+
 ### Closures, continued
 
 | Opcode | Mnemonic | Layout | Meaning |
