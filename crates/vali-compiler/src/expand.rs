@@ -30,6 +30,7 @@ use vali_syntax::{
 };
 
 use vali_bytecode::{Link, Module, ModuleBuilder, validate};
+use vali_dist::Digest;
 use vali_runtime::{Cx, DeferredHeadered, Handle};
 
 mod artifact;
@@ -462,6 +463,7 @@ impl Expander {
         identity: &str,
         form: &LibraryForm,
         own: bool,
+        source: Option<Digest>,
     ) -> Result<Module> {
         if self.natives.iter().any(|(i, _)| i == identity) {
             return self.native_library(identity, form);
@@ -480,15 +482,16 @@ impl Expander {
             form.span,
             false,
         )?;
+        let unit = self.units.len() - 1;
+        self.units[unit].source = source;
         if !round_trip() {
             return Ok(module);
         }
         // Written, dropped and loaded again, so what follows runs on what
         // the artifact holds.
-        let unit = self.units.len() - 1;
         let bytes = self.library_artifact(unit)?;
         self.units.pop();
-        let module = self.load_library(identity, &bytes, own)?;
+        let module = self.load_library(identity, &bytes, own, source)?;
         self.units[unit].round_tripped = true;
         Ok(module)
     }

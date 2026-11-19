@@ -512,6 +512,22 @@ mod encoding {
     }
 
     #[test]
+    fn primitives_are_encoded_by_name_not_position() {
+        let bytes = encode(&sum()).unwrap();
+        let find = |needle: &[u8]| bytes.windows(needle.len()).position(|w| w == needle);
+        // `car` is in the bytes by its name, so reordering `Primitive::ALL`
+        // changes nothing about what these bytes say.
+        let at = find(b"\x03car").expect("the name is written, with its length");
+        let mut other = bytes.clone();
+        other[at + 1..at + 4].copy_from_slice(b"cxr");
+        let error = decode(&other).unwrap_err();
+        assert!(error.message.contains("unknown primitive cxr"), "{error}");
+        for &p in Primitive::ALL {
+            assert_eq!(Primitive::named(p.name()), Some(p));
+        }
+    }
+
+    #[test]
     fn artifacts_keep_what_they_know() {
         let mut artifact = Artifact::default();
         artifact.insert("invoke", true, vec![1, 2, 3]);

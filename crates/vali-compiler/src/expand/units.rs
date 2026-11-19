@@ -33,7 +33,15 @@ pub(super) struct Unit {
     pub(super) ir: Option<Arc<vali_dist::Module>>,
     /// A hash of what its importers observe, its `library` and `syntax`
     /// sections, once something asked.
-    pub(super) export_hash: Option<u64>,
+    pub(super) export_hash: Option<Digest>,
+    /// A hash of its whole artifact, once something asked: what a library
+    /// whose expansion ran its code relies on.
+    pub(super) artifact_hash: Option<Digest>,
+    /// A hash of what was read to make it: its source, and the files it
+    /// includes. None if its source was not read.
+    pub(super) source: Option<Digest>,
+    /// The libraries whose code ran while it was expanded.
+    pub(super) instantiated: Vec<usize>,
     /// Whether its syntax export holds only its own macros and compiled
     /// syntax, as one loaded from an artifact does: importing it imports
     /// its imports' too.
@@ -52,23 +60,71 @@ pub(crate) struct Mark {
 }
 
 /// The sections a library's artifact has, all required.
-pub(super) const LIBRARY_SECTIONS: &[&str] = &["build", "library", "syntax", "invoke", "depends"];
+pub(super) const LIBRARY_SECTIONS: &[&str] =
+    &["build", "source", "library", "syntax", "invoke", "depends"];
 
 /// What compiled an artifact: one Vali reads only its own (ADR 0001 #8).
+/// It names the compiler's version, the formats and ABI it writes, and a
+/// hash of the sources of the compiler and the crates beneath it (see the
+/// crate's build script), so two builds whose output may differ never
+/// share one.
 pub(super) fn build_stamp() -> String {
     format!(
-        "vali-compiler {} format {}",
+        "vali-compiler {} format {} abi {} build {}",
         env!("CARGO_PKG_VERSION"),
-        vali_dist::FORMAT_VERSION
+        vali_dist::FORMAT_VERSION,
+        vali_abi::ABI_VERSION,
+        env!("VALI_COMPILER_SOURCE_HASH"),
     )
 }
 
+/// What a library's `depends` section records.
+#[derive(Debug, Default)]
+pub(crate) struct Depends {
+    /// Each library it imports, by identity, and the hash of that
+    /// library's exports it was compiled against.
+    pub(crate) imports: Vec<(String, Digest)>,
+    /// Each library whose code ran while it was expanded, by identity,
+    /// and the hash of that library's whole artifact.
+    pub(crate) expansion: Vec<(String, Digest)>,
+}
+
+fn digest(r: &mut vali_dist::Reader<'_>) -> std::result::Result<Digest, vali_dist::DecodeError> {
+    Ok(Digest(r.raw(32)?.try_into().expect("32 bytes")))
+}
+
+fn encode_depends(depends: &Depends) -> Vec<u8> {
+    let mut w = vali_dist::Writer::new();
+    for list in [&depends.imports, &depends.expansion] {
+        w.usize(list.len());
+        for (identity, hash) in list {
+            w.str(identity);
+            w.raw(&hash.0);
+        }
+    }
+    w.finish()
+}
+
+fn decode_depends(bytes: &[u8]) -> std::result::Result<Depends, vali_dist::DecodeError> {
+    let mut r = vali_dist::Reader::new(bytes);
+    let mut lists = [Vec::new(), Vec::new()];
+    for list in &mut lists {
+        let n = r.count(33)?;
+        for _ in 0..n {
+            let identity = r.str()?.to_owned();
+            list.push((identity, digest(&mut r)?));
+        }
+    }
+    r.end()?;
+    let [imports, expansion] = lists;
+    Ok(Depends { imports, expansion })
+}
+
 /// A library's artifact, decoded, if this build of Vali wrote it, with
-/// what its `depends` section says: each library it imports, by identity,
-/// and the hash of that library's exports it was compiled against.
+/// what its `depends` section says.
 pub(crate) fn decode_library_artifact(
     bytes: &[u8],
-) -> std::result::Result<(vali_dist::Artifact, Vec<(String, u64)>), String> {
+) -> std::result::Result<(vali_dist::Artifact, Depends), String> {
     let artifact =
         vali_dist::Artifact::decode(bytes, LIBRARY_SECTIONS).map_err(|e| e.to_string())?;
     let section = |name: &str| {
@@ -76,29 +132,29 @@ pub(crate) fn decode_library_artifact(
             .section(name)
             .ok_or_else(|| format!("the artifact has no {name} section"))
     };
-    if section("build")? != build_stamp().as_bytes() {
-        return Err("the artifact is from another build of Vali".into());
+    let stamp = section("build")?;
+    if stamp != build_stamp().as_bytes() {
+        return Err(format!(
+            "the artifact is from another build of Vali (it says {}, this is {})",
+            String::from_utf8_lossy(stamp),
+            build_stamp()
+        ));
     }
-    let mut depends = vali_dist::Reader::new(section("depends")?);
-    let needed = (|| {
-        let n = depends.count(2)?;
-        let mut needed = Vec::with_capacity(n);
-        for _ in 0..n {
-            let dependency = depends.str()?.to_owned();
-            needed.push((dependency, depends.uint()?));
-        }
-        depends.end()?;
-        Ok::<_, vali_dist::DecodeError>(needed)
-    })()
-    .map_err(|e| format!("its dependencies: {e}"))?;
-    Ok((artifact, needed))
+    let depends =
+        decode_depends(section("depends")?).map_err(|e| format!("its dependencies: {e}"))?;
+    Ok((artifact, depends))
 }
 
-/// The FNV-1a hash of `bytes`.
-pub(super) fn bytes_hash(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+/// The source hash an artifact's `source` section records, if it does.
+fn decode_source(bytes: &[u8]) -> std::result::Result<Option<Digest>, vali_dist::DecodeError> {
+    let mut r = vali_dist::Reader::new(bytes);
+    let source = if r.bool()? {
+        Some(digest(&mut r)?)
+    } else {
+        None
+    };
+    r.end()?;
+    Ok(source)
 }
 
 /// `ir` converted to run-format bytecode, and validated.
@@ -163,6 +219,9 @@ impl Expander {
             key: identity.to_owned(),
             ir: None,
             export_hash: None,
+            artifact_hash: None,
+            source: None,
+            instantiated: Vec::new(),
             pruned: false,
             round_tripped: false,
         });
@@ -358,20 +417,34 @@ impl Expander {
         let library = self.library_record(unit)?;
         let syntax = self.encode_syntax(unit, &syntax)?;
         let invoke = vali_dist::encode(&ir).map_err(|e| fail(format!("{identity}: {e}")))?;
-        let mut depends = vali_dist::Writer::new();
-        let imports = self.units[unit].imports.clone();
-        depends.usize(imports.len());
-        for dependency in imports {
-            depends.str(&self.units[dependency].identity.clone());
+        let mut depends = Depends::default();
+        for dependency in self.units[unit].imports.clone() {
             let hash = self.export_hash(dependency)?;
-            depends.uint(hash);
+            depends
+                .imports
+                .push((self.units[dependency].identity.clone(), hash));
+        }
+        let mut ran = self.units[unit].instantiated.clone();
+        ran.retain(|&u| self.units[u].ir.is_some());
+        ran.sort_by(|&a, &b| self.units[a].identity.cmp(&self.units[b].identity));
+        for dependency in ran {
+            let hash = self.artifact_hash(dependency)?;
+            depends
+                .expansion
+                .push((self.units[dependency].identity.clone(), hash));
+        }
+        let mut source = vali_dist::Writer::new();
+        source.bool(self.units[unit].source.is_some());
+        if let Some(hash) = self.units[unit].source {
+            source.raw(&hash.0);
         }
         let mut artifact = vali_dist::Artifact::default();
         artifact.insert("build", true, build_stamp().into_bytes());
+        artifact.insert("source", true, source.finish());
         artifact.insert("library", true, library);
         artifact.insert("syntax", true, syntax);
         artifact.insert("invoke", true, invoke);
-        artifact.insert("depends", true, depends.finish());
+        artifact.insert("depends", true, encode_depends(&depends));
         Ok(artifact.encode())
     }
 
@@ -394,7 +467,7 @@ impl Expander {
 
     /// A hash of what importers of `unit` observe: its `library` and
     /// `syntax` sections, as this build would write them.
-    pub(super) fn export_hash(&mut self, unit: usize) -> Result<u64> {
+    pub(super) fn export_hash(&mut self, unit: usize) -> Result<Digest> {
         if let Some(hash) = self.units[unit].export_hash {
             return Ok(hash);
         }
@@ -407,8 +480,20 @@ impl Expander {
         if let Some(syntax) = self.units[unit].syntax.clone() {
             bytes.extend(self.encode_syntax(unit, &syntax)?);
         }
-        let hash = bytes_hash(&bytes);
+        let hash = Digest::of(&bytes);
         self.units[unit].export_hash = Some(hash);
+        Ok(hash)
+    }
+
+    /// A hash of `unit`'s whole artifact, as this build would write it:
+    /// what a library relies on if its expansion ran `unit`'s code, which
+    /// the hash covers along with what `unit` itself relied on.
+    pub(super) fn artifact_hash(&mut self, unit: usize) -> Result<Digest> {
+        if let Some(hash) = self.units[unit].artifact_hash {
+            return Ok(hash);
+        }
+        let hash = Digest::of(&self.library_artifact(unit)?);
+        self.units[unit].artifact_hash = Some(hash);
         Ok(hash)
     }
 
@@ -423,27 +508,55 @@ impl Expander {
         identity: &str,
         bytes: &[u8],
         own: bool,
+        source: Option<Digest>,
     ) -> Result<Module> {
         let fail = |message: String| CompileError {
             message: format!("{identity}: {message}"),
             span: None,
             location: None,
         };
-        let (artifact, needed) = decode_library_artifact(bytes).map_err(fail)?;
+        let (artifact, depends) = decode_library_artifact(bytes).map_err(fail)?;
         let section = |name: &str| {
             artifact
                 .section(name)
                 .ok_or_else(|| fail(format!("the artifact has no {name} section")))
         };
-        for (dependency, hash) in needed {
+        // Its source, if the caller has read it, must be what it was
+        // compiled from.
+        let recorded = decode_source(section("source")?)
+            .map_err(|e| fail(format!("its source record: {e}")))?;
+        if let Some(source) = source
+            && recorded != Some(source)
+        {
+            return Err(fail(match recorded {
+                Some(_) => "its source has changed since it was compiled".to_owned(),
+                None => "it does not record what source it was compiled from".to_owned(),
+            }));
+        }
+        let mut imported = Vec::new();
+        for (dependency, hash) in &depends.imports {
             let unit = self
-                .unit_of(&dependency)
+                .unit_of(dependency)
                 .ok_or_else(|| fail(format!("it needs {dependency}, which is not loaded")))?;
-            if self.export_hash(unit)? != hash {
+            if self.export_hash(unit)? != *hash {
                 return Err(fail(format!(
                     "{dependency} has changed since it was compiled"
                 )));
             }
+            imported.push(unit);
+        }
+        let mut instantiated = Vec::new();
+        for (dependency, hash) in &depends.expansion {
+            let unit = self
+                .unit_of(dependency)
+                .ok_or_else(|| fail(format!("it needs {dependency}, which is not loaded")))?;
+            if self.artifact_hash(unit)? != *hash {
+                return Err(fail(format!(
+                    "{dependency}, whose code ran while it was expanded, has changed \
+                     since it was compiled"
+                )));
+            }
+            instantiated.push(unit);
         }
         let ir = vali_dist::decode(section("invoke")?).map_err(|e| fail(e.to_string()))?;
         if !own
@@ -471,6 +584,9 @@ impl Expander {
             key: identity.to_owned(),
             ir: Some(Arc::new(ir)),
             export_hash: None,
+            artifact_hash: None,
+            source: None,
+            instantiated: Vec::new(),
             pruned: true,
             round_tripped: false,
         });
@@ -483,15 +599,23 @@ impl Expander {
             }
             let syntax = artifact::decode(section("syntax")?, &resolve, &mut self.sources)?;
             let unit = &mut self.units[index];
+            // The records of what it imports must agree.
+            if record.imports != imported {
+                return Err(fail(
+                    "its imports and its dependency records name different libraries".to_owned(),
+                ));
+            }
             unit.key = record.key;
             unit.imports = record.imports;
+            unit.source = recorded;
+            unit.instantiated = instantiated;
             unit.interface = record.interface;
             unit.syntax = Some(Arc::new(syntax));
             // Writing it again would give these bytes, so they are what its
             // importers' artifacts hash, without encoding it again.
             let mut observed = section("library")?.to_vec();
             observed.extend_from_slice(section("syntax")?);
-            unit.export_hash = Some(bytes_hash(&observed));
+            unit.export_hash = Some(Digest::of(&observed));
             Ok(())
         })();
         if let Err(e) = filled {
@@ -661,6 +785,9 @@ impl Expander {
             },
             ir: None,
             export_hash: None,
+            artifact_hash: None,
+            source: None,
+            instantiated: Vec::new(),
             pruned: false,
             round_tripped: false,
         });

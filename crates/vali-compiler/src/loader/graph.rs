@@ -25,6 +25,10 @@ pub(crate) struct Library {
     /// carries, never by a host's loader: only these may import `(vali
     /// primitive)`.
     pub(crate) own: bool,
+    /// A hash of what was read to make its form: its text, the files it
+    /// includes, and what its `cond-expand`s found; `None` if its source
+    /// was not read (ADR 0001 #8).
+    pub(crate) source: Option<Digest>,
 }
 
 /// A program, read: the libraries it defines itself, as read, its
@@ -213,7 +217,8 @@ pub(super) fn include_paths<'a>(
         .collect()
 }
 
-/// Reads the files an include declaration names, for `from`.
+/// Reads the files an include declaration names, for `from`, noting each
+/// in `fingerprint`.
 pub(super) async fn read_includes(
     keyword: &str,
     args: &[Datum],
@@ -221,6 +226,7 @@ pub(super) async fn read_includes(
     from: &Identity,
     loader: &impl Fetch,
     sources: &mut vali_syntax::Sources,
+    fingerprint: &mut Hasher,
 ) -> Result<Vec<Datum>> {
     let mut forms = Vec::new();
     for path in include_paths(keyword, args, span)? {
@@ -229,6 +235,9 @@ pub(super) async fn read_includes(
             .await
             .map_err(|e| error(format!("{keyword}: {path}: {e}"), Some(span)))?
             .ok_or_else(|| error(format!("{keyword}: {from} may not read {path}"), Some(span)))?;
+        fingerprint.field(keyword.as_bytes());
+        fingerprint.field(path.as_bytes());
+        fingerprint.field(text.as_bytes());
         forms.extend(read_included(
             &text,
             keyword == "include-ci",
@@ -248,6 +257,7 @@ pub(super) async fn resolve_library(
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
     sources: &mut vali_syntax::Sources,
+    fingerprint: &mut Hasher,
 ) -> Result<Datum> {
     let Some(("define-library", [name, declarations @ ..])) = head(datum) else {
         return Ok(datum.clone());
@@ -267,8 +277,18 @@ pub(super) async fn resolve_library(
                     kind: DatumKind::Symbol("begin".to_owned()),
                     span: d.span,
                 }];
-                forms
-                    .extend(read_includes(keyword, args, d.span, identity, loader, sources).await?);
+                forms.extend(
+                    read_includes(
+                        keyword,
+                        args,
+                        d.span,
+                        identity,
+                        loader,
+                        sources,
+                        fingerprint,
+                    )
+                    .await?,
+                );
                 resolved.push(list(forms, d.span));
             }
             Some(("include-library-declarations", args)) => {
@@ -279,6 +299,7 @@ pub(super) async fn resolve_library(
                     identity,
                     loader,
                     sources,
+                    fingerprint,
                 )
                 .await?;
                 for form in forms.into_iter().rev() {
@@ -286,7 +307,8 @@ pub(super) async fn resolve_library(
                 }
             }
             Some(("cond-expand", clauses)) => {
-                let chosen = cond_expand(clauses, d.span, identity, loader, local).await?;
+                let chosen =
+                    cond_expand(clauses, d.span, identity, loader, local, fingerprint).await?;
                 for form in chosen.into_iter().rev() {
                     work.push_front(form);
                 }
@@ -306,6 +328,7 @@ pub(super) async fn cond_expand(
     identity: &Identity,
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
+    fingerprint: &mut Hasher,
 ) -> Result<Vec<Datum>> {
     fn clause(c: &Datum, span: Span) -> Result<(&Datum, &[Datum])> {
         match &c.kind {
@@ -328,6 +351,8 @@ pub(super) async fn cond_expand(
                 .await
                 .map_err(|e| error(format!("{name}: {e}"), Some(span)))?
                 .is_some();
+        fingerprint.field(name.to_string().as_bytes());
+        fingerprint.update(&[u8::from(found)]);
         if found {
             available.insert(name);
         }
@@ -447,11 +472,13 @@ pub(super) async fn read_library(
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
     sources: &mut vali_syntax::Sources,
-) -> Result<LibraryForm> {
+) -> Result<(LibraryForm, Hasher)> {
     let text = match &source.native {
         Some(library) => native_form(library),
         None => source.text.clone(),
     };
+    let mut fingerprint = Hasher::new();
+    fingerprint.field(text.as_bytes());
     let id = sources.add(source.identity.as_str(), &text);
     let read = vali_syntax::read(&text, id);
     if let Some(e) = read.errors.first() {
@@ -467,7 +494,15 @@ pub(super) async fn read_library(
             None,
         ));
     };
-    let datum = &resolve_library(datum, &source.identity, loader, local, sources).await?;
+    let datum = &resolve_library(
+        datum,
+        &source.identity,
+        loader,
+        local,
+        sources,
+        &mut fingerprint,
+    )
+    .await?;
     let form = library::library_form(datum)?.ok_or_else(|| {
         error(
             format!("{}: expected a library form", source.identity),
@@ -483,7 +518,7 @@ pub(super) async fn read_library(
             Some(form.span),
         ));
     }
-    Ok(form)
+    Ok((form, fingerprint))
 }
 
 pub(super) async fn walk(
@@ -503,7 +538,15 @@ pub(super) async fn walk(
     for d in &program.libraries {
         let name = library::form_name(d)?;
         let local_identity = Identity::new(&format!("{identity}#{name}"));
-        let resolved = resolve_library(d, &local_identity, loader, &names, sources).await?;
+        let resolved = resolve_library(
+            d,
+            &local_identity,
+            loader,
+            &names,
+            sources,
+            &mut Hasher::new(),
+        )
+        .await?;
         forms.push(library::library_form(&resolved)?.expect("a library form"));
     }
     let local: HashMap<&LibraryName, &LibraryForm> = forms.iter().map(|l| (&l.name, l)).collect();
@@ -535,13 +578,14 @@ pub(super) async fn walk(
         }
         // Standard libraries come first, so no loader can replace them,
         // except those a host serves to grant what they need.
-        let (library_identity, form, prebuilt, native, own) = match local.get(&name) {
+        let (library_identity, form, prebuilt, native, own, fingerprint) = match local.get(&name) {
             Some(form) => (
                 Identity::new(&format!("{identity}#{name}")),
                 Some((*form).clone()),
                 None,
                 None,
                 false,
+                None,
             ),
             None => {
                 let fetched = if is_host_served(&name) || standard(&name).is_none() {
@@ -566,11 +610,22 @@ pub(super) async fn walk(
                 }
                 // One of Vali's own with a prebuilt artifact is not read.
                 let prebuilt = own.then(|| prebuilt_imports(&source.identity)).flatten();
-                let form = match prebuilt {
-                    Some(_) => None,
-                    None => Some(read_library(&name, &source, loader, &names, sources).await?),
+                let (form, fingerprint) = match prebuilt {
+                    Some(_) => (None, None),
+                    None => {
+                        let (form, fingerprint) =
+                            read_library(&name, &source, loader, &names, sources).await?;
+                        (Some(form), Some(fingerprint))
+                    }
                 };
-                (source.identity, form, prebuilt, source.native, own)
+                (
+                    source.identity,
+                    form,
+                    prebuilt,
+                    source.native,
+                    own,
+                    fingerprint,
+                )
             }
         };
         let imports: Vec<LibraryName> = match (prebuilt, &form) {
@@ -597,6 +652,28 @@ pub(super) async fn walk(
             )
             .await;
         }
+        // Included files read along with its body are part of its source.
+        let source = fingerprint.map(|mut fingerprint| {
+            let mut read: Vec<_> = includes
+                .iter()
+                .filter(|((from, _), _)| from == library_identity.as_str())
+                .collect();
+            read.sort_by(|a, b| a.0.1.cmp(&b.0.1));
+            for ((_, path), text) in read {
+                fingerprint.field(path.as_bytes());
+                match text {
+                    Ok(text) => {
+                        fingerprint.update(&[1]);
+                        fingerprint.field(text.as_bytes());
+                    }
+                    Err(why) => {
+                        fingerprint.update(&[0]);
+                        fingerprint.field(why.as_bytes());
+                    }
+                }
+            }
+            fingerprint.finish()
+        });
         let index = found.len();
         by_identity.insert(library_identity.clone(), index);
         by_name.insert(name.clone(), index);
@@ -607,6 +684,7 @@ pub(super) async fn walk(
             imports,
             native,
             own,
+            source,
         });
     }
     let mut graph = order(found, by_name)?;
