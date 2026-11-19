@@ -6,7 +6,7 @@
 
 ## Context
 
-Bytecode is the contract between the compiler, the artifact cache and every tier: tier 0 interprets it, and tier 1 and AOT compile from it. The design overview settles two properties, register-based and versioned, and leaves the instruction set and encoding open.
+Bytecode is the contract between the converter and every tier: tier 0 interprets it, and tier 1 and AOT compile from it. The design overview settles two properties, register-based and versioned, and leaves the instruction set and encoding open.
 
 Tier 0 is not a stopgap. A short CLI run spends all of its time there. Steel's bytecode VM matched scheme-rs's JIT on small benchmarks, and the target is to come within about 1.5x of Vali's baseline JIT. Cold start matters too: loading an artifact should not involve translating its bytecode.
 
@@ -52,12 +52,12 @@ Options **B and D**, as follows.
 
    **The IR adds** (ADR 0017): direct calls to a known function, with no procedure check; dispatch sites, each with a slot in a per-module table that the linker fills; and `dup`, `drop`, `drop-reuse` and constructors that build in a reused cell, which are inserted as a module loads, and only under strategies that count references (ADR 0017 #6).
 6. **Function entry** checks arity, including optional and rest arguments and `case-lambda` clauses, decrements the fuel budget, and counts calls for tier-up. Loops are tail calls, so this is the only place either count is needed.
-7. **Safe by construction (D).** Every instruction checks its operands' types and bounds. The loader rejects artifacts whose slot indexes, constant indexes or jump targets are out of range, so the dispatch loop needs no checks of its own. Proven contract checks (ADR 0010) can be removed from bytecode. Memory-safety checks are removed only in native code.
+7. **Safe by construction (D).** Every instruction checks its operands' types and bounds. The loader rejects artifacts whose slot indexes, constant indexes or jump targets are out of range, so the dispatch loop needs no checks of its own. A library's functions are converted and validated when first called (ADR 0017 #10), each against its module's tables, so a function is checked before any instruction of it runs. Proven contract checks (ADR 0010) can be removed from bytecode. Memory-safety checks are removed only in native code.
 
    The validator also rejects any write to slot 0, which holds the running closure the VM reads its code from, and any call whose header would cover it. `%catch`, `%call/cc` and `%continue` check their argument counts, a returned callee's header words are cleared from the caller's slots, and `set-free` changes only closures of the running module. **A known gap (ADR 0017):** deferred counting treats a caller's slots above a pending call's window as dead, and nothing yet stops bytecode reading one it wrote before the call. Vali's compiler never does; the IR's converter computes liveness, and the validator is to check it.
 8. **Each function has side tables:** debug information (ADR 0014), meaning its name, a line table mapping instructions to resolved source positions, and the names and live ranges of its local variables by slot; and slot liveness at each safepoint (ADR 0003). Debug information is self-contained, so stack traces and debuggers work without the source files.
-9. **The format is versioned and private.** Bytecode carries a format version. It is a cache format, not an interchange format: any version mismatch means rebuilding, and there is no compatibility promise between Vali releases. It is rebuilt from source or from the library's distribution artifact (ADR 0012). Libraries are never shipped in this format.
-10. **Bytecode is directly executable.** Loading an artifact fills in its tables but does not rewrite its code.
+9. **The format is versioned and private.** Bytecode carries a format version. It is neither stored nor exchanged: it is made as a library loads, from source or from the library's distribution artifact (ADR 0012), and no run-format copy is written anywhere, so there is no compatibility promise between Vali releases. Libraries are never shipped in this format.
+10. **Bytecode is directly executable.** Loading an artifact fills in its tables and converts the module's body; the other functions convert on their first call (ADR 0017 #10). Converted code is not rewritten afterwards.
 
 The opcode list lives in a specification, `docs/bytecode.md`, that changes along with the format. It is not an ADR.
 

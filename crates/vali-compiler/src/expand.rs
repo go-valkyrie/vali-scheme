@@ -29,7 +29,7 @@ use vali_syntax::{
     free_identifier_eq,
 };
 
-use vali_bytecode::{Link, Module, ModuleBuilder, validate};
+use vali_bytecode::{Converted, Link, Module, ModuleBuilder, validate};
 use vali_dist::Digest;
 use vali_runtime::{Cx, DeferredHeadered, Handle};
 
@@ -339,6 +339,10 @@ pub(crate) struct Expander {
     natives: Vec<(String, std::sync::Arc<vali_runtime::NativeLibrary>)>,
     /// Whether the next unit is one of Vali's own (`Unit::own`).
     next_own: bool,
+    /// Whether the next unit is a library, which converts to bytecode as
+    /// its functions are first called (`Unit::module`); a program or an
+    /// evaluated expression converts whole.
+    next_library: bool,
     /// Whether the next unit's key includes a hash of its text
     /// (`Unit::key`).
     next_hashed: bool,
@@ -358,7 +362,7 @@ pub(crate) struct Expander {
     /// The sources read, which spans' source ids index.
     pub(crate) sources: vali_syntax::Sources,
     /// The IR of the last module compiled.
-    pub(crate) last_ir: Option<vali_dist::Module>,
+    pub(crate) last_ir: Option<Arc<vali_dist::Module>>,
     /// The same before it was optimised.
     pub(crate) last_lowered: Option<vali_dist::Module>,
     /// Whether what is compiled now is optimised: false while evaluated
@@ -407,6 +411,7 @@ impl Expander {
             floors: Vec::new(),
             natives: Vec::new(),
             next_own: false,
+            next_library: false,
             next_hashed: false,
             includes: crate::loader::Includes::new(),
             available: crate::loader::Available::new(),
@@ -566,12 +571,13 @@ impl Expander {
         form: &LibraryForm,
         own: bool,
         source: Option<Digest>,
-    ) -> Result<Module> {
+    ) -> Result<Converted> {
         if self.natives.iter().any(|(i, _)| i == identity) {
-            return self.native_library(identity, form);
+            return self.native_library(identity, form).map(Converted::Eager);
         }
         self.start_context(false, &form.imports)?;
         self.next_own = own;
+        self.next_library = true;
         let scope = self.scope(ScopeKind::Library)?;
         let top = self.context.intern(&[scope]).map_err(too_many)?;
         let module = self.unit(
@@ -601,7 +607,7 @@ impl Expander {
     /// `module`, the code of library `unit`, with the digest that tells it
     /// from another build: that of its IR's encoding, which is what its
     /// artifact holds, so a library loaded from one has the same.
-    fn digested(&mut self, unit: usize, mut module: Module) -> Result<Module> {
+    fn digested(&mut self, unit: usize, mut module: Converted) -> Result<Converted> {
         let Some(ir) = self.units[unit].ir.clone() else {
             return Ok(module);
         };
@@ -611,7 +617,7 @@ impl Expander {
             span: None,
             location: None,
         })?;
-        module.digest = Some(vali_dist::Digest::of(&bytes).0);
+        module.module_mut().digest = Some(vali_dist::Digest::of(&bytes).0);
         self.units[unit].module = Some(module.clone());
         Ok(module)
     }

@@ -31,8 +31,38 @@ pub use repl::Repl;
 
 use std::fmt;
 
-use vali_bytecode::Module;
+use vali_bytecode::{Converted, Module};
 use vali_syntax::{Datum, Span};
+
+static EAGER_CONVERSION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether a library's functions are all converted to run-format bytecode
+/// as it loads, and not each as it is first called (ADR 0017 #2): on after
+/// [`set_eager_conversion`]`(true)`, or if the `VALI_EAGER` environment
+/// variable is set and it has not been called. A build that reports every
+/// conversion problem before running anything, and the test suite's second
+/// pass, want it on.
+pub(crate) fn eager_conversion() -> bool {
+    use std::sync::atomic::Ordering;
+    match EAGER_CONVERSION.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ENV.get_or_init(|| std::env::var_os("VALI_EAGER").is_some())
+        }
+    }
+}
+
+/// Sets whether libraries compiled from now on convert all their functions
+/// as they load (`true`) or each as it is first called (`false`, the
+/// default), whatever `VALI_EAGER` says. It is process-wide.
+pub fn set_eager_conversion(eager: bool) {
+    EAGER_CONVERSION.store(
+        if eager { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 /// Why a program does not compile.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,7 +112,7 @@ impl std::error::Error for CompileError {}
 #[derive(Debug)]
 pub struct Program {
     /// Each library, with its identity.
-    pub libraries: Vec<(Identity, Module)>,
+    pub libraries: Vec<(Identity, Converted)>,
     /// The program's body.
     pub body: Module,
     /// What syntax objects at run time need, if the program or a library
@@ -364,7 +394,7 @@ fn build(
 /// modules, the program's, its native libraries, and whether it imports
 /// `(scheme eval)`.
 type Expanded = (
-    Vec<(Identity, Module)>,
+    Vec<(Identity, Converted)>,
     Module,
     Vec<(Identity, std::sync::Arc<vali_runtime::NativeLibrary>)>,
     bool,
@@ -495,7 +525,7 @@ fn load_inner<S: vali_runtime::Strategy>(
             }
             continue;
         }
-        let id = cx.load_library(module)?;
+        let id = cx.load_converted(module)?;
         cx.run(id)?;
         cx.register_library(identity.as_str(), id);
     }
@@ -510,7 +540,7 @@ fn load_inner<S: vali_runtime::Strategy>(
 pub(crate) fn compile_library(
     expander: &mut expand::Expander,
     library: &loader::Library,
-) -> Result<Module, CompileError> {
+) -> Result<Converted, CompileError> {
     let identity = library.identity.as_str();
     if library.own
         && let Some(bytes) = prebuilt::artifact(identity)
