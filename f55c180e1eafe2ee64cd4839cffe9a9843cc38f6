@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "54bd6344_385ac04d",
+        "filename": "crates/vali-runtime/src/syntax.rs",
+        "patchSetId": 3
+      },
+      "lineNbr": 88,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:55:53Z",
+      "side": 1,
+      "message": "Nit: `syntax_raw` is public, and it can now run an epoch: at the cap, under a counting strategy, outside a run. Until now a `_raw` call never freed anything, and `generate-temporaries` still says so (\"nothing is collected, so the values stay valid\"). That one is safe, since natives run with `running` set. But a host calling `syntax_raw` from Rust while it holds other values raw, not in handles, can have them freed. That\u0027s worth a line in the doc comment.",
+      "revId": "f55c180e1eafe2ee64cd4839cffe9a9843cc38f6",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
