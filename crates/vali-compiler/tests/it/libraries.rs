@@ -71,6 +71,29 @@ fn a_program_imports_its_own_library() {
     )]);
 }
 
+/// A library's quoted constants keep their datum labels, also when its
+/// artifact is written and read back (`VALI_ROUND_TRIP`).
+#[test]
+fn a_librarys_constants_keep_their_labels() {
+    check(&[(
+        &format!(
+            "(define-library (labels)
+               (import {BASE})
+               (export shared cycle vector-cycle)
+               (begin
+                 (define shared '(#0=(1 2) #0#))
+                 (define cycle '#1=(a b . #1#))
+                 (define vector-cycle '#2=#(1 #2#))))
+             (import {BASE} (labels))
+             (list (eq? (car shared) (cadr shared))
+                   (eq? cycle (cddr cycle))
+                   (eq? vector-cycle (vector-ref vector-cycle 1))
+                   (list? cycle))"
+        ),
+        "(#t #t #t #f)",
+    )]);
+}
+
 #[test]
 fn import_sets() {
     let library = format!(

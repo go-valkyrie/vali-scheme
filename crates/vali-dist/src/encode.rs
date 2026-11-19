@@ -213,6 +213,15 @@ fn encode_constant(w: &mut Writer, constant: &Constant) {
                 w.byte(15);
                 w.bytes(bytes);
             }
+            Constant::Labelled(n, inner) => {
+                w.byte(16);
+                w.u32(*n);
+                pending.push(inner);
+            }
+            Constant::LabelRef(n) => {
+                w.byte(17);
+                w.u32(*n);
+            }
         }
     }
 }
@@ -223,6 +232,7 @@ enum Open {
     Complex,
     Pair,
     Vector(usize),
+    Labelled(u32),
 }
 
 fn decode_constant(r: &mut Reader<'_>) -> Result<Constant, DecodeError> {
@@ -275,6 +285,12 @@ fn decode_constant(r: &mut Reader<'_>) -> Result<Constant, DecodeError> {
                 Constant::Vector(Vec::new())
             }
             15 => Constant::Bytevector(r.bytes()?.to_vec()),
+            16 => {
+                let n = r.u32()?;
+                open.push((Open::Labelled(n), Vec::with_capacity(1)));
+                continue;
+            }
+            17 => Constant::LabelRef(r.u32()?),
             b => return Err(r.error(format!("unknown constant tag {b}"))),
         };
         // Deliver it to what is waiting for it, closing what fills up.
@@ -286,6 +302,7 @@ fn decode_constant(r: &mut Reader<'_>) -> Result<Constant, DecodeError> {
             parts.push(value);
             let needed = match kind {
                 Open::Vector(n) => *n,
+                Open::Labelled(_) => 1,
                 _ => 2,
             };
             if parts.len() < needed {
@@ -294,6 +311,9 @@ fn decode_constant(r: &mut Reader<'_>) -> Result<Constant, DecodeError> {
             let (kind, mut parts) = open.pop().expect("open");
             value = match kind {
                 Open::Vector(_) => Constant::Vector(parts),
+                Open::Labelled(n) => {
+                    Constant::Labelled(n, Box::new(parts.pop().expect("one part")))
+                }
                 _ => {
                     let b = Box::new(parts.pop().expect("two parts"));
                     let a = Box::new(parts.pop().expect("two parts"));
