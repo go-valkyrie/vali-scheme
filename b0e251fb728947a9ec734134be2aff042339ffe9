@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "284b7d7b_a962a9ad",
+        "filename": "crates/vali-test/tests/ir_adversarial.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 1440,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:28:17Z",
+      "side": 1,
+      "message": "The reference writer prints `#i(…)`, while the VM writes `#\u003cilist …\u003e`. It never shows, because the generator (e.g. the `9 | 10` arm at 2101) never emits `Ipair`, `Icar`, `Icdr` or `IsIpair`.\n\nWith case 10 made to emit `Ipair`, `random_valid_ir` fails 4 of 200 seeds, e.g. seed 6: got `\"#\u003cilist -1 . 8589934592\u003e\"`, expected `\"#i(-1 . 8589934592)\"`. With the writer changed to `#\u003cilist …\u003e`, 1500 seeds pass under every strategy, so the VM is right.\n\nMatch the writer to the VM and add generator cases: `ipair`, `icar`/`icdr` on ipair variables, and `ipair?` on any value.",
+      "revId": "b0e251fb728947a9ec734134be2aff042339ffe9",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
