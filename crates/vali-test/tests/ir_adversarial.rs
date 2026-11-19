@@ -1369,6 +1369,7 @@ enum V {
     Unspec,
     Str(Rc<str>),
     Pair(Rc<RefCell<(V, V)>>),
+    Ipair(Rc<(V, V)>),
     Vector(Rc<RefCell<Vec<V>>>),
     Box(Rc<RefCell<V>>),
     Clo(Rc<Clo>),
@@ -1394,6 +1395,7 @@ fn eq(a: &V, b: &V) -> bool {
         (V::Nil, V::Nil) | (V::Unspec, V::Unspec) | (V::Prim, V::Prim) => true,
         (V::Str(x), V::Str(y)) => Rc::ptr_eq(x, y),
         (V::Pair(x), V::Pair(y)) => Rc::ptr_eq(x, y),
+        (V::Ipair(x), V::Ipair(y)) => Rc::ptr_eq(x, y),
         (V::Vector(x), V::Vector(y)) => Rc::ptr_eq(x, y),
         (V::Box(x), V::Box(y)) => Rc::ptr_eq(x, y),
         (V::Clo(x), V::Clo(y)) => Rc::ptr_eq(x, y),
@@ -1433,6 +1435,26 @@ fn write(v: &V, out: &mut String) {
                 }
             }
             out.push(')');
+        }
+        V::Ipair(p) => {
+            out.push_str("#<ilist ");
+            let mut cur = p.clone();
+            loop {
+                write(&cur.0, out);
+                match &cur.1 {
+                    V::Nil => break,
+                    V::Ipair(next) => {
+                        out.push(' ');
+                        cur = next.clone();
+                    }
+                    other => {
+                        out.push_str(" . ");
+                        write(other, out);
+                        break;
+                    }
+                }
+            }
+            out.push('>');
         }
         V::Vector(items) => {
             out.push_str("#(");
@@ -1669,6 +1691,18 @@ impl<'m> Interp<'m> {
                     Primitive::Eq => V::Bool(eq(&a[0], &a[1])),
                     Primitive::Not => V::Bool(matches!(a[0], V::Bool(false))),
                     Primitive::Cons => V::Pair(Rc::new(RefCell::new((a[0].clone(), a[1].clone())))),
+                    Primitive::Ipair => V::Ipair(Rc::new((a[0].clone(), a[1].clone()))),
+                    Primitive::Icar | Primitive::Icdr => match &a[0] {
+                        V::Ipair(p) => {
+                            if *op == Primitive::Icar {
+                                p.0.clone()
+                            } else {
+                                p.1.clone()
+                            }
+                        }
+                        _ => return Err(Stop::Error("icar".into())),
+                    },
+                    Primitive::IsIpair => V::Bool(matches!(a[0], V::Ipair(_))),
                     Primitive::Car | Primitive::Cdr => match &a[0] {
                         V::Pair(p) => {
                             let p = p.borrow();
@@ -1789,6 +1823,7 @@ enum K {
     Int,
     Bool,
     Pair,
+    Ipair,
     Vector(u8),
     BoxInt,
     Clo(u32),
@@ -2028,7 +2063,7 @@ impl<R: Random> Gen<'_, R> {
     /// A value for a `let`, and its kind.
     fn value(&mut self, ctx: &Ctx) -> (Value, K) {
         loop {
-            let choice = self.below(24);
+            let choice = self.below(26);
             let prim = |op, args| Value::Primitive { op, args };
             match choice {
                 0 => {
@@ -2064,10 +2099,29 @@ impl<R: Random> Gen<'_, R> {
                         [self.below(3) as usize];
                     return (prim(op, vec![a]), K::Bool);
                 }
-                9 | 10 => {
+                9 => {
                     let a = self.any(ctx).0;
                     let b = self.any(ctx).0;
                     return (prim(Primitive::Cons, vec![a, b]), K::Pair);
+                }
+                10 => {
+                    let a = self.any(ctx).0;
+                    let b = self.any(ctx).0;
+                    return (prim(Primitive::Ipair, vec![a, b]), K::Ipair);
+                }
+                24 => {
+                    if let Some((p, _)) = self.var_of(ctx, |k| k == K::Ipair) {
+                        let op = if self.chance(50) {
+                            Primitive::Icar
+                        } else {
+                            Primitive::Icdr
+                        };
+                        return (prim(op, vec![v(p)]), K::Any);
+                    }
+                }
+                25 => {
+                    let a = self.any(ctx).0;
+                    return (prim(Primitive::IsIpair, vec![a]), K::Bool);
                 }
                 11 => {
                     if let Some((p, _)) = self.var_of(ctx, |k| k == K::Pair) {
@@ -2218,9 +2272,10 @@ impl<R: Random> Gen<'_, R> {
                 Primitive::Eq,
                 Primitive::IsNull,
                 Primitive::IsPair,
-            ][self.below(6) as usize];
+                Primitive::IsIpair,
+            ][self.below(7) as usize];
             let args = match op {
-                Primitive::IsNull | Primitive::IsPair => vec![self.any(ctx).0],
+                Primitive::IsNull | Primitive::IsPair | Primitive::IsIpair => vec![self.any(ctx).0],
                 Primitive::Eq => vec![self.any(ctx).0, self.any(ctx).0],
                 _ => vec![self.int(ctx), self.int(ctx)],
             };

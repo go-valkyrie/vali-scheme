@@ -1532,6 +1532,23 @@ impl Emitter<'_> {
                 car: self.read(x)?,
                 cdr: self.read(y)?,
             },
+            (P::Ipair, &[x, y]) => I::Ipair {
+                dst,
+                car: self.read(x)?,
+                cdr: self.read(y)?,
+            },
+            (P::Icar, &[x]) => I::Icar {
+                dst,
+                pair: self.read(x)?,
+            },
+            (P::Icdr, &[x]) => I::Icdr {
+                dst,
+                pair: self.read(x)?,
+            },
+            (P::IsIpair, &[x]) => I::IsIpair {
+                dst,
+                src: self.read(x)?,
+            },
             (P::Not, &[x]) => I::Not {
                 dst,
                 src: self.read(x)?,

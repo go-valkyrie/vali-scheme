@@ -439,6 +439,11 @@ fn effects() {
     assert!(Primitive::Eq.effects().is_pure());
     assert!(Primitive::Car.effects().contains(Effects::RAISE));
     assert!(!Primitive::Car.effects().contains(Effects::WRITE));
+    // An immutable pair is never written, so reading one is not a read.
+    assert_eq!(Primitive::Icar.effects(), Effects::RAISE);
+    assert_eq!(Primitive::Icdr.effects(), Effects::RAISE);
+    assert_eq!(Primitive::Ipair.effects(), Effects::ALLOC);
+    assert!(Primitive::IsIpair.effects().is_pure());
     assert_eq!(
         Primitive::VectorSet.effects().to_string(),
         "write may-raise"
