@@ -565,7 +565,7 @@
     ;; reverse, so a long list never deepens the stack.
     (define (map f list1 . lists)
       (if (null? lists)
-          (let loop ((xs list1) (acc '()))
+          (let loop ((xs (begin (%check-acyclic "map" list1) list1)) (acc '()))
             (if (pair? xs)
                 (loop (cdr xs) (cons (f (car xs)) acc))
                 (reverse acc)))
@@ -577,7 +577,7 @@
 
     (define (for-each f list1 . lists)
       (if (null? lists)
-          (let loop ((xs list1))
+          (let loop ((xs (begin (%check-acyclic "for-each" list1) list1)))
             (when (pair? xs)
               (f (car xs))
               (loop (cdr xs))))
@@ -588,6 +588,7 @@
                 (loop (%cdrs lists)))))))
 
     (define (list-copy x)
+      (%check-acyclic "list-copy" x)
       (let loop ((x x) (acc '()))
         (if (pair? x)
             (loop (cdr x) (cons (car x) acc))
@@ -608,7 +609,7 @@
       (if (null? compare)
           (%member x list)
           (let ((same? (car compare)))
-            (let loop ((l list))
+            (let loop ((l (begin (%check-acyclic "member" list) list)))
               (cond ((null? l) #f)
                     ((same? x (car l)) l)
                     (else (loop (cdr l))))))))
@@ -617,7 +618,7 @@
       (if (null? compare)
           (%assoc x alist)
           (let ((same? (car compare)))
-            (let loop ((l alist))
+            (let loop ((l (begin (%check-acyclic "assoc" alist) alist)))
               (cond ((null? l) #f)
                     ((same? x (car (car l))) (car l))
                     (else (loop (cdr l))))))))
