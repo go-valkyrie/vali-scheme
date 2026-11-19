@@ -189,6 +189,19 @@ fn symbols_print_with_bars_when_needed() {
 }
 
 #[test]
+fn symbols_that_read_as_numbers_print_with_bars() {
+    assert_eq!(
+        reads("|+i| |-i| |+inf.0| |-inf.0| |+nan.0| |1+2i| |.5| |1/2| + - ..."),
+        [
+            "|+i|", "|-i|", "|+inf.0|", "|-inf.0|", "|+nan.0|", "|1+2i|", "|.5|", "|1/2|", "+",
+            "-", "..."
+        ]
+    );
+    assert!(vali_syntax::symbol_reads_plain("+a"));
+    assert!(!vali_syntax::symbol_reads_plain("+i"));
+}
+
+#[test]
 fn labels() {
     assert_eq!(reads("#0=(a . #0#)"), ["#0=(a . #0#)"]);
     assert_eq!(reads("(#1=x #1#)"), ["(#1=x #1#)"]);
