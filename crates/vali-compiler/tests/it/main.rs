@@ -6,6 +6,7 @@ mod artifacts;
 mod bridges;
 mod compile;
 mod hostile;
+mod lazy;
 mod libraries;
 mod limits;
 mod lower;
