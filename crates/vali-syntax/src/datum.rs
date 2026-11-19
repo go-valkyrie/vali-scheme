@@ -466,14 +466,21 @@ fn write_escaped(f: &mut fmt::Formatter<'_>, c: char, quote: char) -> fmt::Resul
     }
 }
 
+/// Whether a symbol named `name` written without vertical bars reads back
+/// as that symbol: it is an identifier, and neither a number (the reader
+/// tries numbers first, so `+i`, `-inf.0` and `1e3` are numbers) nor a
+/// keyword.
+pub fn symbol_reads_plain(name: &str) -> bool {
+    is_identifier(name)
+        && vali_num::parse(name, Radix::Decimal).is_err()
+        && !(name.ends_with(':') && name.chars().any(|c| c != ':'))
+}
+
 /// Writes a symbol plainly when that reads back as the same symbol, and
 /// between vertical bars otherwise: for names that would read as numbers,
 /// keywords or `.`, or that aren't identifiers.
 fn write_symbol(f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
-    let plain = is_identifier(name)
-        && vali_num::parse(name, Radix::Decimal).is_err()
-        && !(name.ends_with(':') && name.chars().any(|c| c != ':'));
-    if plain {
+    if symbol_reads_plain(name) {
         return f.write_str(name);
     }
     f.write_char('|')?;

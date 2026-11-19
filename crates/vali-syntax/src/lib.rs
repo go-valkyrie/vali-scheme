@@ -38,7 +38,7 @@ mod tree;
 mod walk;
 
 pub use binding::{AlreadyBound, BindingTable, Phase, Phases, Resolution};
-pub use datum::{Datum, DatumKind, PlainBuilder};
+pub use datum::{Datum, DatumKind, PlainBuilder, symbol_reads_plain};
 pub use ident::is_identifier;
 pub use kind::SyntaxKind;
 pub use lexer::{LexError, LexErrorKind, Lexed, Token, lex};
