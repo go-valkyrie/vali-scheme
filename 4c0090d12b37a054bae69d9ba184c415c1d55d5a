@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c69046d6_3a5f7555",
+        "filename": "crates/vali-compiler/src/expand/units.rs",
+        "patchSetId": 4
+      },
+      "lineNbr": 1264,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T18:14:34Z",
+      "side": 1,
+      "message": "A set with two scopes of the same kind (two Macro scopes, say) matches greedily: the first unmapped scope of theirs takes the first free one of ours of that kind, and the choice sticks for later entries. That\u0027s right when importing keeps the scopes\u0027 relative order. But `Remap::scope` numbers new scopes in the order it first meets them, while `scopes(set)` sorts by number, so the order may not hold. If a set with two same-kind scopes is matched before an entry that pins one of them, the swapped pairing would make that later entry fail, and a legitimate artifact would be refused. Patch set 2 had the same property.\n\nI couldn\u0027t make it happen. A library whose private helper is defined by a macro-defining macro, two and three levels deep, imported by a second library, loads from its artifacts and gives the same results as from source. So it may never arise in practice. A sentence on why the order holds would settle it, or a small backtracking step over same-kind scopes when a later entry contradicts an earlier choice.",
+      "revId": "4c0090d12b37a054bae69d9ba184c415c1d55d5a",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
