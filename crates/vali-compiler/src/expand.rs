@@ -58,6 +58,13 @@ use crate::phase::{self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, Sha
 /// deep.
 const MAX_MACRO_DEPTH: usize = 10_000;
 
+/// The highest phase a transformer written in Scheme may run at: how many
+/// transformers may be nested in each other's code. A phase has an isolate
+/// of its own, made when it is first used, so a phase that artifact bytes
+/// name is not trusted to be anything near what memory allows. Real macros
+/// reach phase 1 or 2.
+pub(crate) const MAX_PHASE: usize = 16;
+
 type Result<T> = std::result::Result<T, CompileError>;
 
 /// When less stack than this is left, recursion moves to a new segment of

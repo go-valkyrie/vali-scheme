@@ -559,15 +559,9 @@ impl Expander {
             instantiated.push(unit);
         }
         let ir = vali_dist::decode(section("invoke")?).map_err(|e| fail(e.to_string()))?;
-        if !own
-            && let Some(global) = ir.globals.iter().find(|g| {
-                matches!(g.link, vali_dist::GlobalLink::Primitive) && g.name.starts_with('%')
-                    || matches!(g.link, vali_dist::GlobalLink::Native(_))
-            })
-        {
+        if !own && let Some(name) = links_internal(&ir, &[]) {
             return Err(fail(format!(
-                "it links {}, which only Vali's own libraries may",
-                global.name
+                "it links {name}, which only Vali's own libraries may"
             )));
         }
         let module = converted(&ir)?;
@@ -598,6 +592,8 @@ impl Expander {
                 return Err(fail(format!("the artifact is {}'s", record.identity)));
             }
             let syntax = artifact::decode(section("syntax")?, &resolve, &mut self.sources)?;
+            self.check_export(index, own, &record, &syntax)
+                .map_err(&fail)?;
             let unit = &mut self.units[index];
             // The records of what it imports must agree.
             if record.imports != imported {
@@ -623,6 +619,85 @@ impl Expander {
             return Err(e);
         }
         Ok(module)
+    }
+
+    /// Checks that what a library's record and syntax export bind is there to
+    /// be used: each macro exists, in this library or the one it names, and
+    /// only Vali's own libraries bind an internal primitive. The expander
+    /// trusts a binding it finds, so one that names nothing is refused here
+    /// and not met in the middle of expanding a program.
+    fn check_export(
+        &self,
+        index: usize,
+        own: bool,
+        record: &artifact::LibraryRecord,
+        syntax: &ContextState,
+    ) -> std::result::Result<(), String> {
+        // An export holds its own library's macros and compiled syntax and
+        // no others': importers copy what it holds, and the first copy of a
+        // macro wins, so one that names another library's would replace it.
+        if let Some(id) = syntax.macros.keys().find(|id| id.unit as usize != index) {
+            return Err(format!(
+                "its syntax export defines macro {} of another library",
+                id.index
+            ));
+        }
+        if let Some(key) = syntax.compiled.keys().find(|key| **key != record.key) {
+            return Err(format!(
+                "its syntax export has compiled syntax under {key}, not its own key"
+            ));
+        }
+        // A transformer runs in the expander's isolate, so what its code
+        // links is held to what a library's own may.
+        if !own {
+            let allowed = [QUOTE_SYNTAX, SYNTAX_MATCH, SYNTAX_BUILD];
+            for m in syntax.macros.values() {
+                if let Transformer::Procedure(p) = &m.transformer
+                    && let Some(name) = links_internal(&p.ir, &allowed)
+                {
+                    return Err(format!(
+                        "the transformer {} links {name}, which only Vali's own libraries may",
+                        m.name
+                    ));
+                }
+            }
+        }
+        let bindings = record
+            .interface
+            .values()
+            .chain(syntax.table.entries().map(|(_, _, _, binding)| binding));
+        for binding in bindings {
+            match binding {
+                Binding::Macro(id) => {
+                    let defined = |syntax: &ContextState| syntax.macros.contains_key(id);
+                    let there = if id.unit as usize == index {
+                        defined(syntax)
+                    } else {
+                        self.units
+                            .get(id.unit as usize)
+                            .and_then(|u| u.syntax.as_deref())
+                            .is_some_and(defined)
+                    };
+                    if !there {
+                        return Err(format!(
+                            "it binds macro {} of {}, which does not exist",
+                            id.index,
+                            self.units
+                                .get(id.unit as usize)
+                                .map_or("a library that is not loaded", |u| u.identity.as_str())
+                        ));
+                    }
+                }
+                Binding::Primitive(name) if !own && name.starts_with('%') => {
+                    return Err(format!(
+                        "it binds {name}, an internal primitive that only Vali's own \
+                         libraries may"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Expands and compiles a program. With imports, it sees only what it
@@ -992,4 +1067,19 @@ impl Expander {
         }
         Ok(())
     }
+}
+
+/// The first of `ir`'s globals that only Vali's own libraries may link: an
+/// internal primitive, whose name starts with `%`, other than those in
+/// `allowed`, or a native function.
+fn links_internal(ir: &vali_dist::Module, allowed: &[&str]) -> Option<String> {
+    ir.globals
+        .iter()
+        .find(|g| {
+            matches!(g.link, vali_dist::GlobalLink::Primitive)
+                && g.name.starts_with('%')
+                && !allowed.contains(&&*g.name)
+                || matches!(g.link, vali_dist::GlobalLink::Native(_))
+        })
+        .map(|g| g.name.to_string())
 }

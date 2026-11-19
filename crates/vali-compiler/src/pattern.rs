@@ -424,7 +424,13 @@ fn elements(
             return Ok(false);
         }
         for (slot, &v) in collected.iter_mut().zip(&repeat.vars) {
-            slot.push(each[v].take().expect("the repeated pattern binds it"));
+            let Some(m) = each.get_mut(v).and_then(Option::take) else {
+                return Err(error(
+                    "a repeated pattern does not bind a variable it repeats",
+                    item.span(),
+                ));
+            };
+            slot.push(m);
         }
     }
     for (slot, &v) in collected.into_iter().zip(&repeat.vars) {
@@ -643,7 +649,9 @@ impl Builder<'_> {
             if count == 1 {
                 out.push(self.build(t, binds)?);
             } else {
-                self.repeat(t, count - 1, binds, out)?;
+                stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || {
+                    self.repeat(t, count - 1, binds, out)
+                })?;
             }
         }
         for (v, matches) in lists {
@@ -658,16 +666,22 @@ impl Builder<'_> {
     /// ellipses between it and these is consumed when `inner + count <= p`.
     /// Variables outside that reach are repeated whole.
     fn drivers(&self, t: &Template, count: usize, inner: usize, out: &mut Vec<usize>) {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || {
+            self.drivers_here(t, count, inner, out)
+        })
+    }
+
+    fn drivers_here(&self, t: &Template, count: usize, inner: usize, out: &mut Vec<usize>) {
         match t {
             Template::Var(v) => {
-                if inner + count <= self.depths[*v] && !out.contains(v) {
+                if inner.saturating_add(count) <= self.depths[*v] && !out.contains(v) {
                     out.push(*v);
                 }
             }
             Template::Constant(_) => {}
             Template::List { items, tail, .. } => {
                 for (item, more) in items {
-                    self.drivers(item, count, inner + more, out);
+                    self.drivers(item, count, inner.saturating_add(*more), out);
                 }
                 if let Some(t) = tail {
                     self.drivers(t, count, inner, out);
@@ -675,7 +689,7 @@ impl Builder<'_> {
             }
             Template::Vector { items, .. } => {
                 for (item, more) in items {
-                    self.drivers(item, count, inner + more, out);
+                    self.drivers(item, count, inner.saturating_add(*more), out);
                 }
             }
         }
@@ -690,6 +704,15 @@ impl Pattern {
     /// This pattern, compiled in `from`, with its literals' scopes mapped
     /// into `to`.
     pub(crate) fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> Remapped<Pattern> {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.remap_here(remap, from, to))
+    }
+
+    fn remap_here(
         &self,
         remap: &mut Remap,
         from: &ScopeContext,
@@ -754,6 +777,15 @@ impl Template {
     /// This template, compiled in `from`, with its syntax's scopes mapped
     /// into `to`.
     pub(crate) fn remap(
+        &self,
+        remap: &mut Remap,
+        from: &ScopeContext,
+        to: &mut ScopeContext,
+    ) -> Remapped<Template> {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.remap_here(remap, from, to))
+    }
+
+    fn remap_here(
         &self,
         remap: &mut Remap,
         from: &ScopeContext,

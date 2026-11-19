@@ -143,6 +143,12 @@ impl Expander {
     /// the phase above the code it is defined in.
     pub(super) fn procedure(&mut self, spec: &Syntax, name: &str) -> Result<Procedure> {
         let phase = self.floors.len();
+        if phase > MAX_PHASE {
+            return Err(error(
+                format!("{name}: transformers nested more than {MAX_PHASE} deep"),
+                spec.span(),
+            ));
+        }
         let body = self.open_lambda(Some(name));
         self.floors.push(self.stack.len() - 1);
         let expr = self.named(spec, name);
@@ -246,6 +252,13 @@ impl Expander {
     /// The current unit's isolate for `phase`, made on first use with the
     /// syntax procedures and the program's native libraries.
     pub(super) fn phase_isolate(&mut self, phase: usize) -> Result<&mut Cx<DeferredHeadered>> {
+        if phase > MAX_PHASE {
+            return Err(CompileError {
+                message: format!("a transformer at phase {phase}, above {MAX_PHASE}"),
+                span: None,
+                location: None,
+            });
+        }
         while self.phases.len() <= phase {
             let mut cx = phase::instance().map_err(|e| CompileError {
                 message: format!("the expander's isolate: {e}"),
@@ -297,10 +310,17 @@ impl Expander {
         };
         cx.set_expander_data(Some(Box::new(shared)));
         let result = cx.call(procedure, &[input]);
-        let shared = cx
+        let Some(shared) = cx
             .set_expander_data(None)
             .and_then(|data| (data as Box<dyn std::any::Any>).downcast::<Shared>().ok())
-            .expect("the expander's state comes back");
+        else {
+            // Nothing put the state back: the expander's is lost, and
+            // what it was expanding cannot go on.
+            return Err(error(
+                format!("{name}: the expander's state was lost while the transformer ran"),
+                form.span(),
+            ));
+        };
         self.context = shared.context;
         self.table = shared.table;
         self.compiled = shared.compiled;
@@ -371,6 +391,14 @@ impl Expander {
         use_site: Option<Scope>,
         chain: usize,
     ) -> Result<Syntax> {
+        // A binding read from an artifact may name a macro that is not
+        // there.
+        if !self.macros.contains_key(&m) {
+            return Err(error(
+                "this names a macro that no loaded library defines",
+                form.span(),
+            ));
+        }
         if self.depth + chain >= MAX_MACRO_DEPTH {
             return Err(error(
                 format!(

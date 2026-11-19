@@ -14,6 +14,7 @@
 //! it matched one level down at each greater depth.
 
 use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use vali_bytecode::Arity;
@@ -23,7 +24,7 @@ use vali_syntax::{
     bound_identifier_eq, free_identifier_eq,
 };
 
-use crate::expand::Binding;
+use crate::expand::{Binding, RED_ZONE, STACK_GROWTH};
 use crate::pattern::{self, Builder, Match, Pattern, Template};
 
 /// What phase-1 code compiled to, which its procedures look up by number.
@@ -154,9 +155,15 @@ fn with_shared<T, S: Strategy>(
     let mut shared = (data as Box<dyn Any>)
         .downcast::<Shared>()
         .expect("checked above");
-    let result = f(cx, &mut shared);
+    // The state goes back even if `f` panics, so the panic is the only
+    // failure: without it, the expander would find its state gone and
+    // panic again.
+    let result = catch_unwind(AssertUnwindSafe(|| f(cx, &mut shared)));
     cx.set_expander_data(Some(shared));
-    result
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
 }
 
 /// `v` as a syntax object, or an error naming `name`.
@@ -353,6 +360,10 @@ fn match_value<S: Strategy>(cx: &mut Cx<S>, m: Match) -> Result<Value, Error> {
 
 /// A value from [`match_value`] back as a match at `depth`.
 fn value_match<S: Strategy>(cx: &Cx<S>, v: Value, depth: usize) -> Option<Match> {
+    stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || value_match_here(cx, v, depth))
+}
+
+fn value_match_here<S: Strategy>(cx: &Cx<S>, v: Value, depth: usize) -> Option<Match> {
     if depth == 0 {
         // SAFETY: arguments and their parts are valid values.
         return unsafe { cx.syntax_value(v) }.cloned().map(Match::One);
@@ -397,7 +408,12 @@ fn syntax_match<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Er
     };
     let values = binds
         .into_iter()
-        .map(|m| match_value(cx, m.expect("a matching pattern binds every variable")))
+        .map(|m| match m {
+            Some(m) => match_value(cx, m),
+            None => Err(Error::scheme(format!(
+                "{name}: a pattern matched without binding all its variables"
+            ))),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     // SAFETY: the fill is valid.
     let vector = unsafe { cx.make_vector_raw(values.len(), Value::FALSE) }?;
@@ -418,6 +434,13 @@ fn syntax_build<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value, Er
         let Some((template, depths)) = unit_table(shared, &unit, name)?.templates.get(k) else {
             return Err(Error::scheme(format!("{name}: no such template")));
         };
+        if args.len() - 2 != depths.len() {
+            return Err(Error::scheme(format!(
+                "{name}: the template takes {} pattern variables, not {}",
+                depths.len(),
+                args.len() - 2
+            )));
+        }
         let mut binds = args[2..]
             .iter()
             .zip(depths)
@@ -495,4 +518,34 @@ fn syntax_violation<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Value
         out.push_str(&format!(", in {sub}"));
     }
     Err(Error::scheme(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vali_syntax::ScopeKind;
+
+    /// A panic inside a syntax procedure must not take the expander's
+    /// state with it: it comes back, or the expander panics a second time
+    /// looking for it.
+    #[test]
+    fn the_expanders_state_survives_a_panic_in_a_syntax_procedure() {
+        let mut cx = instance().unwrap();
+        let mut context = ScopeContext::new();
+        let core_scope = context.new_scope(ScopeKind::Library).unwrap();
+        cx.set_expander_data(Some(Box::new(Shared {
+            core_scope,
+            context,
+            table: BindingTable::new(),
+            compiled: CompiledByUnit::new(),
+            origin: None,
+            sources: vali_syntax::Sources::new(),
+        })));
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _: Result<(), Error> = with_shared(&mut cx, "test", |_, _| panic!("a bad index"));
+        }));
+        assert!(outcome.is_err(), "the panic goes on");
+        let data = cx.set_expander_data(None).expect("the state is back");
+        assert!((&*data as &dyn Any).is::<Shared>());
+    }
 }
