@@ -263,10 +263,12 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["scheme", "eval"], include_str!("../lib/scheme/eval.sld")),
     (&["scheme", "file"], include_str!("../lib/scheme/file.sld")),
     (&["scheme", "lazy"], include_str!("../lib/scheme/lazy.sld")),
+    (&["scheme", "load"], include_str!("../lib/scheme/load.sld")),
     (
         &["scheme", "process-context"],
         include_str!("../lib/scheme/process-context.sld"),
     ),
+    (&["scheme", "r5rs"], include_str!("../lib/scheme/r5rs.sld")),
     (&["scheme", "read"], include_str!("../lib/scheme/read.sld")),
     (&["scheme", "repl"], include_str!("../lib/scheme/repl.sld")),
     (&["scheme", "time"], include_str!("../lib/scheme/time.sld")),
