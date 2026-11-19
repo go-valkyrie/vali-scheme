@@ -323,21 +323,62 @@ impl Expander {
 
     /// Imports the syntax of what `unit` imports, if its export holds only
     /// its own macros and compiled syntax, as one loaded from an artifact
-    /// does: the macros its own expand into are its imports'.
+    /// does: the macros its own expand into are its imports'. A library
+    /// with only syntax-rules macros and no compiled syntax is left until a
+    /// macro of it is used (`fetch_macro`), so a chain of libraries does not
+    /// remap every library below it into each importer; but what it imports
+    /// is still looked through, since a library below it that runs code at
+    /// expansion time is imported with its importer wherever it is.
     pub(super) fn import_dependencies(&mut self, unit: usize) -> Result<()> {
-        if self.units[unit].pruned {
-            for dependency in self.units[unit].imports.clone() {
+        let mut seen = HashSet::new();
+        self.import_dependencies_of(unit, &mut seen)
+    }
+
+    fn import_dependencies_of(&mut self, unit: usize, seen: &mut HashSet<usize>) -> Result<()> {
+        if !self.units[unit].pruned {
+            return Ok(());
+        }
+        for dependency in self.units[unit].imports.clone() {
+            if self.syntax_runs_code(dependency) {
                 self.import_syntax(dependency)?;
+            } else if seen.insert(dependency) {
+                self.import_dependencies_of(dependency, seen)?;
             }
         }
         Ok(())
     }
 
-    /// The bytes of `unit`'s syntax export `state` as an importer would
-    /// see it: remapped into a context of its own first, with only its own
-    /// macros and compiled syntax, and the bindings they reach. Its
-    /// imports' macros come from their own exports.
-    pub(super) fn encode_syntax(&self, unit: usize, state: &ContextState) -> Result<Vec<u8>> {
+    /// Whether the syntax export of `unit` holds a macro written in Scheme
+    /// or compiled syntax, which is what running code at expansion time
+    /// looks up by the unit: those are imported with their importer.
+    fn syntax_runs_code(&self, unit: usize) -> bool {
+        self.units[unit].syntax.as_ref().is_some_and(|syntax| {
+            !syntax.compiled.is_empty()
+                || syntax
+                    .macros
+                    .values()
+                    .any(|m| matches!(m.transformer, Transformer::Procedure(_)))
+        })
+    }
+
+    /// Makes the macro `m` available, if it is one of a library whose
+    /// syntax export was left unimported (`import_dependencies`).
+    pub(super) fn fetch_macro(&mut self, m: MacroId) -> Result<()> {
+        let unit = m.unit as usize;
+        if !self.macros.contains_key(&m)
+            && unit < self.units.len()
+            && !self.imported_syntax.contains(&unit)
+        {
+            self.import_syntax(unit)?;
+        }
+        Ok(())
+    }
+
+    /// `unit`'s syntax export `state` as an importer would see it: remapped
+    /// into a context of its own, with only its own macros and compiled
+    /// syntax, and the bindings they reach. Its imports' macros come from
+    /// their own exports.
+    pub(super) fn pruned_export(&self, unit: usize, state: &ContextState) -> Result<ContextState> {
         let mut fresh = ContextState::fresh()?;
         let own = (
             u32::try_from(unit).expect("at most 2^32 units"),
@@ -354,6 +395,13 @@ impl Expander {
         )
         .map_err(too_many)?;
         fresh.next_macro = state.next_macro;
+        Ok(fresh)
+    }
+
+    /// The bytes of `unit`'s syntax export `state` as an importer would
+    /// see it (`pruned_export`).
+    pub(super) fn encode_syntax(&self, unit: usize, state: &ContextState) -> Result<Vec<u8>> {
+        let fresh = self.pruned_export(unit, state)?;
         let identities: Vec<String> = self.units.iter().map(|u| u.identity.clone()).collect();
         artifact::encode(&fresh, &identities, &self.sources).map_err(|message| CompileError {
             message: format!("encoding a syntax export: {message}"),

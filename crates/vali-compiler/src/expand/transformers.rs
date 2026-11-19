@@ -410,6 +410,7 @@ impl Expander {
         use_site: Option<Scope>,
         chain: usize,
     ) -> Result<Syntax> {
+        self.fetch_macro(m)?;
         // A binding read from an artifact may name a macro that is not
         // there.
         if !self.macros.contains_key(&m) {

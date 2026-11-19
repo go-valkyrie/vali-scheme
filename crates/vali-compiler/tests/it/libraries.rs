@@ -634,3 +634,198 @@ fn the_internal_library_error_points_at_the_import() {
     let error = locate("(import (sneaky)) 1", &loader);
     assert!(error.starts_with("lib:(sneaky):3:11: "), "{error}");
 }
+
+/// A library at the bottom of a chain with a procedural macro that uses a
+/// phase-1 helper, so its export holds code that runs at expansion time.
+const BOTTOM: &str = "(define-library (chain bottom)
+   (export count-args)
+   (import (scheme base))
+   (begin
+     (define-syntax count-args
+       (lambda (stx)
+         (syntax-case stx ()
+           ((_ arg ...)
+            (datum->syntax stx (length (syntax->datum #'(arg ...))))))))))";
+
+#[test]
+fn syntax_below_a_library_with_only_syntax_rules_is_still_imported() {
+    // The middle library has neither compiled syntax nor a procedural
+    // macro, so it is imported lazily; what is below it must not be lost.
+    let middle = "(define-library (chain middle)
+       (export count-three)
+       (import (scheme base) (chain bottom))
+       (begin
+         (define-syntax count-three
+           (syntax-rules () ((_) (count-args a b c))))))";
+    check(&[
+        (
+            &format!("{BOTTOM} {middle} (import {BASE} (chain middle)) (count-three)"),
+            "3",
+        ),
+        // Re-exported through the middle one.
+        (
+            &format!(
+                "{BOTTOM}
+                 (define-library (chain reexport)
+                   (export count-args count-two)
+                   (import (scheme base) (chain bottom))
+                   (begin (define-syntax count-two
+                            (syntax-rules () ((_) (count-args a b))))))
+                 (import {BASE} (chain reexport)) (list (count-two) (count-args 1))"
+            ),
+            "(2 1)",
+        ),
+        // Deeper, with several syntax-rules libraries in between.
+        (
+            &format!(
+                "{BOTTOM} {middle}
+                 (define-library (chain m2)
+                   (export count-four)
+                   (import (scheme base) (chain middle))
+                   (begin (define-syntax count-four
+                            (syntax-rules () ((_) (+ 1 (count-three)))))))
+                 (define-library (chain m3)
+                   (export count-five)
+                   (import (scheme base) (chain m2))
+                   (begin (define-syntax count-five
+                            (syntax-rules () ((_) (+ 1 (count-four)))))))
+                 (import {BASE} (chain m3)) (count-five)"
+            ),
+            "5",
+        ),
+    ]);
+}
+
+/// Whether artifacts are round-tripped (`VALI_ROUND_TRIP`), under which a
+/// library that makes syntax with `#'` is refused when it loads from its
+/// artifact: it links `%syntax-build`, which only Vali's own libraries may.
+/// That is a separate bug, present on main too, which the two tests below
+/// skip under it rather than hide.
+fn skip_round_trip(test: &str) -> bool {
+    let on = std::env::var_os("VALI_ROUND_TRIP").is_some();
+    if on {
+        eprintln!("skipping {test}: a user library using #' cannot load from its artifact");
+    }
+    on
+}
+
+#[test]
+fn run_time_syntax_is_reached_through_libraries_with_no_syntax_of_their_own() {
+    if skip_round_trip("run_time_syntax_is_reached_through_libraries") {
+        return;
+    }
+    // `(w h)` makes a syntax object when called; `(w j)` and `(w k)` only
+    // re-export it, and the program imports the last.
+    let loader = Map(vec![
+        (
+            "(w h)",
+            "(define-library (w h) (import (scheme base)) (export h-stx)
+               (begin (define (h-stx) #'(foo bar))))",
+        ),
+        (
+            "(w j)",
+            "(define-library (w j) (import (scheme base) (w h)) (export h-stx))",
+        ),
+        (
+            "(w k)",
+            "(define-library (w k) (import (scheme base) (w j)) (export h-stx))",
+        ),
+    ]);
+    let result = run_with(
+        "(import (scheme base) (scheme write) (w k)) (syntax->datum (h-stx))",
+        &loader,
+    );
+    assert_eq!(result.as_deref(), Ok("(foo bar)"));
+}
+
+#[test]
+fn a_transformer_reaches_helpers_behind_a_facade_of_syntax_rules() {
+    if skip_round_trip("a_transformer_reaches_helpers_behind_a_facade") {
+        return;
+    }
+    // The macro in `(x h)` calls `make-stx` of `(x h2)` while expanding;
+    // `(x m)` between them holds only a syntax-rules macro.
+    let loader = Map(vec![
+        (
+            "(x h2)",
+            "(define-library (x h2) (import (scheme base)) (export make-stx)
+               (begin (define (make-stx) #'from-h2)))",
+        ),
+        (
+            "(x m)",
+            "(define-library (x m) (import (scheme base) (x h2)) (export make-stx facade)
+               (begin (define-syntax facade (syntax-rules () ((_ e) e)))))",
+        ),
+        (
+            "(x h)",
+            "(define-library (x h) (import (scheme base) (x m)) (export h-mac)
+               (begin
+                 (define-syntax h-mac
+                   (lambda (stx)
+                     (syntax-case stx ()
+                       ((_) (datum->syntax stx (list 'quote (syntax->datum (make-stx))))))))))",
+        ),
+    ]);
+    let result = run_with("(import (scheme base) (x h)) (h-mac)", &loader);
+    assert_eq!(result.as_deref(), Ok("from-h2"));
+}
+
+#[test]
+fn a_transformer_uses_a_procedural_macro_below_a_library_with_only_syntax_rules() {
+    // The top library's transformer expands into a use of the bottom
+    // library's procedural macro, reached through two libraries with only
+    // syntax-rules macros.
+    let relay = "(define-library (chain relay)
+       (export count-args relay-macro)
+       (import (scheme base) (chain bottom))
+       (begin (define-syntax relay-macro (syntax-rules () ((_) 0)))))";
+    let relay2 = "(define-library (chain relay2)
+       (export count-args relay-two)
+       (import (scheme base) (chain relay))
+       (begin (define-syntax relay-two (syntax-rules () ((_) (relay-macro))))))";
+    let top = |below: &str| {
+        format!(
+            "(define-library (chain top)
+               (export counted)
+               (import (scheme base) (chain {below}))
+               (begin
+                 (define-syntax counted
+                   (lambda (stx)
+                     (syntax-case stx ()
+                       ((_ a ...) #'(count-args a ... a ...)))))))"
+        )
+    };
+    let (one, two) = (top("relay"), top("relay2"));
+    check(&[
+        (
+            &format!("{BOTTOM} {relay} {one} (import {BASE} (chain top)) (counted 1 2)"),
+            "4",
+        ),
+        (
+            &format!("{BOTTOM} {relay} {relay2} {two} (import {BASE} (chain top)) (counted 1 2 3)"),
+            "6",
+        ),
+    ]);
+}
+
+#[test]
+fn compiled_syntax_below_a_library_with_only_syntax_rules_is_still_imported() {
+    // The bottom library's syntax object is compiled syntax, which a
+    // phase-1 helper reaches through a macro that is not its own.
+    let bottom = "(define-library (chain quoted)
+       (export wrap)
+       (import (scheme base))
+       (begin
+         (define-syntax wrap
+           (lambda (stx)
+             (syntax-case stx ()
+               ((_ e) #'(list 'wrapped e)))))))";
+    let middle = "(define-library (chain use-quoted)
+       (export wrapped-one)
+       (import (scheme base) (chain quoted))
+       (begin (define-syntax wrapped-one (syntax-rules () ((_) (wrap 1))))))";
+    check(&[(
+        &format!("{bottom} {middle} (import {BASE} (chain use-quoted)) (wrapped-one)"),
+        "(wrapped 1)",
+    )]);
+}
