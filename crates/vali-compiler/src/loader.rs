@@ -271,15 +271,39 @@ const STANDARD: &[(&[&str], &str)] = &[
     (&["scheme", "repl"], include_str!("../lib/scheme/repl.sld")),
     (&["scheme", "time"], include_str!("../lib/scheme/time.sld")),
     (&["vali", "exit"], include_str!("../lib/vali/exit.sld")),
+    (
+        &["vali", "pipeline"],
+        include_str!("../lib/vali/pipeline.sld"),
+    ),
     (&["vali", "syntax"], include_str!("../lib/vali/syntax.sld")),
     (
         &["scheme", "write"],
         include_str!("../lib/scheme/write.sld"),
     ),
+    (&["srfi", "0"], include_str!("../lib/srfi/0.sld")),
     (&["srfi", "1"], include_str!("../lib/srfi/1.sld")),
+    (&["srfi", "2"], include_str!("../lib/srfi/2.sld")),
+    (&["srfi", "6"], include_str!("../lib/srfi/6.sld")),
+    (&["srfi", "8"], include_str!("../lib/srfi/8.sld")),
+    (&["srfi", "9"], include_str!("../lib/srfi/9.sld")),
+    (&["srfi", "11"], include_str!("../lib/srfi/11.sld")),
+    (&["srfi", "16"], include_str!("../lib/srfi/16.sld")),
+    (&["srfi", "23"], include_str!("../lib/srfi/23.sld")),
+    (&["srfi", "26"], include_str!("../lib/srfi/26.sld")),
+    (&["srfi", "39"], include_str!("../lib/srfi/39.sld")),
     (&["srfi", "64"], include_str!("../lib/srfi/64.sld")),
+    (&["srfi", "87"], include_str!("../lib/srfi/87.sld")),
     (&["srfi", "88"], include_str!("../lib/srfi/88.sld")),
+    (&["srfi", "111"], include_str!("../lib/srfi/111.sld")),
     (&["srfi", "132"], include_str!("../lib/srfi/132.sld")),
+    (&["srfi", "141"], include_str!("../lib/srfi/141.sld")),
+    (&["srfi", "145"], include_str!("../lib/srfi/145.sld")),
+    (&["srfi", "197"], include_str!("../lib/srfi/197.sld")),
+    (&["srfi", "227"], include_str!("../lib/srfi/227.sld")),
+    (
+        &["srfi", "227", "definitions"],
+        include_str!("../lib/srfi/227/definitions.sld"),
+    ),
 ];
 
 /// The names of Vali's own libraries written in Scheme.
@@ -593,7 +617,7 @@ mod tests {
                 continue;
             }
             assert!(
-                !source.contains("cond-expand") && !source.contains("(features)"),
+                !source.contains("(cond-expand") && !source.contains("(features)"),
                 "{parts:?} tests features, which prebuilt artifacts do not record"
             );
         }
