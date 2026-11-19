@@ -243,9 +243,9 @@ fn classify_atom(text: &str) -> Result<SyntaxKind, LexErrorKind> {
     } else if vali_num::parse(text, Radix::Decimal).is_ok() {
         Ok(SyntaxKind::Number)
     } else if is_identifier(text) {
-        // SRFI 88: an identifier ending in a colon is a keyword, but a lone
-        // colon is a symbol.
-        if text.len() > 1 && text.ends_with(':') {
+        // SRFI 88: an identifier ending in a colon is a keyword, but a name
+        // made only of colons (`:`, `:::`) is a symbol, so R7RS code can use it.
+        if text.ends_with(':') && text.chars().any(|c| c != ':') {
             Ok(SyntaxKind::Keyword)
         } else {
             Ok(SyntaxKind::Identifier)

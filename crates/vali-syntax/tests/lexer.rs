@@ -118,8 +118,11 @@ fn unicode_identifiers_follow_r6rs_categories() {
 fn keywords_follow_srfi_88() {
     single("foo:", Keyword);
     single("with-x:", Keyword);
-    // A lone colon, and a colon in bars, are symbols.
+    // A name made only of colons, and a colon in bars, are symbols.
     single(":", Identifier);
+    single("::", Identifier);
+    single(":::", Identifier);
+    single(":a:", Keyword);
     single("|foo:|", Identifier);
 }
 

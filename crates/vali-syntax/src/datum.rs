@@ -472,7 +472,7 @@ fn write_escaped(f: &mut fmt::Formatter<'_>, c: char, quote: char) -> fmt::Resul
 fn write_symbol(f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
     let plain = is_identifier(name)
         && vali_num::parse(name, Radix::Decimal).is_err()
-        && !(name.len() > 1 && name.ends_with(':'));
+        && !(name.ends_with(':') && name.chars().any(|c| c != ':'));
     if plain {
         return f.write_str(name);
     }
