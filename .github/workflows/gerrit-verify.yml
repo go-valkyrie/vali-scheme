@@ -89,9 +89,19 @@ jobs:
         if: matrix.check == 'lint'
         run: bin/mise run lint
 
+      # The debugger tests fail, not skip, when CI is set and these are
+      # missing.
+      - name: Install the debuggers
+        if: matrix.check == 'test'
+        run: sudo apt-get update && sudo apt-get install -y gdb lldb
+
       - name: Test
         if: matrix.check == 'test'
         run: bin/mise run test
+
+      - name: Debugger tests, optimised
+        if: matrix.check == 'test'
+        run: bin/mise run test-debugger-optimised
 
       - name: Docs and dependencies
         if: matrix.check == 'docs'

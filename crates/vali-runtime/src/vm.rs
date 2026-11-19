@@ -52,6 +52,15 @@ const CATCH: u64 = 1 << 62;
 /// first in its segment.
 pub(crate) const UNDERFLOW: u64 = 1 << 61;
 
+/// Where a position word keeps the resume address, and how many bits it
+/// has; the debugger extensions read these (`debug`).
+pub(crate) const POSITION_RESUME_SHIFT: u32 = 3;
+pub(crate) const POSITION_RESUME_BITS: u32 = 32;
+
+/// Where a position word keeps the call's `base`, and how many bits it has.
+pub(crate) const POSITION_BASE_SHIFT: u32 = 35;
+pub(crate) const POSITION_BASE_BITS: u32 = 16;
+
 /// Set in the resume word of the call `%call/cc` makes: once the
 /// receiver's frame is set up, the stack from its caller out is sealed.
 /// Never stored in a frame.
@@ -91,17 +100,19 @@ unsafe impl Send for Catch {}
 /// scans them, as the saved frame pointer and the 8-aligned return address
 /// beside it aren't either.
 fn position(resume: u64, base: usize) -> u64 {
-    ((resume & 0xFFFF_FFFF) << 3) | (base as u64) << 35 | (resume & (CATCH | BOUNDARY | UNDERFLOW))
+    ((resume & ((1 << POSITION_RESUME_BITS) - 1)) << POSITION_RESUME_SHIFT)
+        | (base as u64) << POSITION_BASE_SHIFT
+        | (resume & (CATCH | BOUNDARY | UNDERFLOW))
 }
 
 /// The `base` a position word records.
 pub(crate) fn position_base(position: u64) -> usize {
-    ((position >> 35) & 0xFFFF) as usize
+    ((position >> POSITION_BASE_SHIFT) & ((1 << POSITION_BASE_BITS) - 1)) as usize
 }
 
 /// Where the caller resumes, from a position word.
 pub(crate) fn position_resume(position: u64) -> u64 {
-    (position >> 3) & 0xFFFF_FFFF
+    (position >> POSITION_RESUME_SHIFT) & ((1 << POSITION_RESUME_BITS) - 1)
 }
 
 /// Whether a frame of `words` slots fits below `fp` without crossing

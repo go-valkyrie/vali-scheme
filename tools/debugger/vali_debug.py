@@ -6,22 +6,25 @@ which supply a `Target` that reads memory, and the interpreter's `fp` and
 
 What is read here is described by crates/vali-runtime/src/debug.rs, in C
 layout: each function's `Code` starts with a `DebugFunction`, which points
-to its memory strategy's `DebugLayout`. Both carry DEBUG_VERSION.
+to its memory strategy's `DebugLayout`. Both carry DEBUG_VERSION. The layout also carries the encoding of position
+words, tags and immediates, which is read from it rather than copied here;
+the few constants below are what is needed to reach the first layout, and
+are checked against it, so a mismatch is an error, not a wrong answer.
 """
 
 import struct
 
-DEBUG_VERSION = 1
+DEBUG_VERSION = 2
 
-# The frame header (docs/bytecode.md): the saved frame pointer, the return
-# address, then the caller's position word.
-ENTRY = (1 << 64) - 1
-UNDERFLOW = 1 << 61
+# Needed before a layout can be read, and checked against it: a closure's
+# tag, and its pointer to its Code. Closures always have a header, so the
+# pointer is the same under every strategy
+# (vali_abi::Layout::closure_code).
+CLOSURE_TAG = 0b010
+CLOSURE_CODE = 8 - CLOSURE_TAG
 
-# A closure's pointer to its Code: closures always have a header, so this is
-# the same under every strategy (vali_abi::Layout::closure_code). It is
-# checked against the layout the function then points to.
-CLOSURE_CODE = 8 - 0b010
+# The frame header (docs/bytecode.md) is the saved frame pointer, the return
+# address, then the caller's position word, which the layout describes.
 
 TYPE_NAMES = {
     1: "pair", 3: "flonum", 5: "procedure", 7: "symbol", 9: "string",
@@ -36,8 +39,6 @@ CHARACTER_NAMES = {
     0xD: "return", 0x1B: "escape", 0x20: "space", 0x7F: "delete",
 }
 
-IMMEDIATES = {2: "()", 3: "#<eof>", 4: "#<unspecified>", 5: "#<default>"}
-MARKERS = {0: "#<unbound>", 1: "#<uninitialised>", 2: "#<tombstone>"}
 
 
 class Target:
@@ -74,6 +75,19 @@ def wrap(address):
 class Layout:
     """A strategy's DebugLayout: offsets from a tagged value, in bytes."""
 
+    # The 64-bit words after the offsets, in the order of the Rust struct
+    # (crates/vali-runtime/src/debug.rs).
+    ENCODING = [
+        "entry", "underflow", "resume_shift", "resume_mask", "base_shift",
+        "base_mask", "tag_fixnum", "tag_pair", "tag_closure", "tag_symbol",
+        "tag_string", "tag_flonum", "tag_other", "tag_immediate",
+        "subtag_shift", "subtag_mask", "payload_shift", "subtag_character",
+        "subtag_boolean", "subtag_empty_list", "subtag_eof",
+        "subtag_unspecified", "subtag_default", "subtag_marker",
+        "marker_unbound", "marker_uninitialised", "marker_tombstone",
+        "type_vector", "type_bytevector",
+    ]
+
     FIELDS = ["car", "cdr", "flonum", "closure_code", "symbol_name",
               "string_bytes", "bytevector_length", "other_header",
               "vector_length", "record_type"]
@@ -87,6 +101,32 @@ class Layout:
         self.tag_bits = target.u32(address + 4)
         for i, name in enumerate(self.FIELDS):
             setattr(self, name, target.i32(address + 8 + 4 * i))
+        start = address + 8 + 4 * len(self.FIELDS)
+        start += -start % 8
+        for i, name in enumerate(self.ENCODING):
+            setattr(self, name, target.u64(start + 8 * i))
+        if self.tag_bits != 3 or self.tag_closure != CLOSURE_TAG:
+            raise ValueError("Vali debug layout: unexpected tag encoding")
+        if self.closure_code != CLOSURE_CODE:
+            raise ValueError("Vali debug layout: unexpected closure layout")
+
+    def immediate_name(self, word):
+        """A fixed immediate's name, or None."""
+        subtag = (word >> self.subtag_shift) & self.subtag_mask
+        names = {
+            self.subtag_empty_list: "()", self.subtag_eof: "#<eof>",
+            self.subtag_unspecified: "#<unspecified>",
+            self.subtag_default: "#<default>",
+        }
+        return names.get(subtag)
+
+    def marker_name(self, payload):
+        names = {
+            self.marker_unbound: "#<unbound>",
+            self.marker_uninitialised: "#<uninitialised>",
+            self.marker_tombstone: "#<tombstone>",
+        }
+        return names.get(payload, "#<marker %d>" % payload)
 
 
 class Function:
@@ -129,11 +169,9 @@ class Function:
 
 def function_of(target, closure):
     """The Function of the closure `closure`, a tagged value."""
-    if closure & 0b111 != 0b010:
+    if closure & 0b111 != CLOSURE_TAG:
         raise ValueError("slot 0 does not hold a closure: %#x" % closure)
     function = Function(target, target.u64(wrap(closure + CLOSURE_CODE)))
-    if function.layout.closure_code != CLOSURE_CODE:
-        raise ValueError("unexpected closure layout")
     return function
 
 
@@ -170,13 +208,14 @@ def frames(target, fp, pc, limit=1000):
             break
         frame.call_base = call_base
         result.append(frame)
+        layout = frame.function.layout
         position = target.u64(fp + 16)
-        if position == ENTRY:
+        if position == layout.entry:
             break
         # The caller waits at the call before where it resumes, and the
         # call's window starts at its base.
-        pc = max(((position >> 3) & 0xFFFFFFFF) - 1, 0)
-        call_base = (position >> 35) & 0xFFFF
+        pc = max(((position >> layout.resume_shift) & layout.resume_mask) - 1, 0)
+        call_base = (position >> layout.base_shift) & layout.base_mask
         fp = target.u64(fp)
     return result
 
@@ -194,43 +233,44 @@ def _signed(word):
 
 
 def _show(target, layout, word, depth):
-    tag = word & 0b111
-    if tag == 0b000:
-        return str(_signed(word) >> 3)
-    if tag == 0b111:
-        subtag, payload = (word >> 3) & 0x1F, word >> 8
-        if subtag == 0:
+    tag = word & ((1 << layout.tag_bits) - 1)
+    if tag == layout.tag_fixnum:
+        return str(_signed(word) >> layout.tag_bits)
+    if tag == layout.tag_immediate:
+        subtag = (word >> layout.subtag_shift) & layout.subtag_mask
+        payload = word >> layout.payload_shift
+        if subtag == layout.subtag_character:
             name = CHARACTER_NAMES.get(payload)
             return "#\\" + (name if name else chr(payload))
-        if subtag == 1:
+        if subtag == layout.subtag_boolean:
             return "#t" if payload else "#f"
-        if subtag == 6:
-            return MARKERS.get(payload, "#<marker %d>" % payload)
-        return IMMEDIATES.get(subtag, "#<immediate %#x>" % word)
+        if subtag == layout.subtag_marker:
+            return layout.marker_name(payload)
+        return layout.immediate_name(word) or "#<immediate %#x>" % word
     if depth == 0:
         return "..."
-    if tag == 0b001:
+    if tag == layout.tag_pair:
         return _show_list(target, layout, word, depth)
-    if tag == 0b010:
+    if tag == layout.tag_closure:
         return "#<procedure %s>" % function_of(target, word).name
-    if tag == 0b011:
+    if tag == layout.tag_symbol:
         name = target.u64(wrap(word + layout.symbol_name))
         return _string_text(target, layout, name)
-    if tag == 0b100:
+    if tag == layout.tag_string:
         text = _string_text(target, layout, word)
         return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
-    if tag == 0b101:
+    if tag == layout.tag_flonum:
         return _show_flonum(target.f64(wrap(word + layout.flonum)))
     header = target.u64(wrap(word + layout.other_header))
     type_code = header & 0xFF
-    if type_code == 11:
+    if type_code == layout.type_vector:
         count = target.u64(wrap(word + layout.vector_length))
         elements = [show(target, layout,
                          target.u64(wrap(word + layout.vector_length + 8 * (i + 1))),
                          depth - 1)
                     for i in range(min(count, 10))]
         return "#(%s%s)" % (" ".join(elements), " ..." if count > 10 else "")
-    if type_code == 13:
+    if type_code == layout.type_bytevector:
         count = target.u64(wrap(word + layout.bytevector_length))
         data = target.read(wrap(word + layout.bytevector_length + 8), min(count, 16))
         return "#u8(%s%s)" % (" ".join(str(b) for b in data),
@@ -246,12 +286,14 @@ def _string_text(target, layout, string):
 
 def _show_list(target, layout, word, depth):
     items = []
-    while word & 0b111 == 0b001 and len(items) < 10:
+    tag_mask = (1 << layout.tag_bits) - 1
+    while word & tag_mask == layout.tag_pair and len(items) < 10:
         items.append(show(target, layout, target.u64(wrap(word + layout.car)), depth - 1))
         word = target.u64(wrap(word + layout.cdr))
-    if word & 0b111 == 0b001:
+    if word & tag_mask == layout.tag_pair:
         items.append("...")
-    elif word != (2 << 3 | 0b111):
+    elif not (word & tag_mask == layout.tag_immediate
+              and layout.immediate_name(word) == "()"):
         items.extend([".", show(target, layout, word, depth - 1)])
     return "(%s)" % " ".join(items)
 
