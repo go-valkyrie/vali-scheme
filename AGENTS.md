@@ -61,4 +61,6 @@ Install the hooks once per machine with `hk install --global --mise` (Git 2.54 o
 
 ## CI
 
+Changes under review are checked by `.github/workflows/gerrit-verify.yml`. The gerrithub-ci Worker (https://github.com/go-valkyrie/gerrithub-ci) starts it for each new patch set from a trusted uploader, and for anyone else's once a trusted reviewer comments `recheck`. It runs the lint, test and docs checks and hk's commit-message checks on the patch set, then votes `Verified` on the change.
+
 `.github/workflows/check.yml` runs the parts of `bin/mise run check` (lint, test, docs and deny) and the benchmarks as parallel jobs on PRs and pushes to `main`. It skips changes that only touch `docs/`, `*.md`, `.claude/`, `.jouet/` or `fuzz/`. `fuzz/` is a workspace of its own that needs nightly, and `fuzz.yml` runs it on a schedule.
