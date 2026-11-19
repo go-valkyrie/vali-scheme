@@ -39,6 +39,8 @@ Two formats, two policies:
 - **The distribution format (`vali-dist`) is stable and versioned.** It is what compiled libraries ship as.
 - **Run-format bytecode (`vali-bytecode`) is private and never shipped.** It is produced at load time, so conversion can do the validation and safety checks the runtime would otherwise repeat.
 
+Until 0.0.1 is released, change either format, and the IR, whenever a design calls for it, and don't bump `FORMAT_VERSION` in `vali-dist` or `vali-bytecode`. Leave format version bumps out of ADRs too. Stale artifacts are caught by their build stamp and source fingerprint, not the version.
+
 The standard libraries' Scheme sources are in `crates/vali-compiler/lib/` (`scheme/`, `srfi/`, `vali/`). `vali-stdlib`'s build script compiles them ahead of time and embeds the artifacts, so editing a library rebuilds `vali-stdlib` and everything that depends on it. `VALI_NO_PREBUILT=1` makes the `vali` CLI compile the libraries from source instead. `VALI_NO_OPT=1` turns off the optimiser, and `VALI_ROUND_TRIP=1` round-trips artifacts through their encoding.
 
 ## Docs and decisions
