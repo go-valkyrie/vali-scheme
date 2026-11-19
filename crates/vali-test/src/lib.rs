@@ -96,7 +96,9 @@ impl Backend for ReadOnly {
 
 /// A backend that compiles and runs each `kind: scheme` file in a fresh
 /// isolate, with the standard libraries. A file passes if it runs to the
-/// end: SRFI 64's `test-end` raises an error when an assertion failed.
+/// end: the runner vali-test installs ends the run with exit code 1, which
+/// this reports as an error, when the outermost `test-end` finds a test that
+/// failed or unexpectedly passed.
 /// Files that don't read are [`Outcome::Invalid`]; other kinds of test are
 /// [`Outcome::Unsupported`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -134,6 +136,37 @@ impl Backend for Evaluate {
     }
 }
 
+/// The runner every test file gets: the simple runner, which prints what
+/// failed and a summary, and ends the run with exit code 1 when a test
+/// failed or unexpectedly passed. Installed before the file loads, in the
+/// same isolate, so the file's `(srfi 64)` is the one it configured.
+const RUNNER: &str = "
+(import (scheme base) (scheme process-context) (srfi 64))
+(test-runner-factory
+  (lambda ()
+    (let ((runner (test-runner-simple)))
+      (test-runner-on-final! runner
+        (lambda (r)
+          (test-on-final-simple r)
+          (when (or (> (test-runner-fail-count r) 0)
+                    (> (test-runner-xpass-count r) 0))
+            (exit 1))))
+      runner)))";
+
+/// Installs [`RUNNER`] in `cx`.
+fn install_runner<S: vali_runtime::Strategy>(
+    cx: &mut vali_runtime::Cx<S>,
+    host: &TestHost,
+) -> Result<(), String> {
+    let identity = vali_compiler::Identity::new("vali-test:runner");
+    let program = vali_compiler::compile_program(RUNNER, &identity, host)
+        .map_err(|e| format!("compiling the test runner: {e}"))?;
+    let id =
+        vali_compiler::load_with(cx, program, Arc::new(host.clone())).map_err(|e| e.to_string())?;
+    cx.run(id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Compiles `file`, then runs it in a fresh isolate under strategy `S`,
 /// returning how long running took.
 fn timed<S: vali_runtime::Strategy>(file: &TestFile, host: &TestHost) -> Result<Duration, String> {
@@ -141,9 +174,9 @@ fn timed<S: vali_runtime::Strategy>(file: &TestFile, host: &TestHost) -> Result<
     let program = vali_compiler::compile_program(&file.source, &identity, host)
         .map_err(|e| format!("compiling: {e}"))?;
     let mut cx = vali_runtime::Cx::<S>::new(&Default::default());
-    let id = cx
-        .install_primitives()
-        .and_then(|()| vali_compiler::load_with(&mut cx, program, Arc::new(host.clone())))
+    cx.install_primitives().map_err(|e| e.to_string())?;
+    install_runner(&mut cx, host)?;
+    let id = vali_compiler::load_with(&mut cx, program, Arc::new(host.clone()))
         .map_err(|e| e.to_string())?;
     let start = Instant::now();
     cx.run(id).map_err(|e| format!("under {}: {e}", S::NAME))?;
@@ -211,11 +244,22 @@ fn run<S: vali_runtime::Strategy>(
     let program = vali_compiler::compile_program(&file.source, &identity, host)
         .map_err(|e| format!("compiling: {e}"))?;
     let mut cx = vali_runtime::Cx::<S>::new(&Default::default());
-    let id = cx
-        .install_primitives()
-        .and_then(|()| vali_compiler::load_with(&mut cx, program, Arc::new(host.clone())))
+    cx.install_primitives()
         .map_err(|e| format!("under {}: {e}", S::NAME))?;
-    cx.run(id).map_err(|e| format!("under {}: {e}", S::NAME))?;
+    install_runner(&mut cx, host)?;
+    let id = vali_compiler::load_with(&mut cx, program, Arc::new(host.clone()))
+        .map_err(|e| format!("under {}: {e}", S::NAME))?;
+    if let Err(e) = cx.run(id) {
+        // A failing suite ends the run with exit code 1 (see RUNNER) after
+        // the runner has written what failed, the test's only report.
+        let written = cx.take_output() + &cx.take_error_output();
+        let written = written.trim_end();
+        return Err(if written.is_empty() {
+            format!("under {}: {e}", S::NAME)
+        } else {
+            format!("under {}: {e}\n{written}", S::NAME)
+        });
+    }
     Ok((cx, id))
 }
 
