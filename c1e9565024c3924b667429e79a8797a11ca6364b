@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "3ac61bfa_021d31b0",
+        "filename": "crates/vali-compiler/src/expand.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 1394,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:29:33Z",
+      "side": 1,
+      "message": "Nit: `(let* ((x 1)))` now says \"a body needs at least one expression\" without naming `let*`. Main said \"let*: no pattern matches this use\". It\u0027s what `let` says too, so fine either way.",
+      "revId": "c1e9565024c3924b667429e79a8797a11ca6364b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
