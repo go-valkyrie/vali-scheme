@@ -10,17 +10,14 @@ runs the whole file under every memory strategy.
 
 ## How it runs
 
-The suite imports `(chibi test)` and `(scheme r5rs)`. Neither is part of
-Vali's standard libraries, so `lib/` holds stand-ins the `library-path` host
-fixture serves (see `vali-test`'s documentation):
-
-- `lib/chibi/test.sld` implements the few macros the suite uses (`test`,
-  `test-begin`, `test-end`, `test-assert`, `test-values`, `test-error`),
-  compares as chibi does (floats within 1e-5), and ends the run with exit
-  status 1 if a case fails or a known failure passes. It prints a summary
-  line, and the key of every failing case.
-- `lib/scheme/r5rs.sld` provides what `(scheme r5rs)` adds over the other
-  libraries the suite imports. Vali has no `(scheme r5rs)` yet.
+The suite imports `(chibi test)`, which is not one of Vali's standard
+libraries, so `lib/chibi/test.sld` stands in for it, served by the
+`library-path` host fixture (see `vali-test`'s documentation). It
+implements the few macros the suite uses (`test`, `test-begin`,
+`test-end`, `test-assert`, `test-values`, `test-error`), compares as chibi
+does (floats within 1e-5), and ends the run with exit status 1 if a case
+fails or a known failure passes. It prints a summary line, and the key of
+every failing case.
 
 ## Known failures
 

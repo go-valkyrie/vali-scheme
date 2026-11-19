@@ -400,6 +400,56 @@ fn file_access_can_be_limited_to_a_directory() {
     assert!(out.contains("outside the directories granted"), "{out}");
 }
 
+const LOADER: &str = r#"
+(import (scheme base) (scheme write) (scheme eval) (scheme load) (scheme process-context)
+        (scheme repl) (scheme r5rs))
+(define file (list-ref (command-line) 1))
+(define (attempt thunk)
+  (display (guard (e (#t (if (error-object? e) (error-object-message e) 'raised)))
+             (thunk)))
+  (newline))
+(attempt (lambda ()
+  (load file)
+  (list (eval 'loaded-value (interaction-environment))
+        (eval '(loaded-twice 4) (interaction-environment)))))
+(attempt (lambda ()
+  (load file (scheme-report-environment 5))
+  'loaded-into-an-environment))
+"#;
+
+#[test]
+fn load_reads_a_file_only_when_reading_is_granted() {
+    let dir = directory(
+        "load",
+        &[
+            ("loader.scm", LOADER),
+            (
+                "loaded.scm",
+                "(define loaded-value (* 6 7))\n(define (loaded-twice n) (* 2 n))\n",
+            ),
+        ],
+    );
+    let loaded = path(&dir, "loaded.scm");
+    let (code, out, err) = run(&[&path(&dir, "loader.scm"), &loaded]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("needs the file capability"), "{out}");
+
+    // What the file defines is visible in the interaction environment.
+    let (code, out, err) = run(&["--allow-read", &path(&dir, "loader.scm"), &loaded]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "(42 8)\nloaded-into-an-environment\n");
+
+    // A directory that does not hold the file leaves it out of reach.
+    let elsewhere = path(&dir, "elsewhere");
+    let (code, out, err) = run(&[
+        &format!("--allow-read={elsewhere}"),
+        &path(&dir, "loader.scm"),
+        &loaded,
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("outside the directories granted"), "{out}");
+}
+
 #[test]
 fn the_repl_takes_the_same_flags() {
     let dir = directory("repl", &[("lib/greet/hello.sld", GREETER)]);
