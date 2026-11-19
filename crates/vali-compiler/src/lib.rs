@@ -12,6 +12,7 @@
 //! bytecode. The optimiser's passes over the IR come later.
 
 mod ast;
+pub mod cache;
 mod eval;
 mod expand;
 mod features;
@@ -23,6 +24,7 @@ mod phase;
 pub mod prebuilt;
 mod repl;
 
+pub use cache::{Cache, CacheReport, CacheStats};
 #[doc(hidden)]
 pub use expand::MACRO_PRIMITIVES;
 pub use library::{LibraryName, NamePart};
@@ -139,6 +141,9 @@ pub struct Program {
     /// standard library with a prebuilt artifact is not among them.
     #[doc(hidden)]
     pub read: Vec<Identity>,
+    /// What [`compile_program_cached`] did with its cache; empty
+    /// otherwise.
+    pub cache: CacheReport,
 }
 
 /// Library artifacts to use in place of compiling libraries, by identity,
@@ -183,7 +188,7 @@ pub fn compile_program_with(
     }
     let graph =
         loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources, artifacts)
+    build(&program, graph, identity, sources, artifacts, None)
 }
 
 /// The expander that compiled a program that imports `(scheme eval)`,
@@ -301,7 +306,14 @@ pub fn compile_program(
         .map_err(|e| e.located(&sources))?;
     let graph =
         loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources, &Artifacts::default())
+    build(
+        &program,
+        graph,
+        identity,
+        sources,
+        &Artifacts::default(),
+        None,
+    )
 }
 
 /// As [`compile_program`], for Vali's own tests: the program may import
@@ -328,7 +340,14 @@ pub async fn compile_program_async(
     let graph = loader::fetch_async(&program, identity, loader, &mut sources)
         .await
         .map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources, &Artifacts::default())
+    build(
+        &program,
+        graph,
+        identity,
+        sources,
+        &Artifacts::default(),
+        None,
+    )
 }
 
 /// Expands and compiles each library of the graph, or loads it from its
@@ -339,7 +358,20 @@ fn build(
     identity: &Identity,
     sources: vali_syntax::Sources,
     artifacts: &Artifacts,
+    cache: Option<&Cache>,
 ) -> Result<Program, CompileError> {
+    // The libraries a cache may hold: those a host served from source it
+    // read, not Vali's own, native or the program's own.
+    let cacheable: Vec<(Identity, vali_dist::Digest)> = match cache {
+        Some(_) => graph
+            .libraries
+            .iter()
+            .filter(|l| !l.own && l.native.is_none() && l.form.is_some())
+            .filter_map(|l| Some((l.identity.clone(), l.source?)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut report = CacheReport::default();
     let read = graph
         .libraries
         .iter()
@@ -348,7 +380,16 @@ fn build(
         .collect();
     let mut expander = expand::Expander::new()?;
     expander.sources = sources;
-    match expand_all(&mut expander, program, graph, identity, &artifacts.read) {
+    let caching = cache.map(|cache| (cache, &cacheable[..]));
+    match expand_all(
+        &mut expander,
+        program,
+        graph,
+        identity,
+        &artifacts.read,
+        caching,
+        &mut report,
+    ) {
         Ok((libraries, body, natives, names_eval)) => {
             let ir = expander.last_lowered.take();
             let loaded = libraries
@@ -371,6 +412,30 @@ fn build(
                     written.push((identity.clone(), bytes));
                 }
             }
+            if let Some(cache) = cache {
+                let mut wrote = false;
+                for (library, source) in &cacheable {
+                    if report.hits.contains(library) {
+                        continue;
+                    }
+                    let unit = expander
+                        .unit_of(library.as_str())
+                        .expect("every library is a unit");
+                    let bytes = expander
+                        .library_artifact(unit)
+                        .map_err(|e| e.located(&expander.sources))?;
+                    match cache.put(library.as_str(), source, &bytes) {
+                        Ok(()) => {
+                            wrote = true;
+                            report.stored.push(library.clone());
+                        }
+                        Err(e) => report.failed.push((library.clone(), e.to_string())),
+                    }
+                }
+                if wrote {
+                    let _ = cache.prune();
+                }
+            }
             let syntax = (uses_syntax(&body) || libraries.iter().any(|(_, m)| uses_syntax(m)))
                 .then(|| SyntaxData(expander.syntax_data()));
             let evaluator = names_eval.then(|| Evaluator(Box::new(eval::Evaluator::new(expander))));
@@ -384,10 +449,39 @@ fn build(
                 artifacts: written,
                 loaded,
                 read,
+                cache: report,
             })
         }
         Err(e) => Err(e.located(&expander.sources)),
     }
+}
+
+/// As [`compile_program`], reusing the libraries `cache` has compiled and
+/// storing the ones it does not (ADR 0001 #10). Each library loaded from
+/// the cache is checked as an artifact always is, so an entry that is
+/// stale, damaged or tampered with is refused, the library is compiled
+/// from source, and its entry is replaced; [`Program::cache`] says which
+/// it was for each library. The cache is only ever an optimisation: what
+/// cannot be written is reported there, not raised.
+pub fn compile_program_cached(
+    source: &str,
+    identity: &Identity,
+    loader: &impl Loader,
+    cache: &Cache,
+) -> Result<Program, CompileError> {
+    let mut sources = vali_syntax::Sources::new();
+    let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+        .map_err(|e| e.located(&sources))?;
+    let graph =
+        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
+    build(
+        &program,
+        graph,
+        identity,
+        sources,
+        &Artifacts::default(),
+        Some(cache),
+    )
 }
 
 /// What expanding a program and its libraries gives: the libraries'
@@ -406,6 +500,8 @@ fn expand_all(
     graph: loader::Graph,
     identity: &Identity,
     artifacts: &std::collections::HashMap<String, Vec<u8>>,
+    cache: Option<(&Cache, &[(Identity, vali_dist::Digest)])>,
+    report: &mut CacheReport,
 ) -> Result<Expanded, CompileError> {
     expander.set_includes(graph.includes);
     expander.add_available(graph.available);
@@ -430,9 +526,28 @@ fn expand_all(
             expander.name_next(name);
         }
         let identity = library.identity.as_str();
-        let module = match artifacts.get(identity) {
-            Some(bytes) => expander.load_library(identity, bytes, library.own, library.source)?,
-            None => compile_library(expander, library)?,
+        let cached = cache.and_then(|(cache, cacheable)| {
+            let (_, source) = cacheable.iter().find(|(i, _)| i == &library.identity)?;
+            cache.get(identity, source)
+        });
+        let module = match (artifacts.get(identity), cached) {
+            (Some(bytes), _) => {
+                expander.load_library(identity, bytes, library.own, library.source)?
+            }
+            // An entry that is refused is compiled over, and replaced.
+            (None, Some(bytes)) => {
+                match expander.load_library(identity, &bytes, false, library.source) {
+                    Ok(module) => {
+                        report.hits.push(library.identity.clone());
+                        module
+                    }
+                    Err(e) => {
+                        report.refused.push((library.identity.clone(), e.message));
+                        compile_library(expander, library)?
+                    }
+                }
+            }
+            (None, None) => compile_library(expander, library)?,
         };
         libraries.push((library.identity.clone(), module));
     }

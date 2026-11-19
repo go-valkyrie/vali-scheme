@@ -86,9 +86,17 @@ pub mod load {
 #[cfg(feature = "eval")]
 pub mod compile {
     pub use vali_compiler::{
-        Artifacts, CompileError, Program, compile_program, compile_program_with, load, load_with,
-        standard_libraries,
+        Artifacts, CompileError, Program, compile_program, compile_program_cached,
+        compile_program_with, load, load_with, standard_libraries,
     };
+}
+
+/// A directory of compiled libraries a host may reuse between runs, which
+/// [`compile::compile_program_cached`] reads and fills. Off unless the host
+/// makes one (ADR 0001 #10).
+#[cfg(feature = "eval")]
+pub mod cache {
+    pub use vali_compiler::{Cache, CacheReport, CacheStats};
 }
 
 #[cfg(feature = "eval")]

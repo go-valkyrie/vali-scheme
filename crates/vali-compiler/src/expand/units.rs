@@ -97,7 +97,7 @@ pub(super) const LIBRARY_SECTIONS: &[&str] =
 /// hash of the sources of the compiler and the crates beneath it (see the
 /// crate's build script), so two builds whose output may differ never
 /// share one.
-pub(super) fn build_stamp() -> String {
+pub(crate) fn build_stamp() -> String {
     format!(
         "vali-compiler {} format {} abi {} build {}",
         env!("CARGO_PKG_VERSION"),

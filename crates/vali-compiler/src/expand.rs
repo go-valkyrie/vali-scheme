@@ -43,8 +43,8 @@ mod units;
 pub(crate) use context::merge_syntax;
 use context::*;
 use transformers::*;
-pub(crate) use units::decode_library_artifact;
 use units::*;
+pub(crate) use units::{build_stamp, decode_library_artifact};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
