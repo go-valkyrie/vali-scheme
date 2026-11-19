@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "a1fc27f1_c1e6f1a4",
+        "filename": "crates/vali-cli/src/args.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 154,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:40Z",
+      "side": 1,
+      "message": "`--` always returns `run`, dropping a pending `build`. So `vali -I lib build -o out -- main.scm` runs the program (its output, exit 0 or its error) and creates no `out`. Return `Build` here when the command is `build`, refusing extra arguments as `build FILE` does, and add a case to tests/cli.rs.",
+      "revId": "7c220f5c509c63a3722487b1a14de484fd88abb0",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "d4dc9a42_fe3cf918",
+        "filename": "crates/vali-cli/src/args.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 180,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T21:18:40Z",
+      "side": 1,
+      "message": "Nits:\n\n- `-o`/`--output` is accepted for `run` and the REPL and silently ignored. `vali -o bo main.scm` runs and makes no `bo`. Refuse it outside `build`.\n- An empty `--cache-dir\u003d` is accepted and writes entries to `./\u003cstamp\u003e/` in the current directory. Then `cache dir` prints an empty line, and `stats` reports 0 entries because `read_dir(\"\")` fails. An empty `VALI_CACHE_DIR` counts as unset; treat the flag the same, or refuse it.",
+      "revId": "7c220f5c509c63a3722487b1a14de484fd88abb0",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
