@@ -13,7 +13,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use vali_abi::{Header, Layout, TypeCode, data};
+use vali_abi::{Header, Layout, Tag, TypeCode, data};
 
 use crate::code::Code;
 use crate::handle::{Error, Handle, RootTable};
@@ -471,7 +471,12 @@ impl<S: Strategy> Cx<S> {
     /// Whether `v` is an immutable pair.
     #[inline(always)]
     pub fn is_ipair(&self, v: Value) -> bool {
-        self.is_other(v, TypeCode::Ipair)
+        // The type code is the header's low byte, so this is a tag test, a
+        // load and a byte compare, without decoding the header.
+        // SAFETY: values in slots are valid, so an "other" pointer points to
+        // a live object that starts with its header.
+        v.tag() == Tag::Other
+            && unsafe { get(v, -(Tag::Other as i32)) } as u8 == TypeCode::Ipair as u8
     }
 
     /// An immutable pair's `icar`.
