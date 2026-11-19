@@ -165,7 +165,7 @@ impl<S: Strategy> Loaded<S> {
 
     /// Builds the descriptors for `module`, which must be valid, placing
     /// ownership operations in its code under precise counting.
-    pub(crate) fn new(module: Module) -> Result<Arc<Loaded<S>>, String> {
+    pub(crate) fn new(module: Module, transient: bool) -> Result<Arc<Loaded<S>>, String> {
         let owned: Option<Box<[Function]>> = if S::PRECISE {
             let functions = vali_bytecode::ownership::insert(&module)
                 .map_err(|e| format!("placing ownership operations: {e}"))?;
@@ -188,8 +188,10 @@ impl<S: Strategy> Loaded<S> {
             .collect();
         // Named marker stubs only with native frames: without them, every
         // frame returns to the shared stub, and nothing is registered with
-        // debuggers (ADR 0004 #6).
-        let stubs = if cfg!(feature = "native-frames") {
+        // debuggers (ADR 0004 #6). A module freed once nothing refers to it
+        // gets none either: stubs are registered for the process's life, so
+        // its frames cannot be named in a debugger.
+        let stubs = if cfg!(feature = "native-frames") && !transient {
             crate::stubs::Stubs::new(&names.iter().map(|n| &**n).collect::<Vec<_>>())
         } else {
             None
@@ -255,11 +257,17 @@ pub(crate) struct Cell(pub(crate) *mut Value);
 // moves between threads only whole and is used by one at a time (ADR 0008).
 unsafe impl Send for Cell {}
 
-/// One isolate's instance of a loaded module: its constants, created in the
-/// isolate's heap, the cells of the variables it defines, and a pointer to
-/// the cell of each entry of its variable table.
+/// One isolate's instance of a loaded module: its constants, the cells of
+/// the variables it defines, and a pointer to the cell of each entry of its
+/// variable table.
 pub(crate) struct Instance<S: Strategy> {
     pub(crate) loaded: Arc<Loaded<S>>,
+    /// Where it is in the isolate's instances.
+    pub(crate) index: usize,
+    /// The module's object, if it is freed once nothing refers to it
+    /// (`Cx::load_transient`), else `#f`. Closures of its functions keep
+    /// it alive; it holds the constants and the cells' values.
+    pub(crate) object: Value,
     pub(crate) constants: Vec<Value>,
     /// The closure direct calls give each function, made the first time
     /// one calls it and `#f` until then. Only functions with no free
@@ -267,9 +275,105 @@ pub(crate) struct Instance<S: Strategy> {
     pub(crate) statics: Box<[Value]>,
     /// Boxed so the cells stay put as instances are added. Code reaches
     /// them only through `variables`.
-    #[expect(dead_code, reason = "owns the cells that `variables` points into")]
     pub(crate) cells: Box<[std::cell::UnsafeCell<Value>]>,
     pub(crate) variables: Box<[Cell]>,
+}
+
+impl<S: Strategy> Instance<S> {
+    /// Calls `f` with each value the instance holds: what its module's
+    /// object, if any, keeps alive.
+    pub(crate) fn for_each_value(&self, f: &mut impl FnMut(Value)) {
+        self.constants.iter().for_each(|&v| f(v));
+        self.statics.iter().for_each(|&v| f(v));
+        // SAFETY: the cells belong to this instance and hold valid values.
+        self.cells.iter().for_each(|c| f(unsafe { *c.get() }));
+    }
+}
+
+/// The modules loaded into an isolate. A module freed once nothing refers
+/// to it leaves its slot to the next; its instance waits in the graveyard
+/// until it is safe to drop it (`Instances::empty_graveyard`).
+pub(crate) struct Instances<S: Strategy> {
+    slots: Vec<Option<Box<Instance<S>>>>,
+    spare: Vec<usize>,
+    /// Which instance each loaded module has, by its address.
+    by_loaded: std::collections::HashMap<usize, usize>,
+    /// Retired instances, kept as long as a closure being freed could
+    /// still be described, and as long as the interpreter could have
+    /// registers pointing into one.
+    #[allow(clippy::vec_box)] // their addresses must stay put
+    graveyard: Vec<Box<Instance<S>>>,
+}
+
+impl<S: Strategy> Instances<S> {
+    pub(crate) fn new() -> Self {
+        Instances {
+            slots: Vec::new(),
+            spare: Vec::new(),
+            by_loaded: std::collections::HashMap::new(),
+            graveyard: Vec::new(),
+        }
+    }
+
+    /// Adds the instance `make` builds, given its index.
+    pub(crate) fn push(&mut self, make: impl FnOnce(usize) -> Instance<S>) -> usize {
+        let index = self.spare.pop().unwrap_or(self.slots.len());
+        let instance = Box::new(make(index));
+        self.by_loaded
+            .insert(Arc::as_ptr(&instance.loaded) as usize, index);
+        if index == self.slots.len() {
+            self.slots.push(Some(instance));
+        } else {
+            self.slots[index] = Some(instance);
+        }
+        index
+    }
+
+    /// The index of the instance of the loaded module at `loaded`.
+    pub(crate) fn of_loaded(&self, loaded: usize) -> usize {
+        self.by_loaded[&loaded]
+    }
+
+    /// How many modules are loaded now.
+    pub(crate) fn live(&self) -> usize {
+        self.slots.len() - self.spare.len()
+    }
+
+    /// How many slots there are, live or free.
+    pub(crate) fn slots(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// The module at `index` has nothing referring to it: its instance
+    /// goes to the graveyard, and its slot is free.
+    pub(crate) fn retire(&mut self, index: usize) {
+        if let Some(instance) = self.slots[index].take() {
+            self.by_loaded
+                .remove(&(Arc::as_ptr(&instance.loaded) as usize));
+            self.graveyard.push(instance);
+            self.spare.push(index);
+        }
+    }
+
+    /// Drops the retired instances. Not while an epoch is running, or
+    /// while the interpreter could be running code of one.
+    pub(crate) fn empty_graveyard(&mut self) {
+        self.graveyard.clear();
+    }
+}
+
+impl<S: Strategy> std::ops::Index<usize> for Instances<S> {
+    type Output = Instance<S>;
+
+    fn index(&self, index: usize) -> &Instance<S> {
+        self.slots[index].as_deref().expect("a loaded module")
+    }
+}
+
+impl<S: Strategy> std::ops::IndexMut<usize> for Instances<S> {
+    fn index_mut(&mut self, index: usize) -> &mut Instance<S> {
+        self.slots[index].as_deref_mut().expect("a loaded module")
+    }
 }
 
 /// A module loaded into an isolate.

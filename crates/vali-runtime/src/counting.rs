@@ -434,6 +434,10 @@ impl<const SIDE_COUNTS: bool, const PRECISE: bool> References for Counting<SIDE_
         Self::increment(v);
     }
 
+    fn charge(heap: &mut CountingHeap, bytes: usize) {
+        heap.since += bytes;
+    }
+
     #[inline(always)]
     fn release(heap: &mut CountingHeap, v: Value) {
         if v.is_pointer() {

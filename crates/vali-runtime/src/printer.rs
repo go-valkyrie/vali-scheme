@@ -232,6 +232,7 @@ impl<S: Strategy> Printer<'_, S> {
                             self.out.push(':');
                         }
                         Some(TypeCode::Continuation) => self.out.push_str("#<continuation>"),
+                        Some(TypeCode::Code) => self.out.push_str("#<module>"),
                         Some(TypeCode::RustObject) => {
                             let i = Cx::<S>::rust_object_index(v).expect("a Rust object");
                             self.cx.write_object(i, &mut self.out);

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use vali_abi::{Header, Layout, TypeCode, data};
 
-use crate::code::{Code, Instance};
+use crate::code::Code;
 use crate::handle::{Error, Handle, RootTable};
 use crate::page::{HeapConfig, OutOfMemory};
 use crate::strategy::{Space, Strategy};
@@ -37,9 +37,7 @@ pub struct Cx<S: Strategy> {
     heap: S::Heap,
     roots: Arc<RootTable>,
     /// Modules loaded into this isolate.
-    pub(crate) instances: Vec<Instance<S>>,
-    /// Which instance belongs to each loaded module, by its address.
-    pub(crate) instance_of: HashMap<usize, usize>,
+    pub(crate) instances: crate::code::Instances<S>,
     /// The cells of the host's globals, by name, which variables linked
     /// as globals share. Boxed so the cells stay put.
     pub(crate) globals: HashMap<Box<str>, OwnCell>,
@@ -153,8 +151,7 @@ impl<S: Strategy> Cx<S> {
         Cx {
             heap: S::new_heap(config),
             roots: RootTable::new(),
-            instances: Vec::new(),
-            instance_of: HashMap::new(),
+            instances: crate::code::Instances::new(),
             globals: HashMap::new(),
             primitives: HashMap::new(),
             native_cells: HashMap::new(),
@@ -203,9 +200,30 @@ impl<S: Strategy> Cx<S> {
         &mut self.heap
     }
 
-    /// The strategy's state and the Rust objects, both to change.
-    pub(crate) fn heap_and_objects(&mut self) -> (&mut S::Heap, &mut crate::rust_objects::Objects) {
-        (&mut self.heap, &mut self.objects)
+    /// The strategy's state, the Rust objects and the loaded modules, all
+    /// to change.
+    pub(crate) fn heap_objects_instances(
+        &mut self,
+    ) -> (
+        &mut S::Heap,
+        &mut crate::rust_objects::Objects,
+        &mut crate::code::Instances<S>,
+    ) {
+        (&mut self.heap, &mut self.objects, &mut self.instances)
+    }
+
+    /// How many modules are loaded: the libraries, programs and evaluated
+    /// code whose modules are not freed yet.
+    #[doc(hidden)]
+    pub fn loaded_modules(&self) -> usize {
+        self.instances.live()
+    }
+
+    /// How many slots the loaded modules take, live or free: bounded where
+    /// modules are freed once nothing refers to them.
+    #[doc(hidden)]
+    pub fn module_slots(&self) -> usize {
+        self.instances.slots()
     }
 
     /// How many bytes the heap has taken from the system.
@@ -226,6 +244,17 @@ impl<S: Strategy> Cx<S> {
             TypeCode::Flonum => Space::Flonum,
             _ => Space::General,
         };
+        self.new_object_in(t, fields, data, space)
+    }
+
+    /// As [`Cx::new_object`], in `space`.
+    pub(crate) fn new_object_in(
+        &mut self,
+        t: TypeCode,
+        fields: usize,
+        data: u32,
+        space: Space,
+    ) -> Result<Value, OutOfMemory> {
         // Field offsets are 32-bit (`Layout::field`): a bigger object's
         // last fields would wrap around to addresses before it.
         if fields > MAX_FIELDS {

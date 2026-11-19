@@ -3,7 +3,7 @@
 //! all walk this one description. It needs nothing but the layout, so a
 //! strategy can use it while the runtime lends it the heap.
 
-use vali_abi::{Header, Tag, TypeCode};
+use vali_abi::{Header, Tag, TypeCode, data};
 
 use crate::cx::{Cx, get};
 use crate::strategy::Strategy;
@@ -66,7 +66,14 @@ impl<S: Strategy> Cx<S> {
                 TypeCode::Keyword => 1,
                 TypeCode::Symbol => 2,
                 TypeCode::String => 4,
-                TypeCode::Closure => 1 + Self::header_data(v, t),
+                TypeCode::Closure => {
+                    let data = Self::header_data(v, t) as u32;
+                    1 + (data & data::closure::FREE_MASK) as usize
+                        + usize::from(data & data::closure::OWNED != 0)
+                }
+                // The pointer to its instance, which the module's object
+                // stands for (`Cx::load_transient`).
+                TypeCode::Code => 1,
                 TypeCode::Record => 1 + Self::header_data(v, t),
                 TypeCode::Vector => 1 + get(v, Self::LAYOUT.length(t)) as usize,
                 TypeCode::Bytevector => 1 + (get(v, Self::LAYOUT.length(t)) as usize).div_ceil(8),
@@ -99,8 +106,22 @@ impl<S: Strategy> Cx<S> {
             | TypeCode::ExactComplex => {
                 (0..fields).for_each(|i| f(field(i)));
             }
-            // The first word is the code pointer, not a value.
+            // The first word is the code pointer, not a value; an owned
+            // closure's last field is its module's object.
             TypeCode::Closure | TypeCode::Vector => (1..fields).for_each(|i| f(field(i))),
+            // What a module that is freed when nothing refers to it holds:
+            // its constants and variables. A retired one holds nothing.
+            TypeCode::Code => {
+                // SAFETY: a live module object's field is its instance's
+                // address, or 0 once the instance is retired.
+                let instance =
+                    unsafe { get(v, Self::LAYOUT.field(t, 0)) } as *const crate::code::Instance<S>;
+                if !instance.is_null() {
+                    // SAFETY: a live instance, kept until the graveyard is
+                    // emptied.
+                    unsafe { (*instance).for_each_value(&mut f) };
+                }
+            }
             // The name; the hash is a number.
             TypeCode::Symbol | TypeCode::Keyword => f(field(0)),
             // The bytes and the index hints.

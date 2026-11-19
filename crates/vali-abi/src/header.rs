@@ -122,6 +122,17 @@ pub mod data {
     /// byte indices.
     pub const ASCII: u32 = 1 << 1;
 
+    /// A closure's header data: its free-variable count, and a flag.
+    pub mod closure {
+        /// The closure belongs to a module that is freed when nothing refers
+        /// to it (`Cx::load_transient`): its last field, after the free
+        /// variables, holds that module's object, which the closure keeps
+        /// alive.
+        pub const OWNED: u32 = 1 << 23;
+        /// The free-variable count.
+        pub const FREE_MASK: u32 = OWNED - 1;
+    }
+
     /// The kinds of symbol.
     pub mod symbol {
         /// An interned symbol: equal names are the same symbol.

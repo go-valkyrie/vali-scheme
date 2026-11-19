@@ -46,13 +46,14 @@ const CLASS_OF: [u8; LARGEST + 1] = {
     table
 };
 
-const SPACES: usize = 3;
+const SPACES: usize = 4;
 
 fn space_index(space: Space) -> usize {
     match space {
         Space::Pair => 0,
         Space::Flonum => 1,
         Space::General => 2,
+        Space::Literal => 3,
     }
 }
 
@@ -276,7 +277,12 @@ impl PageHeap {
             None => self.source.page()?.as_ptr() as *mut Page,
         };
         let block_bytes = CLASSES[c] * 8;
-        let side = if s == 0 { self.pair_side_bytes } else { 0 };
+        // Pairs, and literal pairs, which are pairs on frozen pages.
+        let side = if s == 0 || s == 3 {
+            self.pair_side_bytes
+        } else {
+            0
+        };
         let room = PAGE_BYTES - HEADER_BYTES;
         let capacity = room / (block_bytes + side);
         let base = page as *mut u8;
@@ -288,7 +294,7 @@ impl PageHeap {
             ptr::write(
                 page,
                 Page {
-                    frozen: 0,
+                    frozen: usize::from(s == 3),
                     space: s,
                     class: c,
                     block_bytes,

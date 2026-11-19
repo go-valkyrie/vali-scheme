@@ -12,7 +12,6 @@
 //! the loop checks only what instructions must check at run time: types,
 //! bounds, arity, and the stack limit.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use std::cell::UnsafeCell;
@@ -367,17 +366,107 @@ impl<S: Strategy> Cx<S> {
     /// exports it; a global one shares the global's cell, which a host
     /// defines, before or after.
     pub fn load(&mut self, module: Module) -> Result<ModuleId, Error> {
+        self.load_module(module, false).map(ModuleId)
+    }
+
+    /// Loads `module`, which is freed once nothing refers to it, and
+    /// returns its body as a procedure of no arguments, to call: evaluated
+    /// code, which would otherwise stay loaded as long as the isolate does
+    /// (#31).
+    ///
+    /// Nothing refers to the module when no closure of its functions is
+    /// left, which covers the frames and continuations running in it, and
+    /// the cells it defines hold no reference that keeps it: cycles through
+    /// them are collected with the rest. The module is a heap object that
+    /// each closure of its functions holds, as it holds its free variables
+    /// (ADR 0005), so the strategy frees it and, with it, what it holds:
+    /// its constants, which are counted objects built in the heap, and the
+    /// values of its cells. The runtime drops its instance at the next load
+    /// or return to the host after that.
+    ///
+    /// Under a strategy that never frees (`NoCollection`) nothing can say
+    /// when nothing refers to a module, so this is `load` and `module_body`:
+    /// the module stays loaded for the isolate's life.
+    ///
+    /// A module that calls functions directly (`call-direct`) is refused:
+    /// the closure a direct call gives its callee is kept with the module's
+    /// instance, so it would refer to its own module for ever.
+    pub fn load_transient(&mut self, module: Module) -> Result<Handle, Error> {
+        if !S::COUNTS {
+            let id = self.load(module)?;
+            return self.module_body(id);
+        }
+        for function in &module.functions {
+            let mut pc = 0;
+            while pc < function.code.len() {
+                let Ok((instruction, len)) = vali_bytecode::Instruction::decode(&function.code, pc)
+                else {
+                    break;
+                };
+                if matches!(
+                    instruction.opcode(),
+                    Opcode::CallDirect | Opcode::TailCallDirect
+                ) {
+                    return Err(Error::scheme(format!(
+                        "{}: direct calls are not supported in a module that is freed once nothing refers to it",
+                        module.name
+                    )));
+                }
+                pc += len;
+            }
+        }
+        // What the module's instance, descriptors and code take outside the
+        // heap, counted as allocated, so that epochs come as often as they
+        // would if the heap held it.
+        let rust_bytes = 1024
+            + module
+                .functions
+                .iter()
+                .map(|f| 4 * f.code.len() + 64)
+                .sum::<usize>();
+        let id = self.load_module(module, true)?;
+        S::charge(self.heap_mut(), rust_bytes);
+        let instance = &self.instances[id];
+        let body =
+            &instance.loaded.functions[instance.loaded.module.body as usize] as *const Code<S>;
+        let owner = instance.object;
+        let closure = self.closure_owned(body, &[], owner)?;
+        // SAFETY: just allocated.
+        Ok(unsafe { self.root(closure) })
+    }
+
+    /// Loads `module`: for a module freed once nothing refers to it, its
+    /// constants are built in the heap and its object made.
+    fn load_module(&mut self, module: Module, transient: bool) -> Result<usize, Error> {
+        // Nothing runs code of a retired instance here: it was running
+        // frames or holding closures only until it was freed.
+        self.instances.empty_graveyard();
         validate(&module)
             .map_err(|e| Error::scheme(format!("invalid bytecode in {}: {e}", module.name)))?;
         // Modules link to the primitives as they load, so the first load
         // installs them.
         self.install_primitives()?;
         let name = module.name.clone();
-        let loaded = Loaded::<S>::new(module)
+        let loaded = Loaded::<S>::new(module, transient)
             .map_err(|e| Error::scheme(format!("invalid bytecode in {name}: {e}")))?;
         let mut constants = Vec::with_capacity(loaded.module.constants.len());
         for constant in &loaded.module.constants {
-            constants.push(self.pool_constant(constant)?);
+            if transient {
+                let value = self.heap_constant(constant);
+                let value = match value {
+                    Ok(value) => value,
+                    Err(e) => {
+                        self.release_all(&constants);
+                        return Err(e);
+                    }
+                };
+                // Held by the module's object, which releases it as it is
+                // freed.
+                self.hold(value);
+                constants.push(value);
+            } else {
+                constants.push(self.pool_constant(constant)?);
+            }
         }
         let defined = loaded
             .module
@@ -398,21 +487,63 @@ impl<S: Strategy> Cx<S> {
                 }
                 VariableLink::Global => Cell(self.global_cell(&variable.name)),
                 VariableLink::Primitive => Cell(self.primitive_cell(&variable.name)),
-                VariableLink::Native(library) => Cell(self.native_cell(library, &variable.name)?),
-                VariableLink::Imported(library) => self.exported(library, &variable.name)?,
+                VariableLink::Native(library) => match self.native_cell(library, &variable.name) {
+                    Ok(cell) => Cell(cell),
+                    Err(e) => {
+                        self.release_all(&constants);
+                        return Err(e);
+                    }
+                },
+                VariableLink::Imported(library) => match self.exported(library, &variable.name) {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        self.release_all(&constants);
+                        return Err(e);
+                    }
+                },
             });
         }
-        let id = self.instances.len();
-        self.instance_of.insert(Arc::as_ptr(&loaded) as usize, id);
         let statics = vec![Value::FALSE; loaded.functions.len()].into();
-        self.instances.push(Instance {
+        let id = self.instances.push(|index| Instance {
             loaded,
+            index,
+            object: Value::FALSE,
             constants,
             statics,
             cells,
             variables: variables.into(),
         });
-        Ok(ModuleId(id))
+        if transient {
+            let instance = &self.instances[id] as *const Instance<S>;
+            let object = match self.new_object(TypeCode::Code, 1, 0) {
+                Ok(object) => object,
+                Err(e) => {
+                    let constants = std::mem::take(&mut self.instances[id].constants);
+                    self.release_all(&constants);
+                    self.instances.retire(id);
+                    return Err(e.into());
+                }
+            };
+            // SAFETY: just allocated with its one field.
+            unsafe {
+                put(
+                    object,
+                    Self::LAYOUT.field(TypeCode::Code, 0),
+                    instance as u64,
+                )
+            };
+            self.instances[id].object = object;
+        }
+        Ok(id)
+    }
+
+    /// Drops the references `load_module` took to constants it has built.
+    fn release_all(&mut self, values: &[Value]) {
+        for &v in values {
+            if v.is_pointer() {
+                S::release(self.heap_mut(), v);
+            }
+        }
     }
 
     /// Makes the loaded module `module` the library with identity
@@ -715,6 +846,32 @@ impl<S: Strategy> Cx<S> {
             for (i, x) in free.iter().enumerate() {
                 self.init_field(v, Self::LAYOUT.closure_free(i), *x);
             }
+        }
+        Ok(v)
+    }
+
+    /// A new closure of `code`, capturing `free`, of a module that is freed
+    /// once nothing refers to it: its last field is the module's object,
+    /// `owner`, which it keeps alive.
+    fn closure_owned(
+        &mut self,
+        code: *const Code<S>,
+        free: &[Value],
+        owner: Value,
+    ) -> Result<Value, OutOfMemory> {
+        let v = self.new_object(
+            TypeCode::Closure,
+            2 + free.len(),
+            free.len() as u32 | data::closure::OWNED,
+        )?;
+        // SAFETY: the closure was just allocated with room for its code
+        // pointer, free variables and owner.
+        unsafe {
+            put(v, Self::LAYOUT.closure_code(), code as u64);
+            for (i, x) in free.iter().enumerate() {
+                self.init_field(v, Self::LAYOUT.closure_free(i), *x);
+            }
+            self.init_field(v, Self::LAYOUT.closure_free(free.len()), owner);
         }
         Ok(v)
     }
@@ -1022,6 +1179,9 @@ impl<S: Strategy> Cx<S> {
         // and the entry frame is set up as `interpret` expects.
         unsafe { trampoline::enter(&raw mut state as *mut c_void, body::<S>) };
         self.running = false;
+        // No frame runs now, so no register points into a module freed
+        // while it did.
+        self.instances.empty_graveyard();
         // A panic in the VM itself leaves the same state as an error would,
         // so the next call starts clean instead of resuming dead frames.
         self.finish_run();
@@ -1441,13 +1601,22 @@ impl<S: Strategy> Cx<S> {
 
     /// The constants, variables and direct-call closures of the loaded
     /// module at `module`.
-    fn instance_registers(&mut self, module: usize) -> (*const Value, *const Cell, *mut Value) {
-        let index = self.instance_of[&module];
+    fn instance_registers(
+        &mut self,
+        module: usize,
+    ) -> (*const Value, *const Cell, *mut Value, u64) {
+        let index = self.instances.of_loaded(module);
         let instance = &mut self.instances[index];
         (
             instance.constants.as_ptr(),
             instance.variables.as_ptr(),
             instance.statics.as_mut_ptr(),
+            // 0 for a module that is not freed once nothing refers to it.
+            if instance.object == Value::FALSE {
+                0
+            } else {
+                instance.object.raw()
+            },
         )
     }
 
@@ -1455,7 +1624,12 @@ impl<S: Strategy> Cx<S> {
     /// loaded module at `module`, which has no free variables, and keeps it
     /// with the module's instance.
     fn make_static(&mut self, module: usize, function: usize) -> Result<Value, Error> {
-        let index = self.instance_of[&module];
+        let index = self.instances.of_loaded(module);
+        if self.instances[index].object != Value::FALSE {
+            return Err(Error::scheme(
+                "direct calls are not supported in a module that is freed once nothing refers to it",
+            ));
+        }
         let target = &self.instances[index].loaded.functions[function] as *const Code<S>;
         let closure = self.closure_raw(target, &[])?;
         self.hold(closure);
@@ -1488,6 +1662,9 @@ impl<S: Strategy> Cx<S> {
         let mut constants: *const Value = std::ptr::null();
         let mut variables: *const Cell = std::ptr::null();
         let mut statics: *mut Value = std::ptr::null_mut();
+        // The object of the current module if it is freed once nothing
+        // refers to it, else 0: closures made here keep it alive.
+        let mut owner = 0u64;
         let mut current_module = 0usize;
         let mut next = Next::Call {
             direct: false,
@@ -1528,7 +1705,8 @@ impl<S: Strategy> Cx<S> {
                     code = words;
                     if module as usize != current_module {
                         current_module = module as usize;
-                        (constants, variables, statics) = self.instance_registers(current_module);
+                        (constants, variables, statics, owner) =
+                            self.instance_registers(current_module);
                     }
                 }};
             }
@@ -2325,7 +2503,11 @@ impl<S: Strategy> Cx<S> {
                             };
                             let loaded: &Loaded<S> = &*module;
                             let target = &loaded.functions[function] as *const Code<S>;
-                            let closure = attempt!(self.closure_raw(target, &free));
+                            let closure = if owner == 0 {
+                                attempt!(self.closure_raw(target, &free))
+                            } else {
+                                attempt!(self.closure_owned(target, &free, Value::from_raw(owner)))
+                            };
                             self.store(fp, a, closure);
                             pc += 2 + count.div_ceil(per_word);
                         }
@@ -2628,7 +2810,7 @@ impl<S: Strategy> Cx<S> {
                             let closure = slot(fp, a);
                             let count = if closure.tag() == Tag::Closure {
                                 self.header(closure, TypeCode::Closure)
-                                    .map_or(0, |h| h.data() as usize)
+                                    .map_or(0, |h| (h.data() & data::closure::FREE_MASK) as usize)
                             } else {
                                 fail!(type_error("set-free", "a closure", closure));
                             };

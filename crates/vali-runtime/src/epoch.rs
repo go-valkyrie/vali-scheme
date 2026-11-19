@@ -110,10 +110,12 @@ impl<S: Strategy> Cx<S> {
         }
         // A Rust object or a continuation in a garbage cycle drops what it
         // holds in the table as it is freed.
-        let (heap, objects) = self.heap_and_objects();
+        let (heap, objects, instances) = self.heap_objects_instances();
         let mut finalize = |v| {
             if let Some(i) = Self::retire(v) {
                 objects.remove(i);
+            } else if let Some(i) = Self::retire_module(v) {
+                instances.retire(i);
             }
         };
         // SAFETY: the stack's references are counted in, and the table is

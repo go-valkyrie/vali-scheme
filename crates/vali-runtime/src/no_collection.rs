@@ -40,7 +40,7 @@ impl BumpHeap {
     pub fn allocate(&mut self, space: Space, words: usize) -> Result<NonNull<u64>, OutOfMemory> {
         let bytes = words.checked_mul(8).ok_or(OutOfMemory)?;
         let buffer = match space {
-            Space::Pair => &mut self.pair,
+            Space::Pair | Space::Literal => &mut self.pair,
             Space::Flonum => &mut self.flonum,
             Space::General if bytes > LARGE_OBJECT_BYTES => {
                 return self.pages.large(bytes).map(NonNull::cast);

@@ -27,7 +27,7 @@ use vali_num::{Integer, Number};
 use crate::cx::{Cx, put};
 use crate::handle::Error;
 use crate::page::{LARGE_OBJECT_BYTES, OutOfMemory, PAGE_BYTES};
-use crate::strategy::Strategy;
+use crate::strategy::{Space, Strategy};
 use crate::value::Value;
 
 /// The part of a frozen page not yet used: from `cursor` to `end`.
@@ -43,6 +43,11 @@ struct Region {
 pub(crate) struct Pool {
     pairs: Region,
     general: Region,
+    /// Whether constants are being built in the heap, as counted objects
+    /// frozen like the pool's, for a module the heap frees
+    /// (`Cx::load_transient`): then they are held by the module's object and
+    /// freed with it, unless something else refers to them.
+    in_heap: bool,
 }
 
 impl<S: Strategy> Cx<S> {
@@ -103,6 +108,19 @@ impl<S: Strategy> Cx<S> {
     /// A new object of type `t` in the pool, its header written and its
     /// strategy's half frozen, the fields uninitialised.
     fn pool_object(&mut self, t: TypeCode, fields: usize, data: u32) -> Result<Value, OutOfMemory> {
+        if self.pool.in_heap {
+            let space = if t == TypeCode::Pair {
+                Space::Literal
+            } else {
+                Space::General
+            };
+            let space = if t == TypeCode::Flonum {
+                Space::Flonum
+            } else {
+                space
+            };
+            return self.new_object_in(t, fields, data, space);
+        }
         let words = Self::LAYOUT.words(t, fields);
         let address = self.pool_words(t == TypeCode::Pair, words)?;
         // SAFETY: the memory was just taken for an object of type `t`.
@@ -114,6 +132,34 @@ impl<S: Strategy> Cx<S> {
         }
         S::freeze(v);
         Ok(v)
+    }
+
+    /// Stores the value `x` in a field of `v`, an object just built: counted
+    /// if the constants are built in the heap.
+    ///
+    /// # Safety
+    ///
+    /// `v` must be an object just built with a value field at `offset`.
+    unsafe fn pool_store(&mut self, v: Value, offset: i32, x: Value) {
+        // SAFETY: passed on to the caller.
+        unsafe {
+            if self.pool.in_heap {
+                self.init_field(v, offset, x);
+            } else {
+                put(v, offset, x.raw());
+            }
+        }
+    }
+
+    /// `constant` as a value built in the heap, as counted objects that are
+    /// frozen as the pool's are, for a module the heap frees. Each object is
+    /// held only by the objects that refer to it: the caller holds the
+    /// result.
+    pub(crate) fn heap_constant(&mut self, constant: &Constant) -> Result<Value, Error> {
+        self.pool.in_heap = true;
+        let result = self.pool_constant(constant);
+        self.pool.in_heap = false;
+        result
     }
 
     /// A pool bytevector holding `bytes`.
@@ -189,8 +235,8 @@ impl<S: Strategy> Cx<S> {
         let v = self.pool_object(t, 2, 0)?;
         // SAFETY: two fields, and both values are valid and in the pool.
         unsafe {
-            put(v, Self::LAYOUT.field(t, 0), a.raw());
-            put(v, Self::LAYOUT.field(t, 1), b.raw());
+            self.pool_store(v, Self::LAYOUT.field(t, 0), a);
+            self.pool_store(v, Self::LAYOUT.field(t, 1), b);
         }
         Ok(v)
     }
@@ -217,7 +263,7 @@ impl<S: Strategy> Cx<S> {
                         Self::LAYOUT.string_char_count(),
                         s.chars().count() as u64,
                     );
-                    put(v, Self::LAYOUT.string_bytes(), bytes.raw());
+                    self.pool_store(v, Self::LAYOUT.string_bytes(), bytes);
                     put(v, Self::LAYOUT.string_hints(), Value::FALSE.raw());
                 }
                 v
@@ -241,8 +287,8 @@ impl<S: Strategy> Cx<S> {
                     let v = self.pool_object(TypeCode::Pair, 2, 0)?;
                     // SAFETY: a pair has both fields; both values are valid.
                     unsafe {
-                        put(v, Self::LAYOUT.car(), car.raw());
-                        put(v, Self::LAYOUT.cdr(), rest.raw());
+                        self.pool_store(v, Self::LAYOUT.car(), car);
+                        self.pool_store(v, Self::LAYOUT.cdr(), rest);
                     }
                     rest = v;
                 }
@@ -269,7 +315,7 @@ impl<S: Strategy> Cx<S> {
                 unsafe {
                     put(v, Self::LAYOUT.length(TypeCode::Vector), items.len() as u64);
                     for (i, x) in elements.iter().enumerate() {
-                        put(v, Self::LAYOUT.vector_element(i), x.raw());
+                        self.pool_store(v, Self::LAYOUT.vector_element(i), *x);
                     }
                 }
                 v

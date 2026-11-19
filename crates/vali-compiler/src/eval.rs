@@ -267,20 +267,27 @@ fn prepare<S: Strategy>(
         if crate::uses_syntax(&body) {
             crate::merge_syntax_data(cx, expander.syntax_data())?;
         }
-        cx.load(body)
+        // The module is freed once nothing refers to it (#31). An
+        // interaction environment's definitions are isolate globals, so
+        // the closures they hold keep their modules alive until they are
+        // defined again.
+        cx.load_transient(body)
     });
     expander.forget(mark);
-    let id = loaded?;
+    let thunk = loaded?;
     if interactive {
         evaluator.interaction = sets;
     }
-    thunks.push(cx.module_body(id)?);
+    thunks.push(thunk);
     Ok(thunks)
 }
 
 #[cfg(test)]
 mod tests {
-    use vali_runtime::{DeferredHeadered, HeapConfig};
+    use vali_runtime::{
+        DeferredHeadered, DeferredSideCounts, HeapConfig, NoCollection, PreciseHeadered,
+        PreciseSideCounts,
+    };
 
     use super::*;
 
@@ -433,5 +440,242 @@ mod tests {
         assert_eq!(step(&mut cx, "(define (g y) (+ y 2))", 1), sizes[0] + 1);
         // Definitions are what the table grows by.
         assert_eq!(step(&mut cx, "(define h 1)", 1), sizes[0] + 2);
+    }
+
+    /// What the tests below evaluate: each function does one kind of
+    /// evaluation, in a loop of `n`, or keeps what one returns.
+    const WORLD: &str = "
+        (import (scheme base) (scheme eval))
+        (define env (environment '(scheme base)))
+        (define env2 (environment '(scheme base) '(scheme eval)))
+        (define kept #f)
+        (define (spin n)
+          (let loop ((i 0) (s 0))
+            (if (= i n) s (loop (+ i 1) (+ s (eval '(+ 1 2) env))))))
+        ;; Closures that refer to their own module through its cells, or to
+        ;; themselves: cycles, which only a collection frees.
+        (define (cycles n)
+          (let loop ((i 0))
+            (if (= i n)
+                n
+                (begin
+                  (eval '(begin (define (f) f) f) env)
+                  (eval '(let () (define (g) g) (g)) env)
+                  (eval '(begin (define x (list 1 2)) (define (h) x) (h)) env)
+                  (loop (+ i 1))))))
+        (define (errors n)
+          (let loop ((i 0))
+            (if (= i n)
+                n
+                (begin
+                  (guard (e (#t #f)) (eval '(car 1) env))
+                  (guard (e (#t #f)) (eval '(if) env))
+                  (guard (e (#t #f)) (eval '(begin (define (f) (car 1)) (f)) env))
+                  (loop (+ i 1))))))
+        (define (nested n)
+          (let loop ((i 0) (s 0))
+            (if (= i n)
+                s
+                (loop (+ i 1)
+                      (+ s (eval '(eval '(+ 1 2) (environment '(scheme base))) env2))))))
+        (define (keep!) (set! kept (eval '(lambda (y) (+ y 1)) env)))
+        (define (call-kept) (kept 5))
+        (define (drop!) (set! kept #f))
+        (define (keep-continuation!)
+          (set! kept (eval '(car (list (call/cc (lambda (c) c)))) env)))
+        ;; Re-enters a continuation captured in evaluated code after that
+        ;; code returned, and after enough allocation for epochs to run.
+        (define (reenter)
+          (let ((v (eval '(car (list (call/cc (lambda (c) c)))) env)))
+            (if (procedure? v)
+                (begin (set! kept v) (spin 3000) (v 7))
+                v)))
+        (define (constants n)
+          (let loop ((i 0) (s 0))
+            (if (= i n)
+                s
+                (loop (+ i 1)
+                      (+ s (length (eval '(list 'a \"str\" 3.5 '(1 2 3) #(1 2)) env)))))))";
+
+    /// A world under strategy `S`: the cx, the program's module, and how
+    /// many modules are loaded once the first evaluation has loaded what it
+    /// imports.
+    type World<S> = (Cx<S>, vali_runtime::ModuleId, usize);
+
+    fn world<S: Strategy>() -> World<S> {
+        let program = crate::compile_program(WORLD, &Identity::new("world"), &Fetcher(None))
+            .expect("the program compiles");
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = crate::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let mut world = (cx, id, 0);
+        call(&mut world, "spin", Some(1));
+        world.0.collect_garbage();
+        world.2 = world.0.loaded_modules();
+        world
+    }
+
+    /// Calls `name` with `n`, if given, and shows the result.
+    fn call<S: Strategy>(world: &mut World<S>, name: &str, n: Option<i64>) -> String {
+        let (cx, id, _) = world;
+        let f = cx.variable(*id, name).unwrap();
+        let args: Vec<Handle> = n.map(|n| Handle::fixnum(n).unwrap()).into_iter().collect();
+        let result = cx.call(&f, &args).unwrap();
+        cx.display_string(&result).unwrap()
+    }
+
+    /// Modules loaded beyond the baseline, after collecting all garbage.
+    fn leftover<S: Strategy>(world: &mut World<S>) -> usize {
+        world.0.collect_garbage();
+        world.0.loaded_modules() - world.2
+    }
+
+    /// Every evaluation under a strategy that counts: the module count
+    /// stays bounded however many evaluations there are, and every module
+    /// is freed once nothing refers to it, whether it was in a cycle, failed
+    /// halfway, ran inside another evaluation or was entered again through a
+    /// continuation.
+    fn evaluated_modules_are_freed<S: Strategy>() {
+        let mut w = world::<S>();
+        // Epochs come with allocation, and a module counts as allocated, so
+        // thousands of evaluations take only as many slots as an epoch
+        // lets pile up.
+        assert_eq!(call(&mut w, "spin", Some(20_000)), "60000");
+        assert!(w.0.module_slots() < 3_000, "{} slots", w.0.module_slots());
+        assert_eq!(leftover(&mut w), 0);
+
+        assert_eq!(call(&mut w, "constants", Some(2_000)), "10000");
+        assert_eq!(leftover(&mut w), 0);
+        assert_eq!(call(&mut w, "cycles", Some(500)), "500");
+        assert_eq!(leftover(&mut w), 0);
+        assert_eq!(call(&mut w, "errors", Some(500)), "500");
+        assert_eq!(leftover(&mut w), 0);
+        assert_eq!(call(&mut w, "nested", Some(200)), "600");
+        assert_eq!(leftover(&mut w), 0);
+
+        // A module with a closure left is not freed, and the closure
+        // works: its code and constants are there.
+        call(&mut w, "keep!", None);
+        assert_eq!(leftover(&mut w), 1);
+        assert_eq!(call(&mut w, "spin", Some(3_000)), "9000");
+        assert_eq!(leftover(&mut w), 1);
+        assert_eq!(call(&mut w, "call-kept", None), "6");
+        // Once nothing refers to the closure, the module goes.
+        call(&mut w, "drop!", None);
+        assert_eq!(leftover(&mut w), 0);
+
+        // The same for the frames a continuation holds.
+        call(&mut w, "keep-continuation!", None);
+        assert_eq!(call(&mut w, "spin", Some(3_000)), "9000");
+        assert_eq!(leftover(&mut w), 1);
+        call(&mut w, "drop!", None);
+        assert_eq!(leftover(&mut w), 0);
+        assert_eq!(call(&mut w, "reenter", None), "7");
+        call(&mut w, "drop!", None);
+        assert_eq!(leftover(&mut w), 0);
+    }
+
+    #[test]
+    fn evaluated_modules_are_freed_under_every_counting_strategy() {
+        evaluated_modules_are_freed::<DeferredHeadered>();
+        evaluated_modules_are_freed::<DeferredSideCounts>();
+        evaluated_modules_are_freed::<PreciseHeadered>();
+        evaluated_modules_are_freed::<PreciseSideCounts>();
+    }
+
+    /// A constant outlives its module when something refers to it: the
+    /// value an evaluation returns is still there, and still read-only,
+    /// after its module is freed.
+    #[test]
+    fn constants_outlive_their_modules() {
+        let source = "
+            (import (scheme base) (scheme eval))
+            (define env (environment '(scheme base)))
+            (define (get) (eval '(list 'a \"str\" (quote (1 2 3)) #(4 5)) env))
+            (define (churn n)
+              (let loop ((i 0)) (if (= i n) n (begin (eval '(+ 1 2) env) (loop (+ i 1))))))
+            (define (try) (guard (e (#t 'immutable)) (set-car! (car (cdr (cdr (get)))) 9)))";
+        let program = crate::compile_program(source, &Identity::new("c"), &Fetcher(None)).unwrap();
+        let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let id = crate::load(&mut cx, program).unwrap();
+        cx.run(id).unwrap();
+        let get = cx.variable(id, "get").unwrap();
+        let kept = cx.call(&get, &[]).unwrap();
+        let churn = cx.variable(id, "churn").unwrap();
+        cx.call(&churn, &[Handle::fixnum(3_000).unwrap()]).unwrap();
+        cx.collect_garbage();
+        assert_eq!(cx.display_string(&kept).unwrap(), "(a str (1 2 3) #(4 5))");
+        let try_ = cx.variable(id, "try").unwrap();
+        let result = cx.call(&try_, &[]).unwrap();
+        assert_eq!(cx.display_string(&result).unwrap(), "immutable");
+    }
+
+    /// Under a strategy that never frees, nothing can say when nothing
+    /// refers to a module, so evaluated modules stay loaded (#31): the
+    /// documented cost of that strategy.
+    #[test]
+    fn evaluated_modules_stay_loaded_without_collection() {
+        let mut w = world::<NoCollection>();
+        call(&mut w, "spin", Some(100));
+        w.0.collect_garbage();
+        assert_eq!(w.0.loaded_modules() - w.2, 100);
+    }
+
+    /// REPL inputs are freed too: those that define nothing once they have
+    /// run, and the ones a redefinition replaces once nothing else refers
+    /// to their closures. A long run of either keeps the modules loaded
+    /// bounded.
+    fn repl_inputs_are_freed<S: Strategy>() {
+        let mut repl = crate::Repl::<S>::new(&HeapConfig::default(), None).unwrap();
+        let loaded = |repl: &mut crate::Repl<S>| {
+            repl.isolate().with(|cx| {
+                cx.collect_garbage();
+                cx.loaded_modules()
+            })
+        };
+        repl.eval("(define (f x) (+ x 1))").unwrap();
+        let baseline = loaded(&mut repl);
+        for i in 0..4_000 {
+            assert_eq!(repl.eval("(+ 1 2)").unwrap(), ["3"]);
+            repl.eval(&format!("(let ((x {i})) (+ x 1))")).unwrap();
+        }
+        let slots = repl.isolate().with(|cx| cx.module_slots());
+        assert!(slots < 3_000, "{slots} slots");
+        assert_eq!(loaded(&mut repl), baseline);
+        for i in 0..4_000 {
+            repl.eval(&format!("(define (f x) (+ x {i}))")).unwrap();
+        }
+        let slots = repl.isolate().with(|cx| cx.module_slots());
+        assert!(slots < 3_000, "{slots} slots");
+        assert_eq!(repl.eval("(f 1)").unwrap(), ["4000"]);
+        assert_eq!(loaded(&mut repl), baseline);
+    }
+
+    #[test]
+    fn repl_inputs_are_freed_under_counting_strategies() {
+        repl_inputs_are_freed::<DeferredHeadered>();
+        repl_inputs_are_freed::<PreciseSideCounts>();
+    }
+
+    /// A module that calls a function directly is refused: the closure a
+    /// direct call gives its callee is kept with the module's instance, so
+    /// it would keep the module for ever.
+    #[test]
+    fn modules_with_direct_calls_are_not_transient() {
+        // Without the optimiser there are no direct calls to refuse.
+        if std::env::var_os("VALI_NO_OPT").is_some() {
+            return;
+        }
+        let module = crate::compile(
+            "(define (f x) (if (= x 0) 0 (+ 1 (f (- x 1))))) (f 3)",
+            "direct",
+        )
+        .unwrap();
+        let mut cx = Cx::<DeferredHeadered>::new(&HeapConfig::default());
+        cx.install_primitives().unwrap();
+        let error = cx.load_transient(module).unwrap_err();
+        assert!(error.to_string().contains("direct calls"), "{error}");
     }
 }

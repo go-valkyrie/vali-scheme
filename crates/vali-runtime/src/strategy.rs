@@ -21,6 +21,11 @@ pub enum Space {
     /// Everything else. Objects over `LARGE_OBJECT_BYTES` are allocated on
     /// their own.
     General,
+    /// Pairs that are constants of a module the heap frees (`Cx::load_transient`),
+    /// on pages of their own that are frozen as the pool's are (ADR 0020):
+    /// counted and freed like any pair, and read-only. A strategy that never
+    /// frees may allocate them as pairs.
+    Literal,
 }
 
 /// Allocation, which every strategy provides.
@@ -78,6 +83,13 @@ pub trait References: Allocate {
     /// The runtime has dropped one reference to `v`, a heap object.
     #[inline(always)]
     fn release(_heap: &mut Self::Heap, _v: crate::Value) {}
+
+    /// The runtime holds `bytes` bytes outside the heap that live and die
+    /// with an object it is about to allocate, as a module's code does: a
+    /// counting strategy counts them as allocated, so epochs come as often
+    /// as they would if the heap held them.
+    #[inline(always)]
+    fn charge(_heap: &mut Self::Heap, _bytes: usize) {}
 
     /// `v`, an object of the pool (ADR 0020), was just built with its
     /// header, if it has one, written. The strategy makes it a constant that

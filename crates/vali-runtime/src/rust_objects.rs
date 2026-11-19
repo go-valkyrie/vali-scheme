@@ -228,6 +228,29 @@ impl<S: Strategy> Cx<S> {
     pub(crate) fn finalize(&mut self, v: Value) {
         if let Some(i) = Self::retire(v) {
             self.objects.remove(i);
+        } else if let Some(i) = Self::retire_module(v) {
+            self.instances.retire(i);
+        }
+    }
+
+    /// If `v` is the object of a module that is freed once nothing refers to
+    /// it, which the strategy is freeing: the index of its instance, which
+    /// the object no longer reaches, so that describing it again, as a
+    /// cycle collection may, finds nothing it holds.
+    pub(crate) fn retire_module(v: Value) -> Option<usize> {
+        // SAFETY: `v` is a live object; only an "other" object has a header
+        // to read, and a module's object has one field.
+        unsafe {
+            if Self::object_type(v)? != TypeCode::Code {
+                return None;
+            }
+            let at = Self::LAYOUT.field(TypeCode::Code, 0);
+            let instance = get(v, at) as *const crate::code::Instance<S>;
+            if instance.is_null() {
+                return None;
+            }
+            put(v, at, 0);
+            Some((*instance).index)
         }
     }
 
