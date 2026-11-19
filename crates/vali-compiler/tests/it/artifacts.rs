@@ -595,3 +595,54 @@ fn vali_s_macros_emit_no_internal_primitive_that_user_libraries_may_not_link() {
         "macros in lib/ emit primitives that are not in MACRO_PRIMITIVES"
     );
 }
+
+/// A procedure making one call with many arguments is a library that
+/// compiles, is written as an artifact, is read back and loads, or a
+/// compile error: never a panic, in a debug build or a release one.
+#[test]
+fn a_call_with_many_arguments_converts_or_is_refused() {
+    for n in [30_000usize, 34_000, 40_000, 60_000, 70_000] {
+        let args = " x".repeat(n);
+        let loader = Map(vec![(
+            "(test wide)",
+            format!(
+                "(define-library (test wide)
+                   (import (scheme base))
+                   (export f)
+                   (begin (define (f g x) (g{args}))))"
+            ),
+        )]);
+        let program = "(import (scheme base) (test wide)) 1";
+        let outcome = std::panic::catch_unwind(|| {
+            let written = compile_program_with(
+                program,
+                &Identity::new("main"),
+                &loader,
+                &Artifacts {
+                    write: true,
+                    ..Artifacts::default()
+                },
+            )
+            .map_err(|e| e.message)?;
+            let read = compile_program_with(
+                program,
+                &Identity::new("main"),
+                &loader,
+                &reading(&written.artifacts),
+            )
+            .map_err(|e| e.message)?;
+            let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+            vali_compiler::load(&mut cx, read).map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        });
+        // Up to 60,000 arguments fit a frame, and convert; more is a
+        // compile error that says so.
+        let outcome = outcome.expect("no panic");
+        if n <= 60_000 {
+            assert_eq!(outcome, Ok(()), "{n} arguments");
+        } else {
+            let error = outcome.expect_err("too many arguments");
+            assert!(!error.is_empty());
+        }
+    }
+}

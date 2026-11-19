@@ -301,26 +301,21 @@ fn constants_module(constants: Vec<Constant>) -> Module {
     module(constants, vec![], vec![f0])
 }
 
-/// 65,536 distinct constants leave no room for the unspecified constant
-/// the converter adds: an error, not a panic, and no quadratic search to
-/// find it.
+/// 65,536 constants leave no room for the unspecified constant the
+/// converter adds, so the validator refuses them: an error, not a panic,
+/// and no quadratic search to find it.
 #[test]
 fn full_constant_pool() {
     let m = constants_module((0..65_536).map(Constant::Integer).collect());
     let t = Instant::now();
     let r = convert_checked(&m);
     let e = r.expect_err("there is no room for the unspecified value");
-    assert!(!e.contains("PANICKED"), "{e}");
+    assert!(e.starts_with("IR invalid"), "{e}");
     assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
 
     // One fewer fits.
     let m = constants_module((0..65_535).map(Constant::Integer).collect());
     convert_checked(&m).unwrap();
-
-    // 65,536 constants that include the unspecified value share it.
-    let mut constants: Vec<Constant> = (0..65_535).map(Constant::Integer).collect();
-    constants.push(Constant::Unspecified);
-    convert_checked(&constants_module(constants)).unwrap();
 }
 
 /// The time the converter's dedup takes grows linearly with the pool.

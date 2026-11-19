@@ -23,8 +23,20 @@
 //!   that nothing in the function backs.
 //! - No two globals have the same name and link, as they would share one
 //!   cell once linked.
-//! - Conversion adds one constant of its own, so at most 65,535 distinct
-//!   constants convert (65,536 if one of them is the unspecified value).
+//!
+//! Limits that the run-format converter works within, so that a module
+//! that passes always converts and a conversion failure can only mean a
+//! converter bug (ADR 0017 #13):
+//!
+//! - At most 65,535 constants (conversion adds one of its own to the
+//!   65,536 a pool holds), and at most 65,536 globals and sources.
+//! - At most 65,535 free variables, call or jump arguments, and a
+//!   `set-free` index of at most 65,535.
+//! - A function's [`bounds`](crate::bounds()): the highest slot its converted frame can
+//!   use, which must be addressable, and the most words its converted code
+//!   can take, which must keep every branch offset in range. Both are
+//!   bounds computed from the IR that the converter is guaranteed to stay
+//!   under, not its exact output, which depends on allocation.
 //!
 //! The walk is iterative: no input can make it recurse.
 
@@ -55,8 +67,40 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Checks that `module` is well formed.
+/// Checks that `module` is well formed and within the limits run format
+/// can hold: [`validate_structure`], then [`validate_limits`].
 pub fn validate(module: &Module) -> Result<(), ValidationError> {
+    validate_structure(module)?;
+    validate_limits(module)
+}
+
+/// Checks the limits conversion to run format works within, which
+/// describe how big the module is, not whether it is well formed: a
+/// compiler that makes a module over them has not made a mistake. The
+/// module must be well formed ([`validate_structure`]).
+pub fn validate_limits(module: &Module) -> Result<(), ValidationError> {
+    if module.constants.len() > MAX_CONSTANTS
+        || module.globals.len() > MAX_POOL
+        || module.sources.len() > MAX_POOL
+    {
+        return Err(ValidationError {
+            function: None,
+            message: format!(
+                "more than {MAX_CONSTANTS} constants or {MAX_POOL} globals or sources"
+            ),
+        });
+    }
+    for (n, function) in module.functions.iter().enumerate() {
+        check_limits(function).map_err(|message| ValidationError {
+            function: Some(FunId(n as u32)),
+            message,
+        })?;
+    }
+    Ok(())
+}
+
+/// Checks that `module` is well formed, whatever its size.
+pub fn validate_structure(module: &Module) -> Result<(), ValidationError> {
     let fail = |message: String| ValidationError {
         function: None,
         message,
@@ -103,6 +147,67 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
         };
         check_counts(function).map_err(at)?;
         Checker::new(module, function).run().map_err(at)?;
+    }
+    Ok(())
+}
+
+/// The most constants a module can have: the converter adds one of its own
+/// to a pool of 65,536.
+pub const MAX_CONSTANTS: usize = 65_535;
+
+/// The most globals, or sources, a module can have.
+pub const MAX_POOL: usize = 65_536;
+
+/// The highest slot a converted frame can address.
+pub const MAX_SLOT: usize = 65_534;
+
+/// The most words of run-format code a function can take: a jump's offset
+/// is 24 bits signed, so no branch can span more.
+pub const MAX_CODE_WORDS: u64 = (1 << 23) - 1;
+
+/// The most free variables, arguments or `set-free` index run format holds.
+pub const MAX_COUNT: usize = 65_535;
+
+/// Checks the limits the converter works within for one function.
+fn check_limits(function: &Function) -> Result<(), String> {
+    if function.free.len() > MAX_COUNT {
+        return Err(format!("it has more than {MAX_COUNT} free variables"));
+    }
+    let mut longest = 0;
+    for term in &function.terms {
+        match term {
+            Term::Let {
+                value: Value::SetFree { index, .. },
+                ..
+            } if *index as usize > MAX_COUNT => {
+                return Err(format!("a set-free index above {MAX_COUNT}"));
+            }
+            Term::Let {
+                value: Value::Call { args, .. } | Value::CallDirect { args, .. },
+                ..
+            }
+            | Term::TailCall { args, .. }
+            | Term::TailCallDirect { args, .. }
+            | Term::Jump { args, .. } => longest = longest.max(args.len()),
+            _ => {}
+        }
+    }
+    if longest > MAX_COUNT {
+        return Err(format!("a call with more than {MAX_COUNT} arguments"));
+    }
+    let bounds = crate::bounds(function);
+    if bounds.top_slot > MAX_SLOT {
+        return Err(format!(
+            "it may need {} slots, and a frame has {}: it has too many variables or operands",
+            bounds.top_slot + 1,
+            MAX_SLOT + 1
+        ));
+    }
+    if bounds.code_words > MAX_CODE_WORDS {
+        return Err(format!(
+            "its code may take {} words, and a branch spans at most {MAX_CODE_WORDS}: it has too many terms",
+            bounds.code_words
+        ));
     }
     Ok(())
 }
