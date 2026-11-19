@@ -1,0 +1,5 @@
+[gerrit]
+host=gerrithub.io
+port=29418
+project=go-valkyrie/vali-scheme.git
+defaultbranch=main

@@ -8,6 +8,8 @@ idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
 hk = "2.13.0"
+# Installed on first use (`git review`), not by `mise install`, so CI skips it.
+"pipx:git-review" = { version = "2.5.0", lazy = true, lazy_bins = ["git-review"] }
 "aqua:EmbarkStudios/cargo-deny" = "0.21.0"
 jouet = { version = "latest", workflow = "release.yml@refs/heads/main" }
 
