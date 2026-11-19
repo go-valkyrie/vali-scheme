@@ -803,7 +803,7 @@ impl Expander {
         Ok(if bindings.is_empty() {
             body
         } else {
-            Expr::Letrec(bindings, Box::new(body))
+            self.letrec_expr(bindings, body)
         })
     }
 
@@ -1274,9 +1274,20 @@ impl Expander {
             .map(|f| self.add(f, scope))
             .collect::<Result<Vec<_>>>()?;
         let body = self.body(body, false, span)?;
-        Ok(Expr::Letrec(
-            vars.into_iter().zip(inits).collect(),
-            Box::new(body),
-        ))
+        Ok(self.letrec_expr(vars.into_iter().zip(inits).collect(), body))
+    }
+
+    /// A `letrec*` over `bindings`. Lowering patches a closure that
+    /// captured a variable early only when the closure is the binding's
+    /// own value. A captured variable with any other value may be seen by
+    /// a closure made inside that value, which nothing patches, so it
+    /// lives in a box that is filled once the value is computed.
+    fn letrec_expr(&mut self, bindings: Vec<(VarId, Expr)>, body: Expr) -> Expr {
+        for (v, init) in &bindings {
+            if self.vars[*v].captured && !matches!(init, Expr::Lambda(_)) {
+                self.vars[*v].assigned = true;
+            }
+        }
+        Expr::Letrec(bindings, Box::new(body))
     }
 }
