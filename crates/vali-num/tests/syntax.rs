@@ -78,6 +78,16 @@ fn decimals_are_inexact_and_print_shortest() {
     reads_as("1e3", "1000.0");
     reads_as("1E3", "1000.0");
     reads_as("1.5e-3", "0.0015");
+    // The R5RS exponent markers mean the same as e, in either case.
+    for marker in ["s", "S", "f", "F", "d", "D", "l", "L"] {
+        reads_as(&format!("1{marker}2"), "100.0");
+        reads_as(&format!("1.5{marker}-1"), "0.15");
+        reads_as(&format!(".5{marker}+1"), "5.0");
+        reads_as(&format!("#e1{marker}2"), "100");
+        reads_as(&format!("#d1{marker}2"), "100.0");
+    }
+    reads_as("1s2+1.0i", "100.0+1.0i");
+    reads_as("1.0+1s2i", "1.0+100.0i");
     reads_as("-0.0", "-0.0");
     reads_as("1e20", "100000000000000000000.0");
     reads_as("1e21", "1e21");
@@ -109,6 +119,11 @@ fn decimals_only_in_radix_ten() {
     fails("#x1.5", ParseErrorKind::DecimalInRadix);
     // In binary, `e` is not a digit, so `1e2` is not a number.
     fails("#b1e2", ParseErrorKind::Syntax);
+    // In hexadecimal, d and f are digits and e is too, never exponents.
+    reads_as("#x1d2", "466");
+    reads_as("#x1f2", "498");
+    reads_as("#x1e2", "482");
+    fails("#x1s2", ParseErrorKind::Syntax);
 }
 
 #[test]

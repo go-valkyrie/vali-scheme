@@ -312,7 +312,9 @@ impl<'a> Parser<'a> {
             }
             Some(b'.') if self.radix != 10 => Err(self.error(ParseErrorKind::DecimalInRadix)),
             Some(b'.') => self.decimal(start, integer),
-            Some(b'e') if self.radix == 10 && !integer.is_empty() && self.exponent_follows() => {
+            Some(b'e' | b's' | b'f' | b'd' | b'l')
+                if self.radix == 10 && !integer.is_empty() && self.exponent_follows() =>
+            {
                 self.decimal(start, integer)
             }
             _ if integer.is_empty() => Err(self.error(ParseErrorKind::Syntax)),
@@ -320,8 +322,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the text at the cursor is `e` followed by an optional sign
-    /// and a digit.
+    /// Whether the text at the cursor is an exponent marker (`e`, or the
+    /// R5RS `s`, `f`, `d` and `l`, which mean the same) followed by an
+    /// optional sign and a digit.
     fn exponent_follows(&self) -> bool {
         let mut i = self.pos + 1;
         if matches!(self.s.get(i), Some(b'+' | b'-')) {
@@ -343,7 +346,7 @@ impl<'a> Parser<'a> {
         }
         let mut exponent = "";
         let mut exponent_negative = false;
-        if self.peek() == Some(b'e') {
+        if matches!(self.peek(), Some(b'e' | b's' | b'f' | b'd' | b'l')) {
             if !self.exponent_follows() {
                 return Err(self.error(ParseErrorKind::Syntax));
             }
