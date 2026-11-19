@@ -348,7 +348,7 @@ fn set_raise_handler<S: Strategy>(cx: &mut Cx<S>, args: &[Value]) -> Result<Valu
     let raise = args[0];
     // SAFETY: a valid value.
     let ok = matches!(unsafe { cx.procedure_code(raise) }, Ok(code)
-        if matches!(code.kind, crate::code::Kind::Bytecode { .. }) && code.arity.accepts(1));
+        if code.is_scheme() && code.arity.accepts(1));
     if !ok {
         return Err(crate::vm::wrong_type(
             cx,
