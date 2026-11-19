@@ -23,12 +23,13 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 use vali_dist as ir;
 
 use crate::{
     Arity, Constant, Function, FunctionBuilder, Inlined, Instruction as I, Label, Module,
-    ModuleBuilder, Slot,
+    ModuleBuilder, Shape, Slot,
 };
 
 /// Why a module could not be converted.
@@ -57,6 +58,157 @@ const TOP: usize = u16::MAX as usize - 1;
 
 /// Converts `module`, which is first validated.
 pub fn convert(module: &ir::Module) -> std::result::Result<Module, ConvertError> {
+    let (mut b, marks) = prepare(module)?;
+    let tables = marks.tables(module);
+    for (n, function) in module.functions.iter().enumerate() {
+        let converted = convert_checked(&tables, n, function)?;
+        b.define(marks.functions[n], converted);
+    }
+    Ok(finish(b, module, &marks))
+}
+
+/// A module whose functions are converted one at a time, as they are first
+/// called (ADR 0017 #2): its body is converted, since it runs as the module
+/// loads, and every other function stands with its name, arity and free
+/// variables and no code. Beyond what [`vali_dist::validate`] checks of the
+/// IR, which makes conversion fail only on a converter bug, the code of
+/// each function is checked by [`Converter::convert`] as it is made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LazyModule {
+    /// The module as far as it is converted: its pool, variables, exports
+    /// and sources are complete, and every function but the body has no
+    /// code.
+    pub module: Module,
+    /// What converts the rest.
+    pub converter: Converter,
+}
+
+/// What converts a [`LazyModule`]'s functions: the IR, and the module's
+/// tables its code indexes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Converter {
+    source: Arc<ir::Module>,
+    marks: Marks,
+}
+
+impl Converter {
+    /// Converts function `index` and checks the result against `shape`, the
+    /// module's, as [`validate`](crate::validate) checks the functions of a
+    /// module made whole.
+    pub fn convert(
+        &self,
+        shape: &Shape<'_>,
+        index: u32,
+    ) -> std::result::Result<Function, ConvertError> {
+        let n = index as usize;
+        let Some(function) = self.source.functions.get(n) else {
+            return Err(ConvertError {
+                function: Some(index),
+                message: "there is no such function".into(),
+            });
+        };
+        let converted = convert_checked(&self.marks.tables(&self.source), n, function)?;
+        crate::validate::check_function(shape, index, &converted, false).map_err(|e| {
+            ConvertError {
+                function: Some(index),
+                message: format!("the converted code is invalid: {e}"),
+            }
+        })?;
+        Ok(converted)
+    }
+}
+
+/// Converts `ir`, which is first validated, for its functions to convert one
+/// at a time: only the body is, now.
+pub fn convert_lazy(ir: Arc<ir::Module>) -> std::result::Result<LazyModule, ConvertError> {
+    let (mut b, marks) = prepare(&ir)?;
+    let body = ir.body.0 as usize;
+    let tables = marks.tables(&ir);
+    for (n, function) in ir.functions.iter().enumerate() {
+        let converted = if n == body {
+            convert_checked(&tables, n, function)?
+        } else {
+            stub(function)
+        };
+        b.define(marks.functions[n], converted);
+    }
+    let module = finish(b, &ir, &marks);
+    Ok(LazyModule {
+        module,
+        converter: Converter { source: ir, marks },
+    })
+}
+
+/// A function with no code: all that a module not converted yet has to say
+/// of its functions.
+fn stub(f: &ir::Function) -> Function {
+    Function {
+        name: f.name.clone(),
+        arity: arity_of(f),
+        slots: 0,
+        free: u16::try_from(f.free.len()).expect("the validator bounds free variables"),
+        code: Vec::new(),
+        positions: Vec::new(),
+        inlined: Vec::new(),
+        scopes: Vec::new(),
+    }
+}
+
+fn arity_of(f: &ir::Function) -> Arity {
+    Arity {
+        required: f.arity.required,
+        optional: f.arity.optional,
+        rest: f.arity.rest,
+    }
+}
+
+/// `convert_function`, failing as a converter bug: the validator refuses
+/// what conversion cannot do (ADR 0017 #13).
+fn convert_checked(
+    tables: &Tables<'_>,
+    n: usize,
+    function: &ir::Function,
+) -> std::result::Result<Function, ConvertError> {
+    convert_function(tables, function).map_err(|message| {
+        debug_assert!(
+            false,
+            "conversion failed on validated IR, function f{n}: {message}"
+        );
+        ConvertError {
+            function: Some(n as u32),
+            message,
+        }
+    })
+}
+
+/// Where a module's constants, variables and sources went in the run-format
+/// module, by their numbers in the IR.
+#[derive(Clone, Debug, PartialEq)]
+struct Marks {
+    constants: Vec<u16>,
+    variables: Vec<u16>,
+    sources: Vec<u16>,
+    /// The unspecified value's constant.
+    unspecified: u16,
+    /// The run-format index of each function.
+    functions: Vec<u32>,
+}
+
+impl Marks {
+    fn tables<'a>(&'a self, module: &'a ir::Module) -> Tables<'a> {
+        Tables {
+            module,
+            constants: &self.constants,
+            variables: &self.variables,
+            sources: &self.sources,
+            unspecified: self.unspecified,
+        }
+    }
+}
+
+/// Validates `module`, and builds its pool, variables and sources, and
+/// declares its functions.
+fn prepare(module: &ir::Module) -> std::result::Result<(ModuleBuilder, Marks), ConvertError> {
     let fail = |message: String| ConvertError {
         function: None,
         message,
@@ -96,32 +248,26 @@ pub fn convert(module: &ir::Module) -> std::result::Result<Module, ConvertError>
         })
         .collect();
     let sources: Vec<u16> = module.sources.iter().map(|s| b.source(s)).collect();
-    let indexes: Vec<u32> = module.functions.iter().map(|_| b.declare()).collect();
-    let tables = Tables {
-        module,
-        constants: &constants,
-        variables: &variables,
-        sources: &sources,
-        unspecified,
-    };
-    for (n, function) in module.functions.iter().enumerate() {
-        let converted = convert_function(&tables, function).map_err(|message| {
-            // The validator refuses what conversion cannot do (ADR 0017 #13).
-            debug_assert!(
-                false,
-                "conversion failed on validated IR, function f{n}: {message}"
-            );
-            ConvertError {
-                function: Some(n as u32),
-                message,
-            }
-        })?;
-        b.define(indexes[n], converted);
-    }
+    let functions: Vec<u32> = module.functions.iter().map(|_| b.declare()).collect();
+    Ok((
+        b,
+        Marks {
+            constants,
+            variables,
+            sources,
+            unspecified,
+            functions,
+        },
+    ))
+}
+
+/// The module `b` built, once its functions are defined, exporting what
+/// `module` does.
+fn finish(mut b: ModuleBuilder, module: &ir::Module, marks: &Marks) -> Module {
     for (name, global) in &module.exports {
-        b.export(name, variables[global.0 as usize]);
+        b.export(name, marks.variables[global.0 as usize]);
     }
-    Ok(b.finish(indexes[module.body.0 as usize]))
+    b.finish(marks.functions[module.body.0 as usize])
 }
 
 /// A constant as run format's, built iteratively.
@@ -821,11 +967,7 @@ fn call_hints(
 
 fn convert_function(tables: &Tables<'_>, f: &ir::Function) -> Result<Function> {
     let (a, slots, cover, bases) = allocation(f)?;
-    let arity = Arity {
-        required: f.arity.required,
-        optional: f.arity.optional,
-        rest: f.arity.rest,
-    };
+    let arity = arity_of(f);
     let free = u16::try_from(f.free.len()).map_err(|_| "too many free variables".to_owned())?;
     let mut free_index = vec![None; f.vars as usize];
     for (i, v) in f.free.iter().enumerate() {

@@ -43,22 +43,22 @@ use crate::module::{Arity, Function, Module, branch_target};
 
 /// The module's functions, rewritten. `module` must be valid.
 pub fn insert(module: &Module) -> Result<Vec<Function>, BuildError> {
-    module
-        .functions
-        .iter()
-        .map(|f| {
-            let rewritten = rewrite(f)?;
-            if cfg!(debug_assertions)
-                && let Err(e) = check(&rewritten)
-            {
-                panic!(
-                    "the ownership pass broke its contract in {}: {e}",
-                    f.name.as_deref().unwrap_or("<anonymous>")
-                );
-            }
-            Ok(rewritten)
-        })
-        .collect()
+    module.functions.iter().map(insert_one).collect()
+}
+
+/// `function`, rewritten, which must be valid: what [`insert`] does to each
+/// of a module's functions, for a module that converts them one by one.
+pub fn insert_one(function: &Function) -> Result<Function, BuildError> {
+    let rewritten = rewrite(function)?;
+    if cfg!(debug_assertions)
+        && let Err(e) = check(&rewritten)
+    {
+        panic!(
+            "the ownership pass broke its contract in {}: {e}",
+            function.name.as_deref().unwrap_or("<anonymous>")
+        );
+    }
+    Ok(rewritten)
 }
 
 /// A set of slots, one bit each. Slot 0 is never in one.
