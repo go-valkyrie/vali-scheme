@@ -211,6 +211,33 @@ impl PageHeap {
         self.source.bytes_used()
     }
 
+    /// Charges memory held outside the heap against its limit. When the
+    /// pages and the charges would pass it, gives empty pages back to the
+    /// source, one at a time, until they fit; with none left to give, it
+    /// fails (ADR 0023).
+    pub fn charge_external(&mut self, bytes: usize) -> Result<(), OutOfMemory> {
+        loop {
+            if self.source.charge_external(bytes).is_ok() {
+                return Ok(());
+            }
+            let Some(page) = self.empty.pop() else {
+                return Err(OutOfMemory);
+            };
+            // SAFETY: a page on the empty list holds no live block, is no
+            // class's current page and is in no other list, so nothing
+            // refers to it; it came from the source as a page.
+            unsafe {
+                self.source
+                    .free_large(NonNull::new_unchecked(page.cast()), PAGE_BYTES)
+            };
+        }
+    }
+
+    /// Gives back what `charge_external` charged.
+    pub fn release_external(&mut self, bytes: usize) {
+        self.source.release_external(bytes);
+    }
+
     /// How many bytes live objects take.
     pub fn bytes_live(&self) -> usize {
         self.live

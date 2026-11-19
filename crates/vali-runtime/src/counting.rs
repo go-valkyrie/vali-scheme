@@ -409,6 +409,14 @@ unsafe impl<const SIDE_COUNTS: bool, const PRECISE: bool> Allocate
         heap.pages.bytes_used()
     }
 
+    fn charge_external(heap: &mut CountingHeap, bytes: usize) -> Result<(), OutOfMemory> {
+        heap.pages.charge_external(bytes)
+    }
+
+    fn release_external(heap: &mut CountingHeap, bytes: usize) {
+        heap.pages.release_external(bytes);
+    }
+
     fn pool_pair_page(
         heap: &mut CountingHeap,
         words: usize,

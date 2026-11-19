@@ -34,7 +34,7 @@
 pub use vali_macros::{bridge, object};
 pub use vali_num::{Complex, Integer, Number, Rational};
 pub use vali_runtime::{
-    Cx, DefaultStrategy, Error, Frame, Handle, HeapConfig, Isolate, OutOfMemory, Position,
+    Cx, DefaultStrategy, Error, Frame, Handle, HeapConfig, Isolate, Limit, OutOfMemory, Position,
     SchemeError, Value,
 };
 

@@ -203,6 +203,8 @@ fn prepare<S: Strategy>(
         }
     };
     evaluator.count += 1;
+    // The macros it runs are held to the caps the host set (ADR 0023).
+    evaluator.expander.set_caps(&cx.config());
     let identity = Identity::new(&format!("eval:{}", evaluator.count));
     let program = loader::Program {
         libraries: Vec::new(),

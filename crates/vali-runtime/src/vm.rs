@@ -846,10 +846,32 @@ impl<S: Strategy> Cx<S> {
         unsafe { self.string_str(Value::from_raw(get(v, Self::LAYOUT.symbol_name()))) }
     }
 
-    pub(crate) fn intern(&mut self, name: &str) -> Result<Value, OutOfMemory> {
+    pub(crate) fn intern(&mut self, name: &str) -> Result<Value, Error> {
+        self.intern_with(name, true)
+    }
+
+    /// The symbol named `name` for the runtime's own use, such as the names
+    /// of its error-object type: not stopped by `max_symbols`, so that the
+    /// error a cap raises can always be built. There are only a few.
+    pub(crate) fn intern_internal(&mut self, name: &str) -> Result<Value, Error> {
+        self.intern_with(name, false)
+    }
+
+    fn intern_with(&mut self, name: &str, limited: bool) -> Result<Value, Error> {
         if let Some(&v) = self.symbols.get(name) {
             return Ok(v);
         }
+        if limited {
+            self.reserve_name(name)?;
+        }
+        let made = self.new_symbol(name);
+        if made.is_err() && limited {
+            self.release_rust_bytes(crate::cx::name_entry_bytes(name));
+        }
+        made
+    }
+
+    fn new_symbol(&mut self, name: &str) -> Result<Value, Error> {
         let string = self.string_raw(name, true)?;
         let v = self.new_object(TypeCode::Symbol, 2, data::symbol::INTERNED)?;
         // SAFETY: the symbol was just allocated with both fields.
