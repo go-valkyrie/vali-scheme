@@ -8,6 +8,14 @@
 
 use super::*;
 
+/// What `fetch_includes` collects: the files included, the answers to the
+/// libraries asked about, and which names this walk asked about.
+pub(super) struct Found<'a> {
+    pub(super) includes: &'a mut Includes,
+    pub(super) available: &'a mut Available,
+    pub(super) asked: &'a mut Vec<LibraryName>,
+}
+
 /// A library in the import graph.
 #[derive(Clone, Debug)]
 pub(crate) struct Library {
@@ -377,9 +385,13 @@ pub(super) async fn fetch_includes(
     loader: &impl Fetch,
     local: &HashSet<LibraryName>,
     known: &impl Fn(&LibraryName) -> bool,
-    includes: &mut Includes,
-    available: &mut Available,
+    found: Found<'_>,
 ) {
+    let Found {
+        includes,
+        available,
+        asked: asked_of,
+    } = found;
     // The forms are walked by reference, so a deeply nested form costs
     // its size, not its size times its depth. What an included file reads
     // as is owned, so it waits in `included` for a walk of its own.
@@ -412,6 +424,7 @@ pub(super) async fn fetch_includes(
                                     let _ = crate::features::libraries(requirement, &mut asked);
                                 }
                             }
+                            asked_of.extend(asked.iter().cloned());
                             for name in asked {
                                 if available.contains_key(&name) {
                                     continue;
@@ -558,8 +571,11 @@ pub(super) async fn walk(
         loader,
         &names,
         known,
-        &mut includes,
-        &mut available,
+        Found {
+            includes: &mut includes,
+            available: &mut available,
+            asked: &mut Vec::new(),
+        },
     )
     .await;
     // Found libraries, unordered, and each name's place among them.
@@ -640,6 +656,7 @@ pub(super) async fn walk(
         for import in imports.iter().rev() {
             work.push((import.clone(), Some(library_identity.clone())));
         }
+        let mut asked = Vec::new();
         if let Some(form) = &form {
             fetch_includes(
                 &form.body,
@@ -647,11 +664,16 @@ pub(super) async fn walk(
                 loader,
                 &names,
                 known,
-                &mut includes,
-                &mut available,
+                Found {
+                    includes: &mut includes,
+                    available: &mut available,
+                    asked: &mut asked,
+                },
             )
             .await;
         }
+        asked.sort();
+        asked.dedup();
         // Included files read along with its body are part of its source.
         let source = fingerprint.map(|mut fingerprint| {
             let mut read: Vec<_> = includes
@@ -671,6 +693,12 @@ pub(super) async fn walk(
                         fingerprint.field(why.as_bytes());
                     }
                 }
+            }
+            // What its body's `cond-expand`s found about libraries, which
+            // its expansion followed.
+            for name in &asked {
+                fingerprint.field(name.to_string().as_bytes());
+                fingerprint.update(&[u8::from(available.get(name) == Some(&true))]);
             }
             fingerprint.finish()
         });
