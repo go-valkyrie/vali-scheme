@@ -78,3 +78,51 @@ pub(crate) struct Lambda {
     /// variables.
     pub(crate) free: Vec<VarId>,
 }
+
+impl Expr {
+    /// Moves the expressions directly inside this one into `out`, leaving
+    /// it with none.
+    fn take_children(&mut self, out: &mut Vec<Expr>) {
+        let mut take = |e: &mut Expr| out.push(std::mem::replace(e, Expr::Unspecified));
+        match self {
+            Expr::SetLocal(_, e) | Expr::SetGlobal(_, e) | Expr::SetFree(_, e) => take(e),
+            Expr::If(test, then, otherwise) => {
+                take(test);
+                take(then);
+                take(otherwise);
+            }
+            Expr::Begin(exprs) => exprs.iter_mut().for_each(take),
+            Expr::Let(inits, body) | Expr::Letrec(inits, body) => {
+                inits.iter_mut().for_each(|(_, init)| take(init));
+                take(body);
+            }
+            Expr::Call(callee, args, _) => {
+                take(callee);
+                args.iter_mut().for_each(take);
+            }
+            Expr::Unspecified
+            | Expr::Const(_)
+            | Expr::Local(_)
+            | Expr::Global(_)
+            | Expr::Free(_)
+            | Expr::ReplGlobal(_)
+            | Expr::Imported(..)
+            | Expr::Lambda(_) => {}
+        }
+    }
+}
+
+/// Frees the expressions inside one at a time, from a list of its own, so
+/// that dropping an expression nested thousands deep cannot overflow the
+/// stack.
+impl Drop for Expr {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children(&mut pending);
+        while let Some(mut expr) = pending.pop() {
+            // `expr` is left without children, so dropping it at the end of
+            // this iteration recurses no further.
+            expr.take_children(&mut pending);
+        }
+    }
+}

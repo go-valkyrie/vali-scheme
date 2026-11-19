@@ -131,49 +131,68 @@ impl<S: Strategy> Printer<'_, S> {
         }
     }
 
+    /// Prints `v`. Nested pairs and vectors wait on a work list of their
+    /// own, so a deeply nested value cannot overflow the Rust stack.
     fn print(&mut self, v: Value) {
-        if v.is_pair() {
-            if self.label(v) {
-                return;
-            }
-            self.out.push('(');
-            let mut v = v;
-            loop {
-                // SAFETY: `v` is a live pair.
-                let (car, cdr) = unsafe { (self.cx.car(v), self.cx.cdr(v)) };
-                self.print(car);
-                if cdr == Value::EMPTY_LIST {
-                    break;
-                }
-                // A labelled pair in the tail must print as a dotted pair, so
-                // its label has somewhere to go.
-                if cdr.is_pair() && !self.labels.contains_key(&cdr.raw()) {
-                    self.out.push(' ');
-                    v = cdr;
-                    continue;
-                }
-                self.out.push_str(" . ");
-                self.print(cdr);
-                break;
-            }
-            self.out.push(')');
-            return;
+        /// What is left to print.
+        enum Task {
+            /// A value.
+            Value(Value),
+            /// Fixed text.
+            Text(&'static str),
+            /// The rest of a list, after the car of this pair.
+            Tail(Value),
         }
-        if self.is_vector(v) {
-            if self.label(v) {
-                return;
-            }
-            self.out.push_str("#(");
-            for (i, item) in self.children(v).into_iter().enumerate() {
-                if i > 0 {
-                    self.out.push(' ');
+        let mut work = vec![Task::Value(v)];
+        while let Some(task) = work.pop() {
+            match task {
+                Task::Text(text) => self.out.push_str(text),
+                Task::Value(v) if v.is_pair() => {
+                    if self.label(v) {
+                        continue;
+                    }
+                    self.out.push('(');
+                    // SAFETY: `v` is a live pair.
+                    let car = unsafe { self.cx.car(v) };
+                    work.push(Task::Text(")"));
+                    work.push(Task::Tail(v));
+                    work.push(Task::Value(car));
                 }
-                self.print(item);
+                Task::Value(v) if self.is_vector(v) => {
+                    if self.label(v) {
+                        continue;
+                    }
+                    self.out.push_str("#(");
+                    work.push(Task::Text(")"));
+                    for (i, item) in self.children(v).into_iter().enumerate().rev() {
+                        work.push(Task::Value(item));
+                        if i > 0 {
+                            work.push(Task::Text(" "));
+                        }
+                    }
+                }
+                Task::Value(v) => self.atom(v),
+                Task::Tail(pair) => {
+                    // SAFETY: `pair` is a live pair.
+                    let cdr = unsafe { self.cx.cdr(pair) };
+                    if cdr == Value::EMPTY_LIST {
+                        continue;
+                    }
+                    // A labelled pair in the tail must print as a dotted
+                    // pair, so its label has somewhere to go.
+                    if cdr.is_pair() && !self.labels.contains_key(&cdr.raw()) {
+                        // SAFETY: `cdr` is a live pair.
+                        let car = unsafe { self.cx.car(cdr) };
+                        work.push(Task::Tail(cdr));
+                        work.push(Task::Value(car));
+                        work.push(Task::Text(" "));
+                    } else {
+                        work.push(Task::Value(cdr));
+                        work.push(Task::Text(" . "));
+                    }
+                }
             }
-            self.out.push(')');
-            return;
         }
-        self.atom(v);
     }
 
     fn atom(&mut self, v: Value) {

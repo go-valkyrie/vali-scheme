@@ -71,7 +71,7 @@ impl Arity {
 }
 
 /// A constant in a module's pool.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Constant {
     /// An exact integer that fits in 64 bits.
     Integer(i64),
@@ -117,6 +117,151 @@ impl Constant {
             Constant::Vector(items) => out.append(items),
             _ => {}
         }
+    }
+}
+
+impl Constant {
+    /// The `index`th constant inside this one, if it has one.
+    fn part(&self, index: usize) -> Option<&Constant> {
+        match self {
+            Constant::Ratio(a, b) | Constant::Complex(a, b) | Constant::Pair(a, b) => {
+                [&**a, &**b].get(index).copied()
+            }
+            Constant::Vector(items) => items.get(index),
+            _ => None,
+        }
+    }
+
+    /// A copy of a constant with nothing inside, or `None` if it has parts.
+    fn clone_leaf(&self) -> Option<Constant> {
+        Some(match self {
+            Constant::Integer(n) => Constant::Integer(*n),
+            Constant::Bignum { negative, limbs } => Constant::Bignum {
+                negative: *negative,
+                limbs: limbs.clone(),
+            },
+            Constant::Flonum(x) => Constant::Flonum(*x),
+            Constant::Boolean(b) => Constant::Boolean(*b),
+            Constant::Character(c) => Constant::Character(*c),
+            Constant::EmptyList => Constant::EmptyList,
+            Constant::Unspecified => Constant::Unspecified,
+            Constant::String(s) => Constant::String(s.clone()),
+            Constant::Symbol(s) => Constant::Symbol(s.clone()),
+            Constant::Keyword(s) => Constant::Keyword(s.clone()),
+            Constant::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
+            Constant::Ratio(..)
+            | Constant::Complex(..)
+            | Constant::Pair(..)
+            | Constant::Vector(_) => {
+                return None;
+            }
+        })
+    }
+
+    /// A constant shaped like `self` from copies of its parts, in order.
+    fn rebuild(&self, mut parts: Vec<Constant>) -> Constant {
+        let mut two = || {
+            let b = Box::new(parts.pop().expect("two parts"));
+            let a = Box::new(parts.pop().expect("two parts"));
+            (a, b)
+        };
+        match self {
+            Constant::Ratio(..) => {
+                let (a, b) = two();
+                Constant::Ratio(a, b)
+            }
+            Constant::Complex(..) => {
+                let (a, b) = two();
+                Constant::Complex(a, b)
+            }
+            Constant::Pair(..) => {
+                let (a, b) = two();
+                Constant::Pair(a, b)
+            }
+            _ => Constant::Vector(parts),
+        }
+    }
+}
+
+/// Copies with a stack of its own, so that a long or deeply nested
+/// constant, such as a quoted list of thousands of elements, cannot
+/// overflow the native stack.
+impl Clone for Constant {
+    fn clone(&self) -> Constant {
+        // The constants being copied, each with the index of its next part
+        // and the copies of its parts so far.
+        let mut stack: Vec<(&Constant, usize, Vec<Constant>)> = Vec::new();
+        let mut copy = match self.clone_leaf() {
+            Some(leaf) => Some(leaf),
+            None => {
+                stack.push((self, 0, Vec::new()));
+                None
+            }
+        };
+        loop {
+            let Some((node, next, done)) = stack.last_mut() else {
+                return copy.expect("the root copied");
+            };
+            if let Some(part) = copy.take() {
+                done.push(part);
+            }
+            match node.part(*next) {
+                Some(part) => {
+                    *next += 1;
+                    match part.clone_leaf() {
+                        Some(leaf) => copy = Some(leaf),
+                        None => stack.push((part, 0, Vec::new())),
+                    }
+                }
+                None => {
+                    let (node, _, done) = stack.pop().expect("a node being copied");
+                    copy = Some(node.rebuild(done));
+                }
+            }
+        }
+    }
+}
+
+/// Compares with a stack of its own, as [`Clone`] copies.
+impl PartialEq for Constant {
+    fn eq(&self, other: &Constant) -> bool {
+        let mut pending = vec![(self, other)];
+        while let Some((a, b)) = pending.pop() {
+            match (a, b) {
+                (Constant::Integer(x), Constant::Integer(y)) if x == y => {}
+                (
+                    Constant::Bignum {
+                        negative: n,
+                        limbs: x,
+                    },
+                    Constant::Bignum {
+                        negative: m,
+                        limbs: y,
+                    },
+                ) if n == m && x == y => {}
+                (Constant::Flonum(x), Constant::Flonum(y)) if x == y => {}
+                (Constant::Boolean(x), Constant::Boolean(y)) if x == y => {}
+                (Constant::Character(x), Constant::Character(y)) if x == y => {}
+                (Constant::EmptyList, Constant::EmptyList)
+                | (Constant::Unspecified, Constant::Unspecified) => {}
+                (Constant::String(x), Constant::String(y))
+                | (Constant::Symbol(x), Constant::Symbol(y))
+                | (Constant::Keyword(x), Constant::Keyword(y))
+                    if x == y => {}
+                (Constant::Bytevector(x), Constant::Bytevector(y)) if x == y => {}
+                (Constant::Ratio(a1, a2), Constant::Ratio(b1, b2))
+                | (Constant::Complex(a1, a2), Constant::Complex(b1, b2))
+                | (Constant::Pair(a1, a2), Constant::Pair(b1, b2)) => {
+                    pending.push((a2, b2));
+                    pending.push((a1, b1));
+                }
+                (Constant::Vector(x), Constant::Vector(y)) if x.len() == y.len() => {
+                    pending.extend(x.iter().zip(y).rev());
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 }
 

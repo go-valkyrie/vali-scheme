@@ -555,6 +555,171 @@ fn deeply_nested_code_compiles() {
     check(&[(&source, "999")]);
 }
 
+/// Source nested or long past what a recursive pass could take on a test
+/// thread's 2 MiB stack, whether it is quoted data or code. Nothing here
+/// may abort the process.
+#[test]
+fn deep_and_long_source_compiles() {
+    let deep_data =
+        |open: &str, close: &str| format!("{}{}", open.repeat(100_000), close.repeat(100_000));
+    let long = "1 ".repeat(300_000);
+    check(&[
+        // A quoted datum 100,000 deep, as lists and as vectors, and a quoted
+        // list or vector of 300,000 elements.
+        (&format!("(length (quote {}))", deep_data("(", ")")), "1"),
+        (
+            &format!("(vector-length (quote {}))", deep_data("#(", ")")),
+            "1",
+        ),
+        (&format!("(length '({long}))"), "300000"),
+        (&format!("(vector-length '#({long}))"), "300000"),
+        // The same inside a procedure.
+        (
+            &format!("(define (f) (quote {})) (length (f))", deep_data("(", ")")),
+            "1",
+        ),
+        // A procedure whose body is 20,000 `if`s deep, and one 20,000 calls
+        // deep.
+        (
+            &format!(
+                "(define (f x) {}1{}) (f #t)",
+                "(if x ".repeat(100_000),
+                " 2)".repeat(100_000)
+            ),
+            "1",
+        ),
+        (
+            &format!(
+                "(define (f x) {}x{}) (f 1)",
+                "(+ 1 ".repeat(100_000),
+                ")".repeat(100_000)
+            ),
+            "100001",
+        ),
+        // Derived forms nest as macro uses, each inside the previous
+        // one's expansion, to the macro step limit.
+        (
+            &format!(
+                "(define (f x) {}x{}) (f 1)",
+                "(and 1 ".repeat(4_000),
+                ")".repeat(4_000)
+            ),
+            "1",
+        ),
+        (
+            &format!(
+                "(define (f x) {}x{}) (f 1)",
+                "(when x ".repeat(4_000),
+                ")".repeat(4_000)
+            ),
+            "1",
+        ),
+        (
+            &format!(
+                "(define (f x) {}x{}) (f 1)",
+                "(begin 1 ".repeat(100_000),
+                ")".repeat(100_000)
+            ),
+            "1",
+        ),
+        // Nested binding forms, fewer since each closes over the ones around
+        // it.
+        (
+            &format!(
+                "(define (f x) {}x{}) (f 1)",
+                "(let ((y x)) ".repeat(2_000),
+                ")".repeat(2_000)
+            ),
+            "1",
+        ),
+        (
+            &format!(
+                "(define (f x) {}x{}) (f 1)",
+                "((lambda (y) ".repeat(2_000),
+                ") x)".repeat(2_000)
+            ),
+            "1",
+        ),
+    ]);
+}
+
+/// Patterns and templates nest to a limit, past which they are a compile
+/// error: they are walked by recursion, which nesting far deeper than any
+/// real macro has would overflow.
+#[test]
+fn patterns_and_templates_nest_to_a_limit() {
+    let compile_error = |source: &str| compile(source, "test").unwrap_err().message;
+    let nested = |n: usize| format!("{}x{}", "(".repeat(n), ")".repeat(n));
+    // A macro whose template, pattern or `syntax-case` pattern is a few
+    // hundred deep expands.
+    check(&[
+        (
+            &format!(
+                "(define-syntax m (syntax-rules () ((_) (quote {})))) (length (m))",
+                nested(500)
+            ),
+            "1",
+        ),
+        (
+            &format!(
+                "(define-syntax m (syntax-rules () ((_ {}) 1))) (m {})",
+                nested(500),
+                nested(500)
+            ),
+            "1",
+        ),
+    ]);
+    // Past the limit it is an error, not an abort.
+    for source in [
+        format!(
+            "(define-syntax m (syntax-rules () ((_) (quote {})))) (m)",
+            nested(100_000)
+        ),
+        format!(
+            "(define-syntax m (syntax-rules () ((_ {}) 1))) (m 1)",
+            nested(100_000)
+        ),
+        format!(
+            "(define-syntax m (lambda (stx) (syntax-case stx () ((_ {}) 1)))) (m 1)",
+            nested(100_000)
+        ),
+        format!(
+            "(define-syntax m (lambda (stx) (syntax-case stx () ((_) #'{})))) (m)",
+            nested(100_000)
+        ),
+    ] {
+        let message = compile_error(&source);
+        assert!(message.contains("levels deep"), "{message}");
+    }
+}
+
+/// `cond-expand` requirements nest as deep as the source, and import sets
+/// to a limit, past which they are a compile error.
+#[test]
+fn deep_requirements_and_import_sets() {
+    let compile_error = |source: &str| compile(source, "test").unwrap_err().message;
+    // Both sides of an even number of `not`s: `r7rs` holds, `no-such-feature`
+    // does not.
+    let nots = |feature: &str| {
+        format!(
+            "{}{feature}{}",
+            "(not ".repeat(100_000),
+            ")".repeat(100_000)
+        )
+    };
+    check(&[
+        (&format!("(cond-expand ({} 1) (else 2))", nots("r7rs")), "1"),
+        (
+            &format!("(cond-expand ({} 1) (else 2))", nots("no-such-feature")),
+            "2",
+        ),
+    ]);
+    let only = |n: usize| format!("{}(scheme base){}", "(only ".repeat(n), " car)".repeat(n));
+    let message = compile_error(&format!("(import {}) 1", only(100_000)));
+    assert!(message.contains("nested more than"), "{message}");
+    check(&[(&format!("(import {}) 1", only(50)), "1")]);
+}
+
 #[test]
 fn transformers_written_in_scheme() {
     check(&[

@@ -243,8 +243,114 @@ impl<S: Strategy> Cx<S> {
         Ok(v)
     }
 
-    /// `constant` as a value, built into the pool.
+    /// `constant` as a value, built into the pool. Pairs and vectors are
+    /// built from a stack of their own, so a long or deeply nested quoted
+    /// datum cannot overflow the native stack.
     pub(crate) fn pool_constant(&mut self, constant: &Constant) -> Result<Value, Error> {
+        /// A pair or vector whose parts are being built.
+        enum Frame<'a> {
+            /// A list, built from the end: its last pair's `cdr` first,
+            /// then each element from the last to the first, each made a
+            /// pair at once.
+            List {
+                /// The elements not built yet, the next one last.
+                cars: Vec<&'a Constant>,
+                tail: &'a Constant,
+                /// The list built so far, once its `cdr` is.
+                rest: Option<Value>,
+            },
+            /// A vector's elements, built in order.
+            Vector {
+                items: &'a [Constant],
+                values: Vec<Value>,
+            },
+        }
+        let mut stack: Vec<Frame<'_>> = Vec::new();
+        let mut built = None;
+        let mut enter = Some(constant);
+        loop {
+            if let Some(constant) = enter.take() {
+                match constant {
+                    Constant::Pair(..) => {
+                        // A list's spine is walked, not recursed into.
+                        let mut cars = Vec::new();
+                        let mut tail = constant;
+                        while let Constant::Pair(car, cdr) = tail {
+                            cars.push(&**car);
+                            tail = cdr;
+                        }
+                        stack.push(Frame::List {
+                            cars,
+                            tail,
+                            rest: None,
+                        });
+                    }
+                    Constant::Vector(items) => stack.push(Frame::Vector {
+                        items,
+                        values: Vec::with_capacity(items.len()),
+                    }),
+                    leaf => built = Some(self.pool_leaf(leaf)?),
+                }
+            }
+            let Some(top) = stack.last_mut() else {
+                return Ok(built.expect("the constant built"));
+            };
+            if let Some(value) = built.take() {
+                match top {
+                    Frame::List { rest, .. } => match rest.take() {
+                        // The `cdr`.
+                        None => *rest = Some(value),
+                        Some(cdr) => {
+                            let v = self.pool_object(TypeCode::Pair, 2, 0)?;
+                            // SAFETY: a pair has both fields; both values
+                            // are valid.
+                            unsafe {
+                                self.pool_store(v, Self::LAYOUT.car(), value);
+                                self.pool_store(v, Self::LAYOUT.cdr(), cdr);
+                            }
+                            *rest = Some(v);
+                        }
+                    },
+                    Frame::Vector { values, .. } => values.push(value),
+                }
+            }
+            let next = match top {
+                Frame::List { cars, tail, rest } => match rest {
+                    None => Some(*tail),
+                    Some(_) => cars.pop(),
+                },
+                Frame::Vector { items, values } => items.get(values.len()),
+            };
+            if let Some(next) = next {
+                enter = Some(next);
+                continue;
+            }
+            built = Some(match stack.pop().expect("the top frame") {
+                Frame::List { rest, .. } => rest.expect("a list's tail"),
+                Frame::Vector { values, .. } => {
+                    let v =
+                        self.pool_object(TypeCode::Vector, 1 + values.len(), data::IMMUTABLE)?;
+                    // SAFETY: the vector has a length word and an element
+                    // for each value.
+                    unsafe {
+                        put(
+                            v,
+                            Self::LAYOUT.length(TypeCode::Vector),
+                            values.len() as u64,
+                        );
+                        for (i, x) in values.iter().enumerate() {
+                            self.pool_store(v, Self::LAYOUT.vector_element(i), *x);
+                        }
+                    }
+                    v
+                }
+            });
+        }
+    }
+
+    /// `constant`, which has no pairs or vectors in it to build, as a value
+    /// built into the pool.
+    fn pool_leaf(&mut self, constant: &Constant) -> Result<Value, Error> {
         Ok(match constant {
             Constant::Integer(n) => self.pool_integer(&Integer::from(*n))?,
             Constant::Flonum(x) => self.pool_flonum(*x)?,
@@ -273,29 +379,6 @@ impl<S: Strategy> Cx<S> {
             // The isolate's own, interned and held for its life.
             Constant::Symbol(s) => self.intern(s)?,
             Constant::Keyword(s) => self.keyword_raw(s)?,
-            Constant::Pair(..) => {
-                // A list's spine is walked, not recursed into, so a long
-                // quoted list cannot overflow the stack. The last pair's
-                // `cdr` is built first, then each pair back to the first.
-                let mut cars = Vec::new();
-                let mut tail = constant;
-                while let Constant::Pair(car, cdr) = tail {
-                    cars.push(&**car);
-                    tail = cdr;
-                }
-                let mut rest = self.pool_constant(tail)?;
-                for car in cars.into_iter().rev() {
-                    let car = self.pool_constant(car)?;
-                    let v = self.pool_object(TypeCode::Pair, 2, 0)?;
-                    // SAFETY: a pair has both fields; both values are valid.
-                    unsafe {
-                        self.pool_store(v, Self::LAYOUT.car(), car);
-                        self.pool_store(v, Self::LAYOUT.cdr(), rest);
-                    }
-                    rest = v;
-                }
-                rest
-            }
             Constant::Bignum { negative, limbs } => {
                 self.pool_integer(&Integer::from_limbs(*negative, limbs))?
             }
@@ -306,21 +389,8 @@ impl<S: Strategy> Cx<S> {
                 })?;
                 self.pool_number(&n)?
             }
-            Constant::Vector(items) => {
-                let mut elements = Vec::with_capacity(items.len());
-                for item in items {
-                    elements.push(self.pool_constant(item)?);
-                }
-                let v = self.pool_object(TypeCode::Vector, 1 + items.len(), data::IMMUTABLE)?;
-                // SAFETY: the vector has a length word and an element for
-                // each item.
-                unsafe {
-                    put(v, Self::LAYOUT.length(TypeCode::Vector), items.len() as u64);
-                    for (i, x) in elements.iter().enumerate() {
-                        self.pool_store(v, Self::LAYOUT.vector_element(i), *x);
-                    }
-                }
-                v
+            Constant::Pair(..) | Constant::Vector(_) => {
+                unreachable!("`pool_constant` builds the parts of pairs and vectors itself")
             }
         })
     }

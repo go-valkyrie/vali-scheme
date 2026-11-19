@@ -22,7 +22,7 @@ use vali_dist::{
     Module, Operand, Position, Primitive, Term, TermId, Value, Var,
 };
 use vali_num::Number;
-use vali_syntax::{Datum, DatumKind, Sources, Span};
+use vali_syntax::{Datum, DatumKind, Sources, Span, Split, TreeMap, map_tree};
 
 use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
@@ -176,37 +176,62 @@ fn number_constant(n: &Number) -> Constant {
     }
 }
 
-/// A datum as a constant.
+/// A datum as a constant. Walks the datum with a stack of its own, so that a
+/// long or deeply nested quoted datum cannot overflow the native stack.
 fn constant(d: &Datum) -> Result<Constant> {
-    Ok(match &d.kind {
-        DatumKind::Number(n) => number_constant(n),
-        DatumKind::Boolean(b) => Constant::Boolean(*b),
-        DatumKind::Character(c) => Constant::Character(*c),
-        DatumKind::String(s) => Constant::String(s.as_str().into()),
-        DatumKind::Symbol(s) => Constant::Symbol(s.as_str().into()),
-        DatumKind::List { items, tail } => {
-            let mut list = match tail {
-                Some(t) => constant(t)?,
-                None => Constant::EmptyList,
-            };
-            for item in items.iter().rev() {
-                list = Constant::Pair(Box::new(constant(item)?), Box::new(list));
+    map_tree(&mut Constants, d)
+}
+
+/// [`constant`]'s mapping from datums to constants.
+struct Constants;
+
+impl<'a> TreeMap<'a> for Constants {
+    type Src = Datum;
+    type Out = Constant;
+    type Error = CompileError;
+
+    fn split(&mut self, d: &'a Datum) -> Result<Split<'a, Datum, Constant>> {
+        Ok(Split::Leaf(match &d.kind {
+            DatumKind::Number(n) => number_constant(n),
+            DatumKind::Boolean(b) => Constant::Boolean(*b),
+            DatumKind::Character(c) => Constant::Character(*c),
+            DatumKind::String(s) => Constant::String(s.as_str().into()),
+            DatumKind::Symbol(s) => Constant::Symbol(s.as_str().into()),
+            DatumKind::List { items, tail } => {
+                return Ok(Split::List {
+                    items: items.iter().collect(),
+                    tail: tail.as_deref(),
+                });
             }
-            list
+            DatumKind::Vector(items) => return Ok(Split::Vector(items.iter().collect())),
+            DatumKind::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
+            DatumKind::Keyword(k) => Constant::Keyword(k.as_str().into()),
+            DatumKind::Labelled(..) | DatumKind::LabelRef(_) => {
+                return Err(error(
+                    "datum labels in constants are not supported yet",
+                    Some(d.span),
+                ));
+            }
+            _ => return Err(error("unsupported constant", Some(d.span))),
+        }))
+    }
+
+    fn list(
+        &mut self,
+        _: &'a Datum,
+        items: Vec<Constant>,
+        tail: Option<Constant>,
+    ) -> Result<Constant> {
+        let mut list = tail.unwrap_or(Constant::EmptyList);
+        for item in items.into_iter().rev() {
+            list = Constant::Pair(Box::new(item), Box::new(list));
         }
-        DatumKind::Vector(items) => {
-            Constant::Vector(items.iter().map(constant).collect::<Result<_>>()?)
-        }
-        DatumKind::Bytevector(bytes) => Constant::Bytevector(bytes.clone()),
-        DatumKind::Keyword(k) => Constant::Keyword(k.as_str().into()),
-        DatumKind::Labelled(..) | DatumKind::LabelRef(_) => {
-            return Err(error(
-                "datum labels in constants are not supported yet",
-                Some(d.span),
-            ));
-        }
-        _ => return Err(error("unsupported constant", Some(d.span))),
-    })
+        Ok(list)
+    }
+
+    fn vector(&mut self, _: &'a Datum, items: Vec<Constant>) -> Result<Constant> {
+        Ok(Constant::Vector(items))
+    }
 }
 
 /// Whether a call to the `(vali primitive)` procedure `name` with `argc`

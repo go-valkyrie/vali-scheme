@@ -114,6 +114,46 @@ fn a_program_runs_the_same_on_artifacts() {
     assert_eq!(again, artifacts);
 }
 
+/// A library whose constants and macros are deeper or longer than a test
+/// thread's 2 MiB stack could recurse through: it compiles, is written as
+/// an artifact, is read back and runs.
+#[test]
+fn deep_and_long_libraries_compile_and_round_trip() {
+    let deep = |open: &str, close: &str, n: usize| format!("{}{}", open.repeat(n), close.repeat(n));
+    let library = format!(
+        "(define-library (test deep)
+           (import (scheme base))
+           (export deep-list deep-vector long-list nest-lists)
+           (begin
+             (define deep-list (quote {}))
+             (define deep-vector (quote {}))
+             (define long-list (quote ({})))
+             (define-syntax nest-lists
+               (syntax-rules () ((_) (quote {}))))))",
+        deep("(", ")", 100_000),
+        deep("#(", ")", 100_000),
+        "1 ".repeat(300_000),
+        deep("(", ")", 500),
+    );
+    let loader = Map(vec![("(test deep)", library)]);
+    let program = "(import (scheme base) (test deep))
+                   (list (length deep-list) (vector-length deep-vector)
+                         (length long-list) (length (nest-lists)))";
+    let compile = |artifacts: &Artifacts| {
+        compile_program_with(program, &Identity::new("main"), &loader, artifacts)
+            .map_err(|e| e.message)
+            .unwrap()
+    };
+    let written = compile(&Artifacts {
+        write: true,
+        ..Artifacts::default()
+    })
+    .artifacts;
+    let expected = "(1 1 300000 1)";
+    assert_eq!(run(compile(&Artifacts::default())), expected);
+    assert_eq!(run(compile(&reading(&written))), expected);
+}
+
 #[test]
 fn an_artifact_is_refused_when_what_it_relied_on_changed() {
     let library = |helper: &str| {
