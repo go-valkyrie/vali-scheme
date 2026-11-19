@@ -114,6 +114,55 @@ fn a_program_runs_the_same_on_artifacts() {
     assert_eq!(again, artifacts);
 }
 
+/// Run-format bytecode is validated where it loads, once per module, and
+/// not again when the compiler converts it.
+#[test]
+fn a_module_is_validated_once_per_load() {
+    let library = |name: &'static str| {
+        (
+            name,
+            format!(
+                "(define-library {name}
+                   (import (scheme base))
+                   (export f)
+                   (begin (define (f) 1)))"
+            ),
+        )
+    };
+    let loader = Map(vec![library("(test one)"), library("(test two)")]);
+    let compile = |source: &str, artifacts: &Artifacts| {
+        let before = vali_bytecode::validations();
+        let program =
+            compile_program_with(source, &Identity::new("main"), &loader, artifacts).unwrap();
+        (program, vali_bytecode::validations() - before)
+    };
+    let own = "(import (scheme base) (prefix (test one) a:) (prefix (test two) b:)) (a:f)";
+    let (_, baseline) = compile(
+        "(import (scheme base) (prefix (test one) a:)) (a:f)",
+        &Artifacts::default(),
+    );
+    // Compiling from source loads some modules of its own, which are
+    // validated as they do; converting one more library adds no validation
+    // to that.
+    let (program, from_source) = compile(
+        own,
+        &Artifacts {
+            write: true,
+            ..Artifacts::default()
+        },
+    );
+    assert_eq!(from_source, baseline);
+    let (from_artifacts, _) = compile(own, &reading(&program.artifacts));
+    // Loading validates each library and the body, once each.
+    for program in [program, from_artifacts] {
+        let modules = program.libraries.len() + 1;
+        let mut cx = Cx::<NoCollection>::new(&HeapConfig::default());
+        let before = vali_bytecode::validations();
+        vali_compiler::load(&mut cx, program).unwrap();
+        assert_eq!(vali_bytecode::validations() - before, modules);
+    }
+}
+
 /// A library made from source and the same one loaded from its artifact
 /// have one fingerprint, taken from the IR and not the converted code, so
 /// a program compiled one way links to libraries loaded the other.
@@ -193,6 +242,7 @@ fn deep_and_long_libraries_compile_and_round_trip() {
             .map_err(|e| e.message)
             .unwrap()
     };
+    eprintln!("STEP start {}", vali_bytecode::validations());
     let written = compile(&Artifacts {
         write: true,
         ..Artifacts::default()

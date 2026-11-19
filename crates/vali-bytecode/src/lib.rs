@@ -29,4 +29,6 @@ pub use module::{
     Arity, Constant, Export, FORMAT_VERSION, Function, Inlined, Link, Module, Position, Scope,
     Variable, branch_target, disassemble, instructions,
 };
+#[doc(hidden)]
+pub use validate::validations;
 pub use validate::{MAX_SLOTS, ValidationError, validate, validate_rewritten};

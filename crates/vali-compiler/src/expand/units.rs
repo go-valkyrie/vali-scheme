@@ -157,21 +157,15 @@ fn decode_source(bytes: &[u8]) -> std::result::Result<Option<Digest>, vali_dist:
     Ok(source)
 }
 
-/// `ir` converted to run-format bytecode, and validated.
+/// `ir` converted to run-format bytecode. It is not validated here: loading
+/// a module validates it (`Cx::load_library` and the others), which is the
+/// check that guards the VM, so a second pass only costs time.
 pub(super) fn converted(ir: &vali_dist::Module) -> Result<Module> {
-    let fail = |message: String| CompileError {
-        message,
+    vali_bytecode::convert(ir).map_err(|e| CompileError {
+        message: format!("{}: {e}", ir.name),
         span: None,
         location: None,
-    };
-    let module = vali_bytecode::convert(ir).map_err(|e| fail(format!("{}: {e}", ir.name)))?;
-    validate(&module).map_err(|e| {
-        fail(format!(
-            "{}: conversion produced invalid bytecode: {e}",
-            ir.name
-        ))
-    })?;
-    Ok(module)
+    })
 }
 
 impl Expander {
