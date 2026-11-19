@@ -485,7 +485,7 @@ fn load_inner<S: vali_runtime::Strategy>(
         // against: linking to another of the same name would be wrong
         // silently.
         if let Some(id) = cx.library(identity.as_str()) {
-            if *cx.module(id) != module {
+            if !cx.is_loaded_from(id, &module) {
                 return Err(vali_runtime::Error::scheme(format!(
                     "library {identity} is already loaded, compiled differently: \
                      this program was compiled against another version of it"
@@ -493,7 +493,7 @@ fn load_inner<S: vali_runtime::Strategy>(
             }
             continue;
         }
-        let id = cx.load(module)?;
+        let id = cx.load_library(module)?;
         cx.run(id)?;
         cx.register_library(identity.as_str(), id);
     }

@@ -11,7 +11,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use vali_bytecode::{Arity, Function, Module};
+use vali_bytecode::{Arity, Constant, Export, Function, Module, Variable};
 
 use crate::cx::Cx;
 use crate::debug::{DebugFunction, DebugLayout, DebugStr};
@@ -140,15 +140,37 @@ impl<S: Strategy> Code<S> {
 }
 
 /// A validated module, with a descriptor for each of its functions.
+///
+/// It keeps what running the module needs and nothing it has been turned
+/// into: the code that runs (under precise counting, the code the ownership
+/// pass rewrote, not the code given), and not the constants, which load
+/// builds into the isolate's pool or heap and returns to its caller to drop.
+///
+/// Sharing a `Loaded` between isolates (ADR 0008 #6) while each builds its
+/// own pool (ADR 0020) would need every isolate to have the constants'
+/// trees, so they would have to move into the shared part then, and only
+/// each isolate's built copy would stay per isolate. Until something
+/// shares one, nothing keeps them.
 pub(crate) struct Loaded<S: Strategy> {
-    /// The module as it was loaded.
-    pub(crate) module: Module,
-    /// Under precise counting, its functions as the ownership pass rewrote
-    /// them, which are what runs (`vali_bytecode::ownership`).
-    owned: Option<Box<[Function]>>,
+    /// The function that runs the module's body.
+    pub(crate) body: u32,
+    /// Its variable table, which linking reads and an unbound variable's
+    /// error names.
+    pub(crate) variables: Box<[Variable]>,
+    exports: Box<[Export]>,
+    /// The module's source names, which backtraces name.
+    pub(crate) sources: Box<[Box<str>]>,
+    /// The module's digest (`Module::fingerprint`), for a library, which is
+    /// what `Cx::is_loaded_from` compares: nothing asks about a program's
+    /// body or an evaluated module, so they take none.
+    fingerprint: Option<u128>,
+    /// Its functions as they run: rewritten under precise counting
+    /// (`vali_bytecode::ownership`), as given otherwise. Each carries the
+    /// positions and scopes of its own code, which backtraces read.
+    code: Box<[Function]>,
     pub(crate) functions: Box<[Code<S>]>,
     /// The module's source names, as the debugger extensions read them;
-    /// they point into `module`. Only debuggers read it, through the
+    /// they point into `sources`. Only debuggers read it, through the
     /// pointers each function's `DebugFunction` holds.
     #[expect(dead_code, reason = "kept alive for debuggers, which read it in place")]
     debug_sources: Box<[DebugStr]>,
@@ -157,22 +179,38 @@ pub(crate) struct Loaded<S: Strategy> {
 impl<S: Strategy> Loaded<S> {
     /// Function `index` as it runs: rewritten under precise counting.
     pub(crate) fn function(&self, index: usize) -> Option<&Function> {
-        match &self.owned {
-            Some(owned) => owned.get(index),
-            None => self.module.functions.get(index),
-        }
+        self.code.get(index)
+    }
+
+    /// The index of the variable the module exports as `name`.
+    pub(crate) fn export(&self, name: &str) -> Option<u16> {
+        self.exports
+            .iter()
+            .find(|e| &*e.name == name)
+            .map(|e| e.variable)
+    }
+
+    /// Whether `module` is the one this was loaded from.
+    pub(crate) fn is_loaded_from(&self, module: &Module) -> bool {
+        self.fingerprint == Some(module.fingerprint())
     }
 
     /// Builds the descriptors for `module`, which must be valid, placing
-    /// ownership operations in its code under precise counting.
-    pub(crate) fn new(module: Module, transient: bool) -> Result<Arc<Loaded<S>>, String> {
-        let owned: Option<Box<[Function]>> = if S::PRECISE {
+    /// ownership operations in its code under precise counting. Returns them
+    /// with the module's constants, which only the caller needs, to build.
+    /// Only a `library` is given a digest.
+    pub(crate) fn new(
+        module: Module,
+        transient: bool,
+        library: bool,
+    ) -> Result<(Arc<Loaded<S>>, Vec<Constant>), String> {
+        let owned: Option<Vec<Function>> = if S::PRECISE {
             let functions = vali_bytecode::ownership::insert(&module)
                 .map_err(|e| format!("placing ownership operations: {e}"))?;
             // The code that runs is validated too, not only the code given.
             vali_bytecode::validate_rewritten(&module, &functions)
                 .map_err(|e| format!("after placing ownership operations: {e}"))?;
-            Some(functions.into())
+            Some(functions)
         } else {
             None
         };
@@ -186,6 +224,20 @@ impl<S: Strategy> Loaded<S> {
                     .unwrap_or_else(|| format!("{}#{i}", module.name).into())
             })
             .collect();
+        let fingerprint = library.then(|| module.fingerprint());
+        let Module {
+            constants,
+            variables,
+            exports,
+            functions,
+            sources,
+            body,
+            ..
+        } = module;
+        // Under precise counting the given functions go here, their code,
+        // positions, scopes and inlined copies with them: the rewritten ones
+        // carry their own.
+        let code: Box<[Function]> = owned.unwrap_or(functions).into();
         // Named marker stubs only with native frames: without them, every
         // frame returns to the shared stub, and nothing is registered with
         // debuggers (ADR 0004 #6). A module freed once nothing refers to it
@@ -196,13 +248,11 @@ impl<S: Strategy> Loaded<S> {
         } else {
             None
         };
-        let debug_sources: Box<[DebugStr]> =
-            module.sources.iter().map(|s| DebugStr::of(s)).collect();
-        Ok(Arc::new_cyclic(|this| {
+        let sources: Box<[Box<str>]> = sources.into();
+        let debug_sources: Box<[DebugStr]> = sources.iter().map(|s| DebugStr::of(s)).collect();
+        let loaded = Arc::new_cyclic(|this| {
             let this = this.as_ptr();
-            let functions = owned
-                .as_deref()
-                .unwrap_or(&module.functions)
+            let functions = code
                 .iter()
                 .zip(names)
                 .enumerate()
@@ -234,12 +284,17 @@ impl<S: Strategy> Loaded<S> {
                 })
                 .collect();
             Loaded {
-                module,
-                owned,
+                body,
+                variables: variables.into(),
+                exports: exports.into(),
+                sources,
+                fingerprint,
+                code,
                 functions,
                 debug_sources,
             }
-        }))
+        });
+        Ok((loaded, constants))
     }
 
     /// The strategy's layout, for the debugger extensions.

@@ -88,7 +88,7 @@ pub enum Constant {
 }
 
 /// One function's code and metadata.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Function {
     /// Its name, for backtraces and debuggers.
     pub name: Option<Box<str>>,
@@ -115,7 +115,7 @@ pub struct Function {
 
 /// A function's body inlined into another where it was called: the frame
 /// a backtrace shows for code in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Inlined {
     /// The name of the function copied.
     pub name: Option<Box<str>>,
@@ -130,7 +130,7 @@ pub struct Inlined {
 
 /// From instruction `pc` on, the code is in copy `inlined`: 0 for the
 /// function's own code, `i + 1` for [`Function::inlined`] entry `i`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Scope {
     pub pc: u32,
     pub inlined: u32,
@@ -141,7 +141,7 @@ pub struct Scope {
 /// Unicode scalar values (ADR 0014 #9).
 /// C layout, so debuggers can read line tables in place.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Position {
     /// The instruction's index.
     pub pc: u32,
@@ -154,7 +154,7 @@ pub struct Position {
 }
 
 /// A compiled module: what one library's body compiles to.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Module {
     /// The module's name.
     pub name: Box<str>,
@@ -171,6 +171,65 @@ pub struct Module {
     pub sources: Vec<Box<str>>,
     /// The function that runs the module's body.
     pub body: u32,
+}
+
+impl std::hash::Hash for Constant {
+    /// Floats by their bits, so a NaN's payload counts. That is on purpose,
+    /// for [`Module::fingerprint`], and it disagrees with the derived
+    /// `PartialEq` on floats: `0.0 == -0.0` but they hash differently, and
+    /// `NaN != NaN` but equal bits hash alike. So `Eq` must not be added on
+    /// this basis, and nothing may key a std map on a `Constant` or a
+    /// `Module` expecting hashing and equality to agree.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Constant::Integer(n) => n.hash(state),
+            Constant::Flonum(x) => x.to_bits().hash(state),
+            Constant::Boolean(b) => b.hash(state),
+            Constant::Character(c) => c.hash(state),
+            Constant::EmptyList | Constant::Unspecified => {}
+            Constant::String(s) | Constant::Symbol(s) | Constant::Keyword(s) => s.hash(state),
+            Constant::Pair(a, b) | Constant::Ratio(a, b) | Constant::Complex(a, b) => {
+                a.hash(state);
+                b.hash(state);
+            }
+            Constant::Vector(items) => items.hash(state),
+            Constant::Bignum { negative, limbs } => {
+                negative.hash(state);
+                limbs.hash(state);
+            }
+            Constant::Bytevector(bytes) => bytes.hash(state),
+        }
+    }
+}
+
+impl Module {
+    /// A 128-bit digest of the whole module, code, constants and debug
+    /// information included, that is the same for equal modules (floating
+    /// point constants by their bits). A host that has loaded a module and
+    /// dropped its bytecode can still tell whether another is the same one.
+    /// Deterministic within a build of Vali, not across builds, and not a
+    /// defence against a module made to collide: it guards against mixing
+    /// up two builds of a library by accident.
+    pub fn fingerprint(&self) -> u128 {
+        use std::hash::{Hash, Hasher};
+
+        /// Two hashers fed alike, one keyed differently.
+        struct Digest(std::hash::DefaultHasher, std::hash::DefaultHasher);
+        impl Hasher for Digest {
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.write(bytes);
+                self.1.write(bytes);
+            }
+            fn finish(&self) -> u64 {
+                self.0.finish()
+            }
+        }
+        let mut digest = Digest(Default::default(), Default::default());
+        digest.1.write_u8(0xa5);
+        self.hash(&mut digest);
+        (u128::from(digest.0.finish()) << 64) | u128::from(digest.1.finish())
+    }
 }
 
 /// One entry of a module's variable table.
@@ -204,7 +263,7 @@ pub enum Link {
 }
 
 /// A variable a module exports.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Export {
     /// The name importers use.
     pub name: Box<str>,

@@ -253,7 +253,6 @@ fn frames_of<S: Strategy>(code: &Code<S>, pc: usize) -> Vec<crate::handle::Frame
     // SAFETY: a function's descriptor points to the module that owns it,
     // which outlives it.
     let loaded = unsafe { &*module };
-    let module = &loaded.module;
     // The code that runs: under precise counting, `pc` is the rewritten
     // code's.
     let Some(function) = loaded.function(index as usize) else {
@@ -261,7 +260,7 @@ fn frames_of<S: Strategy>(code: &Code<S>, pc: usize) -> Vec<crate::handle::Frame
     };
     let located = |source: u16, line: u32, column: u32| {
         Some(crate::handle::Position {
-            source: module.sources.get(usize::from(source))?.clone(),
+            source: loaded.sources.get(usize::from(source))?.clone(),
             line,
             column,
         })
@@ -366,7 +365,15 @@ impl<S: Strategy> Cx<S> {
     /// exports it; a global one shares the global's cell, which a host
     /// defines, before or after.
     pub fn load(&mut self, module: Module) -> Result<ModuleId, Error> {
-        self.load_module(module, false).map(ModuleId)
+        self.load_module(module, false, false).map(ModuleId)
+    }
+
+    /// As [`load`](Cx::load), for a module that is a library, which
+    /// [`is_loaded_from`](Cx::is_loaded_from) can later be asked about: it
+    /// takes a digest of the module, which costs about a quarter of loading
+    /// it.
+    pub fn load_library(&mut self, module: Module) -> Result<ModuleId, Error> {
+        self.load_module(module, false, true).map(ModuleId)
     }
 
     /// Loads `module`, which is freed once nothing refers to it, and
@@ -424,11 +431,10 @@ impl<S: Strategy> Cx<S> {
                 .iter()
                 .map(|f| 4 * f.code.len() + 64)
                 .sum::<usize>();
-        let id = self.load_module(module, true)?;
+        let id = self.load_module(module, true, false)?;
         S::charge(self.heap_mut(), rust_bytes);
         let instance = &self.instances[id];
-        let body =
-            &instance.loaded.functions[instance.loaded.module.body as usize] as *const Code<S>;
+        let body = &instance.loaded.functions[instance.loaded.body as usize] as *const Code<S>;
         let owner = instance.object;
         let closure = self.closure_owned(body, &[], owner)?;
         // SAFETY: just allocated.
@@ -437,7 +443,12 @@ impl<S: Strategy> Cx<S> {
 
     /// Loads `module`: for a module freed once nothing refers to it, its
     /// constants are built in the heap and its object made.
-    fn load_module(&mut self, module: Module, transient: bool) -> Result<usize, Error> {
+    fn load_module(
+        &mut self,
+        module: Module,
+        transient: bool,
+        library: bool,
+    ) -> Result<usize, Error> {
         // Nothing runs code of a retired instance here: it was running
         // frames or holding closures only until it was freed.
         self.instances.empty_graveyard();
@@ -447,10 +458,10 @@ impl<S: Strategy> Cx<S> {
         // installs them.
         self.install_primitives()?;
         let name = module.name.clone();
-        let loaded = Loaded::<S>::new(module, transient)
+        let (loaded, trees) = Loaded::<S>::new(module, transient, library)
             .map_err(|e| Error::scheme(format!("invalid bytecode in {name}: {e}")))?;
-        let mut constants = Vec::with_capacity(loaded.module.constants.len());
-        for constant in &loaded.module.constants {
+        let mut constants = Vec::with_capacity(trees.len());
+        for constant in &trees {
             if transient {
                 let value = self.heap_constant(constant);
                 let value = match value {
@@ -468,8 +479,9 @@ impl<S: Strategy> Cx<S> {
                 constants.push(self.pool_constant(constant)?);
             }
         }
+        // Built: the trees go, leaving the instance the values alone.
+        drop(trees);
         let defined = loaded
-            .module
             .variables
             .iter()
             .filter(|v| v.link == VariableLink::Defined)
@@ -478,8 +490,8 @@ impl<S: Strategy> Cx<S> {
             .map(|_| UnsafeCell::new(Value::UNBOUND))
             .collect();
         let mut next = 0;
-        let mut variables = Vec::with_capacity(loaded.module.variables.len());
-        for variable in &loaded.module.variables {
+        let mut variables = Vec::with_capacity(loaded.variables.len());
+        for variable in &loaded.variables {
             variables.push(match &variable.link {
                 VariableLink::Defined => {
                     next += 1;
@@ -548,6 +560,12 @@ impl<S: Strategy> Cx<S> {
 
     /// Makes the loaded module `module` the library with identity
     /// `identity`, which modules loaded later can import from.
+    ///
+    /// A library the compiler will link programs against must have been
+    /// loaded with [`load_library`](Cx::load_library). One loaded with plain
+    /// `load` has no digest, so [`is_loaded_from`](Cx::is_loaded_from) is
+    /// false for it, and a later `vali_compiler` program importing it fails
+    /// with "already loaded, compiled differently".
     pub fn register_library(&mut self, identity: &str, module: ModuleId) {
         self.libraries.insert(identity.into(), module);
     }
@@ -557,9 +575,12 @@ impl<S: Strategy> Cx<S> {
         self.libraries.get(identity).copied()
     }
 
-    /// The bytecode of the loaded module `id`.
-    pub fn module(&self, id: ModuleId) -> &vali_bytecode::Module {
-        &self.instances[id.0].loaded.module
+    /// Whether the loaded module `id` was loaded from `module`: the same
+    /// code, constants and debug information. A loaded module keeps only
+    /// what runs, so this compares digests (`Module::fingerprint`); a module
+    /// not loaded with `load_library` has no digest and matches nothing.
+    pub fn is_loaded_from(&self, id: ModuleId, module: &vali_bytecode::Module) -> bool {
+        self.instances[id.0].loaded.is_loaded_from(module)
     }
 
     /// The cell the library `library` exports as `name`.
@@ -568,14 +589,11 @@ impl<S: Strategy> Cx<S> {
             return Err(Error::scheme(format!("library {library} is not loaded")));
         };
         let instance = &self.instances[id];
-        let export = instance
+        let variable = instance
             .loaded
-            .module
-            .exports
-            .iter()
-            .find(|e| &*e.name == name)
+            .export(name)
             .ok_or_else(|| Error::scheme(format!("library {library} does not export {name}")))?;
-        Ok(instance.variables[usize::from(export.variable)])
+        Ok(instance.variables[usize::from(variable)])
     }
 
     /// The cell of the global `name`, made unbound if there is none yet.
@@ -617,8 +635,7 @@ impl<S: Strategy> Cx<S> {
     /// not run it.
     pub fn module_body(&mut self, module: ModuleId) -> Result<Handle, Error> {
         let instance = &self.instances[module.0];
-        let body =
-            &instance.loaded.functions[instance.loaded.module.body as usize] as *const Code<S>;
+        let body = &instance.loaded.functions[instance.loaded.body as usize] as *const Code<S>;
         let closure = self.closure_raw(body, &[])?;
         // SAFETY: just allocated.
         Ok(unsafe { self.root(closure) })
@@ -627,8 +644,7 @@ impl<S: Strategy> Cx<S> {
     /// Runs a loaded module's body, returning its result.
     pub fn run(&mut self, module: ModuleId) -> Result<Handle, Error> {
         let instance = &self.instances[module.0];
-        let body =
-            &instance.loaded.functions[instance.loaded.module.body as usize] as *const Code<S>;
+        let body = &instance.loaded.functions[instance.loaded.body as usize] as *const Code<S>;
         let closure = self.closure_raw(body, &[])?;
         let result = self.execute(closure, &[])?;
         // SAFETY: the VM returns valid values.
@@ -658,7 +674,6 @@ impl<S: Strategy> Cx<S> {
         let instance = &self.instances[module.0];
         let index = instance
             .loaded
-            .module
             .variables
             .iter()
             .position(|v| &*v.name == name)?;
@@ -859,6 +874,10 @@ impl<S: Strategy> Cx<S> {
         free: &[Value],
         owner: Value,
     ) -> Result<Value, OutOfMemory> {
+        debug_assert!(
+            free.len() < data::closure::OWNED as usize,
+            "the count of free variables must not reach the owner flag"
+        );
         let v = self.new_object(
             TypeCode::Closure,
             2 + free.len(),
@@ -2469,7 +2488,7 @@ impl<S: Strategy> Cx<S> {
                                     unreachable!()
                                 };
                                 let loaded: &Loaded<S> = &*module;
-                                let name = &loaded.module.variables[index].name;
+                                let name = &loaded.variables[index].name;
                                 // A REPL global is named by its REPL name.
                                 let name = name.strip_prefix("repl:").unwrap_or(name);
                                 fail!(Error::scheme(format!("unbound variable: {name}")));

@@ -130,8 +130,39 @@ fn hand_built_code_leaves_nothing_counted() {
 fn the_loaded_module_is_the_one_given() {
     let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
     let module = module_defining("sum", sum_of_list);
+    let id = cx.load_library(module.clone()).unwrap();
+    assert!(cx.is_loaded_from(id, &module));
+    // A module loaded other than as a library has no digest.
     let id = cx.load(module.clone()).unwrap();
-    assert_eq!(*cx.module(id), module);
+    assert!(!cx.is_loaded_from(id, &module));
+}
+
+/// The loaded module keeps what runs, not what it was given, so whether
+/// another is the one loaded is answered by digest: a module that differs
+/// anywhere, in code the rewrite changes or in a constant built into the
+/// pool, is not it, under every strategy.
+#[test]
+fn a_loaded_module_is_told_from_one_that_differs() {
+    fn check<S: Strategy>() {
+        let mut cx = Cx::<S>::new(&HeapConfig::default());
+        let module = module_defining("sum", sum_of_list);
+        let id = cx.load_library(module.clone()).unwrap();
+        assert!(cx.is_loaded_from(id, &module));
+        let mut other = module.clone();
+        other.functions[0].code[0] ^= 1;
+        assert!(!cx.is_loaded_from(id, &other));
+        let mut other = module.clone();
+        other.constants.push(Constant::Integer(7));
+        assert!(!cx.is_loaded_from(id, &other));
+        // It still runs, and still names its variables, with the trees and
+        // the code it was given gone.
+        cx.run(id).unwrap();
+        assert!(cx.variable(id, "sum").is_some());
+    }
+    check::<NoCollection>();
+    check::<DeferredHeadered>();
+    check::<PreciseHeadered>();
+    check::<PreciseSideCounts>();
 }
 
 #[test]

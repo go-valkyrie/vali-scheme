@@ -703,3 +703,39 @@ fn finished_modules_hold_no_spare_capacity() {
         assert_eq!(f.positions.capacity(), f.positions.len());
     }
 }
+
+/// A host that loaded a module and let go of its bytecode asks by digest
+/// whether another is the same: any difference in code, constants or debug
+/// information must show.
+#[test]
+fn the_fingerprint_tells_modules_apart() {
+    let module = fib_module();
+    assert_eq!(module.fingerprint(), module.clone().fingerprint());
+    let mut changed = module.clone();
+    changed.functions[0].code[0] ^= 1;
+    assert_ne!(changed.fingerprint(), module.fingerprint());
+    let mut changed = module.clone();
+    changed.constants.push(Constant::Flonum(1.5));
+    assert_ne!(changed.fingerprint(), module.fingerprint());
+    // Floats by their bits: a NaN's payload counts.
+    let mut nan = module.clone();
+    nan.constants.push(Constant::Flonum(f64::NAN));
+    let mut other_nan = module.clone();
+    other_nan
+        .constants
+        .push(Constant::Flonum(f64::from_bits(f64::NAN.to_bits() | 1)));
+    assert_ne!(nan.fingerprint(), other_nan.fingerprint());
+    let mut changed = module.clone();
+    changed.sources.push("elsewhere".into());
+    assert_ne!(changed.fingerprint(), module.fingerprint());
+    let mut changed = module.clone();
+    changed.functions[0]
+        .positions
+        .push(vali_bytecode::Position {
+            pc: 0,
+            source: 0,
+            line: 1,
+            column: 0,
+        });
+    assert_ne!(changed.fingerprint(), module.fingerprint());
+}

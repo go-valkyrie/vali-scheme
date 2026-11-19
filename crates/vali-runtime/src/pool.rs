@@ -156,6 +156,8 @@ impl<S: Strategy> Cx<S> {
     /// held only by the objects that refer to it: the caller holds the
     /// result.
     pub(crate) fn heap_constant(&mut self, constant: &Constant) -> Result<Value, Error> {
+        // Only a counting strategy frees what it builds here.
+        debug_assert!(S::COUNTS, "heap constants are for modules a count frees");
         self.pool.in_heap = true;
         let result = self.pool_constant(constant);
         self.pool.in_heap = false;

@@ -246,7 +246,7 @@ fn prepare<S: Strategy>(
         }
         let module = crate::compile_library(expander, library).map_err(compile_error)?;
         if cx.library(library_identity).is_none() {
-            let id = cx.load(module)?;
+            let id = cx.load_library(module)?;
             cx.register_library(library_identity, id);
             thunks.push(cx.module_body(id)?);
         }
