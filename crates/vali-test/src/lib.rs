@@ -20,6 +20,10 @@
 //!   `lib/a/b.sld` for `(a b)`, and lets them include files from the
 //!   test's own directory. The conformance suites use it for the shims
 //!   that stand in for an upstream suite's test library.
+//!   A host test has no capabilities unless its `grant:` line asks for
+//!   them: `clock` serves `(scheme time)`, and `read` serves `(scheme
+//!   file)` for reading files and asking whether they exist, below the
+//!   test's own directory and nowhere else (ADR 0009).
 //! - `performance`: the file defines `(program n)`, returning a program as
 //!   data. Compiling `(program (* 4 n))` must take at most twice as long
 //!   as linear growth would, eight times as long as `(program n)` for an
@@ -41,7 +45,7 @@ use std::time::{Duration, Instant};
 use libtest_mimic::{Failed, Trial};
 use vali_syntax::{SourceId, TextSize};
 
-pub use header::{Header, HeaderError, Kind, parse_header};
+pub use header::{Grant, Header, HeaderError, Kind, parse_header};
 
 /// A test file: its name, where it is, and its text.
 #[derive(Clone, Debug)]
@@ -114,6 +118,7 @@ impl Backend for Evaluate {
             return outcome;
         }
         let mut host = TestHost::new(file);
+        host.grants = header.grants.clone();
         match (header.kind, header.host.as_deref()) {
             (Kind::Scheme, _) => {}
             (Kind::Host, Some("in-memory-loader")) => host.in_memory = true,
@@ -381,6 +386,77 @@ struct TestHost {
     readable: Option<PathBuf>,
     /// A directory of `.sld` files to serve libraries from, if any.
     libraries: Option<PathBuf>,
+    /// The capabilities the test asked for; none by default.
+    grants: Vec<Grant>,
+    /// `(vali-test clock)`, behind `(scheme time)`.
+    clock: Arc<vali_runtime::NativeLibrary>,
+    /// `(vali-test file)`, behind `(scheme file)`.
+    files: Arc<vali_runtime::NativeLibrary>,
+}
+
+/// The test host's (scheme time), when it grants the clock.
+const SCHEME_TIME: &str = "
+(define-library (scheme time)
+  (import (scheme base) (vali-test clock))
+  (export current-second current-jiffy jiffies-per-second)
+  (begin
+    (define (jiffies-per-second) 1000000)))";
+
+/// The test host's (scheme file), when it grants reading. Writing and
+/// deleting are never granted: those procedures raise file errors.
+const SCHEME_FILE: &str = "
+(define-library (scheme file)
+  (import (scheme base) (vali-test file))
+  (export call-with-input-file call-with-output-file delete-file file-exists?
+          open-binary-input-file open-binary-output-file open-input-file
+          open-output-file with-input-from-file with-output-to-file)
+  (begin
+    (define (call-with-port-closing port proc)
+      (call-with-values (lambda () (proc port))
+        (lambda results (close-port port) (apply values results))))
+    (define (call-with-input-file name proc)
+      (call-with-port-closing (open-input-file name) proc))
+    (define (call-with-output-file name proc)
+      (call-with-port-closing (open-output-file name) proc))
+    (define (with-input-from-file name thunk)
+      (call-with-port-closing (open-input-file name)
+        (lambda (port) (parameterize ((current-input-port port)) (thunk)))))
+    (define (with-output-to-file name thunk)
+      (call-with-port-closing (open-output-file name)
+        (lambda (port) (parameterize ((current-output-port port)) (thunk)))))))";
+
+/// A file error, for `op` on `name`.
+fn file_error(op: &str, name: &str, why: impl std::fmt::Display) -> vali_runtime::Error {
+    vali_runtime::Error::file_error(format!("{op}: {name}: {why}"))
+}
+
+/// `name` as the test's file capability reaches it: relative to `dir` (or
+/// absolute), resolved, and refused unless it is `dir` or below it. `..`
+/// is refused outright, and links are followed before the check.
+fn scoped(dir: &Path, op: &str, name: &str) -> Result<PathBuf, vali_runtime::Error> {
+    let outside = || file_error(op, name, "outside the test's directory");
+    let root = dir.canonicalize().map_err(|e| file_error(op, name, e))?;
+    let path = Path::new(name);
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(outside());
+    }
+    let joined = root.join(path);
+    // A file that does not exist is checked by where it would be.
+    let resolved = match joined.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(_) => match (joined.parent().map(Path::canonicalize), joined.file_name()) {
+            (Some(Ok(parent)), Some(file)) => parent.join(file),
+            _ => return Err(file_error(op, name, "no such directory")),
+        },
+    };
+    if resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(outside())
+    }
 }
 
 /// What the `in-memory-loader` fixture serves, with no file behind it.
@@ -415,16 +491,85 @@ impl TestHost {
                     .map(|(name, value)| vec![name, value])
                     .collect::<Vec<_>>()
             });
+        let dir = file
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let clock = vali_runtime::NativeLibrary::new(&["vali-test", "clock"])
+            .function("current-second", || -> f64 {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f64())
+            })
+            .function("current-jiffy", || -> i64 {
+                static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+                START
+                    .get_or_init(Instant::now)
+                    .elapsed()
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(i64::MAX)
+            });
+        let files = {
+            use vali_runtime::Error;
+            use vali_runtime::ports::Port;
+            let (text_dir, bytes_dir, exists_dir) = (dir.clone(), dir.clone(), dir.clone());
+            let no_writing = |op: &'static str| {
+                move |name: String| -> Result<Port, Error> {
+                    Err(file_error(
+                        op,
+                        &name,
+                        "needs the write capability, which this test was not given",
+                    ))
+                }
+            };
+            vali_runtime::NativeLibrary::new(&["vali-test", "file"])
+                .function(
+                    "open-input-file",
+                    move |name: String| -> Result<Port, Error> {
+                        let op = "open-input-file";
+                        let text = std::fs::read(scoped(&text_dir, op, &name)?)
+                            .map_err(|e| file_error(op, &name, e))?;
+                        String::from_utf8(text)
+                            .map(Port::input_string)
+                            .map_err(|_| file_error(op, &name, "not valid UTF-8 text"))
+                    },
+                )
+                .function(
+                    "open-binary-input-file",
+                    move |name: String| -> Result<Port, Error> {
+                        let op = "open-binary-input-file";
+                        std::fs::read(scoped(&bytes_dir, op, &name)?)
+                            .map(Port::input_bytes)
+                            .map_err(|e| file_error(op, &name, e))
+                    },
+                )
+                .function("file-exists?", move |name: String| -> Result<bool, Error> {
+                    Ok(scoped(&exists_dir, "file-exists?", &name)?.exists())
+                })
+                .function("open-output-file", no_writing("open-output-file"))
+                .function(
+                    "open-binary-output-file",
+                    no_writing("open-binary-output-file"),
+                )
+                .function("delete-file", |name: String| -> Result<(), Error> {
+                    Err(file_error(
+                        "delete-file",
+                        &name,
+                        "needs the write capability, which this test was not given",
+                    ))
+                })
+        };
         TestHost {
             process: Arc::new(process),
             in_memory: false,
-            dir: file
-                .path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
+            dir,
             readable: None,
             libraries: None,
+            grants: Vec::new(),
+            clock: Arc::new(clock),
+            files: Arc::new(files),
         }
     }
 }
@@ -446,6 +591,34 @@ impl vali_compiler::Loader for TestHost {
                 Some(Source::native(
                     Identity::new("vali-test:process"),
                     Arc::clone(&self.process),
+                ))
+            } else if self.grants.contains(&Grant::Clock)
+                && *name == LibraryName::new(["scheme", "time"])
+            {
+                Some(Source::scheme(
+                    Identity::new("vali-test:scheme/time"),
+                    SCHEME_TIME,
+                ))
+            } else if self.grants.contains(&Grant::Clock)
+                && *name == LibraryName::new(["vali-test", "clock"])
+            {
+                Some(Source::native(
+                    Identity::new("vali-test:clock"),
+                    Arc::clone(&self.clock),
+                ))
+            } else if self.grants.contains(&Grant::Read)
+                && *name == LibraryName::new(["scheme", "file"])
+            {
+                Some(Source::scheme(
+                    Identity::new("vali-test:scheme/file"),
+                    SCHEME_FILE,
+                ))
+            } else if self.grants.contains(&Grant::Read)
+                && *name == LibraryName::new(["vali-test", "file"])
+            {
+                Some(Source::native(
+                    Identity::new("vali-test:file"),
+                    Arc::clone(&self.files),
                 ))
             } else if self.in_memory && *name == LibraryName::new(["regression", "virtual"]) {
                 Some(Source::scheme(
@@ -591,6 +764,7 @@ mod tests {
             found_in: None,
             kind: Kind::Scheme,
             host: None,
+            grants: Vec::new(),
             expect_fail: expect_fail.map(str::to_owned),
         }
     }

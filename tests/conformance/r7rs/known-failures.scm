@@ -36,14 +36,6 @@
     ("(apply +)"
      "#50: gap: apply with no list argument returns 0 where R7RS 6.10 makes it an error")
 
-    ;; 6.14 System interface: the suite's host grants no capabilities, so
-    ;; (scheme time) and (scheme file) raise (ADR 0009).
-    ("(real? (current-second)) => #t" "#52: not run: the host grants no clock")
-    ("(inexact? (current-second)) => #t" "#52: not run: the host grants no clock")
-    ("(exact? (current-jiffy)) => #t" "#52: not run: the host grants no clock")
-    ("(file-exists? \".\") => #t" "#52: not run: the host grants no file access")
-    ("(file-exists? \" no such file \") => #f" "#52: not run: the host grants no file access")
-
     ;; Read syntax: write must put bars around symbols that read as numbers
     ("(get-output-string out) => \"|+NaN.0abc|\""
      "upstream: +NaN.0abc is not a number, so no bars are needed to read it back; chibi writes them anyway")))

@@ -4,7 +4,8 @@
 //! Each suite is one directory holding the upstream file untouched, a
 //! `lib/` directory of shim libraries standing in for the test library it
 //! imports, and a `known-failures.scm` the shim reads (see the README in
-//! each). The suite runs as a `library-path` host test, under every memory
+//! each). The suite runs as a `library-path` host test, granted the clock
+//! and reading files below its own directory, under every memory
 //! strategy, and fails if a case fails that is not listed as a known
 //! failure, or a listed one starts to pass.
 
@@ -12,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use libtest_mimic::{Failed, Trial};
-use vali_test::{Backend, Evaluate, Header, Kind, TestFile, verdict};
+use vali_test::{Backend, Evaluate, Grant, Header, Kind, TestFile, verdict};
 
 /// The suites: the directory under `tests/conformance/` and the upstream
 /// file in it.
@@ -77,6 +78,8 @@ fn main() {
                     found_in: None,
                     kind: Kind::Host,
                     host: Some("library-path".to_owned()),
+                    // The suite's (scheme time) and (scheme file) cases.
+                    grants: vec![Grant::Clock, Grant::Read],
                     expect_fail: None,
                 };
                 verdict(&header, evaluate.run(&file, &header)).map_err(Failed::from)
