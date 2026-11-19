@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "bc5a26ad_8ee98034",
+        "filename": "crates/vali-runtime/src/hashing.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 7,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:17:51Z",
+      "side": 1,
+      "message": "\"They are deterministic, so a hash does not change between runs\" holds for the content hashes (numbers, strings, bytevectors, symbols), but not for the identity ones. `eq-hash` and `eqv-hash` of a heap object come from its address, and so does `equal-hash` of anything that reaches a record or a procedure, so they can differ from run to run. The commit message says the same. Worth narrowing to the content hashes, so nobody counts on a stable iteration order for an `eq?` table.",
+      "revId": "1cd4c84a29d78b7b85ce48f76268317a0d3081d2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "d2736e3f_6a2b7c3b",
+        "filename": "crates/vali-runtime/tests/it/primitives.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 1,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T17:17:51Z",
+      "side": 1,
+      "message": "The commit message highlights deep, long and circular structures, but the test has none. Something like `(%equal-hash \u0027#0\u003d(1 . #0#))` and a 100,000-deep list would pin the bound down, along with two circular lists that `equal?` equates hashing alike.",
+      "revId": "1cd4c84a29d78b7b85ce48f76268317a0d3081d2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
