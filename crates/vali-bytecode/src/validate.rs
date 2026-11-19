@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::instruction::Instruction;
-use crate::module::{Arity, Function, Link, Module, branch_target};
+use crate::module::{Arity, Function, Link, Module, Variable, branch_target};
 
 /// The largest frame a function may have: slots up to 255 fit an
 /// instruction's fields, larger ones need a `wide` prefix.
@@ -49,8 +49,59 @@ pub fn validations() -> usize {
     VALIDATIONS.with(std::cell::Cell::get)
 }
 
+/// What checking one function needs to know of the module around it: how
+/// many constants and sources it has, its variables, and the arity and free
+/// variables of each function, which `closure` and direct calls name. A
+/// module that converts its functions one by one (`LazyModule`) checks each
+/// against its [`Shape`] as it converts it.
+#[derive(Clone, Copy, Debug)]
+pub struct Shape<'a> {
+    /// How many constants the pool has.
+    pub constants: usize,
+    /// The variables.
+    pub variables: &'a [Variable],
+    /// The module's functions; only their arity and free variables are
+    /// read, so one not converted yet may stand with no code.
+    pub functions: &'a [Function],
+    /// How many sources the table has.
+    pub sources: usize,
+}
+
+impl<'a> Shape<'a> {
+    /// The shape of `module`.
+    pub fn of(module: &'a Module) -> Shape<'a> {
+        Shape {
+            constants: module.constants.len(),
+            variables: &module.variables,
+            functions: &module.functions,
+            sources: module.sources.len(),
+        }
+    }
+}
+
 /// Checks `module`; see the module documentation for what that guarantees.
 pub fn validate(module: &Module) -> Result<(), ValidationError> {
+    check_module(module)?;
+    let shape = Shape::of(module);
+    for (index, function) in module.functions.iter().enumerate() {
+        check_function(&shape, index as u32, function, false)?;
+    }
+    Ok(())
+}
+
+/// Checks a module whose functions are converted one by one: what
+/// [`validate`] checks of the module as a whole, and its body, the one
+/// function converted already. The others have no code yet, and are
+/// checked with [`check_function`] as each is made. Counts as one
+/// validation, as [`validate`] does.
+pub fn validate_lazy(module: &Module) -> Result<(), ValidationError> {
+    check_module(module)?;
+    let body = &module.functions[module.body as usize];
+    check_function(&Shape::of(module), module.body, body, false)
+}
+
+/// The checks of a module as a whole, which need no function's code.
+fn check_module(module: &Module) -> Result<(), ValidationError> {
     VALIDATIONS.with(|count| count.set(count.get() + 1));
     let fail = |function: Option<u32>, pc: Option<usize>, message: String| {
         Err(ValidationError {
@@ -89,9 +140,6 @@ pub fn validate(module: &Module) -> Result<(), ValidationError> {
             return fail(None, None, format!("{} is exported twice", export.name));
         }
     }
-    for (index, function) in module.functions.iter().enumerate() {
-        check_function(module, index as u32, function, false)?;
-    }
     Ok(())
 }
 
@@ -109,27 +157,39 @@ pub fn validate_rewritten(module: &Module, functions: &[Function]) -> Result<(),
             message: "the rewritten functions are not the module's".into(),
         });
     }
+    let shape = Shape::of(module);
     for (index, (function, original)) in functions.iter().zip(&module.functions).enumerate() {
-        let index = index as u32;
-        if (function.arity, function.slots, function.free)
-            != (original.arity, original.slots, original.free)
-        {
-            return Err(ValidationError {
-                function: Some(index),
-                pc: None,
-                message: "the rewritten function changes its arity, frame or free variables".into(),
-            });
-        }
-        check_function(module, index, function, true)?;
+        check_rewritten(&shape, index as u32, original, function)?;
     }
     Ok(())
 }
 
-/// Checks function `index` of `module`, `function`: the module's own, or,
-/// if `internal`, the ownership pass's rewrite of it, which may hold `move`
-/// and `drop`.
-fn check_function(
-    module: &Module,
+/// Checks `rewritten`, which the ownership pass made from `original`,
+/// function `index` of the module with `shape`, as [`validate_rewritten`]
+/// does.
+pub fn check_rewritten(
+    shape: &Shape<'_>,
+    index: u32,
+    original: &Function,
+    rewritten: &Function,
+) -> Result<(), ValidationError> {
+    if (rewritten.arity, rewritten.slots, rewritten.free)
+        != (original.arity, original.slots, original.free)
+    {
+        return Err(ValidationError {
+            function: Some(index),
+            pc: None,
+            message: "the rewritten function changes its arity, frame or free variables".into(),
+        });
+    }
+    check_function(shape, index, rewritten, true)
+}
+
+/// Checks `function`, function `index` of the module with `shape`: the
+/// module's own, or, if `internal`, the ownership pass's rewrite of it,
+/// which may hold `move` and `drop`.
+pub fn check_function(
+    shape: &Shape<'_>,
     index: u32,
     function: &Function,
     internal: bool,
@@ -154,7 +214,7 @@ fn check_function(
     for position in &function.positions {
         if position.pc as usize >= function.code.len()
             || last.is_some_and(|l| position.pc <= l)
-            || usize::from(position.source) >= module.sources.len()
+            || usize::from(position.source) >= shape.sources
         {
             return fail(
                 Some(position.pc as usize),
@@ -170,7 +230,7 @@ fn check_function(
         if copy.caller as usize > i
             || copy
                 .call
-                .is_some_and(|(source, ..)| usize::from(source) >= module.sources.len())
+                .is_some_and(|(source, ..)| usize::from(source) >= shape.sources)
         {
             return fail(
                 None,
@@ -251,19 +311,19 @@ fn check_function(
             | Instruction::SetCdr { pair: a, value: b } => slot(*a) && slot(*b),
             Instruction::LoadInt { dst, .. } => slot(*dst),
             Instruction::LoadConstant { dst, constant } => {
-                if usize::from(*constant) >= module.constants.len() {
+                if usize::from(*constant) >= shape.constants {
                     return fail(format!("constant {constant} does not exist"));
                 }
                 slot(*dst)
             }
             Instruction::GetVariable { dst: s, variable } => {
-                if usize::from(*variable) >= module.variables.len() {
+                if usize::from(*variable) >= shape.variables.len() {
                     return fail(format!("variable {variable} does not exist"));
                 }
                 slot(*s)
             }
             Instruction::SetVariable { src: s, variable } => {
-                match module.variables.get(usize::from(*variable)) {
+                match shape.variables.get(usize::from(*variable)) {
                     None => return fail(format!("variable {variable} does not exist")),
                     // An importer cannot assign another library's
                     // variable (R7RS 5.6.1), a primitive or a native
@@ -285,7 +345,7 @@ fn check_function(
                 function: target,
                 free,
             } => {
-                let Some(target_function) = module.functions.get(*target as usize) else {
+                let Some(target_function) = shape.functions.get(*target as usize) else {
                     return fail(format!("function {target} does not exist"));
                 };
                 if free.len() != usize::from(target_function.free) {
@@ -326,7 +386,7 @@ fn check_function(
             } => {
                 // The VM gives the callee a closure of its own, with no
                 // free variables, and checks no arity.
-                let Some(target_function) = module.functions.get(*target as usize) else {
+                let Some(target_function) = shape.functions.get(*target as usize) else {
                     return fail(format!("function {target} does not exist"));
                 };
                 if target_function.free != 0 {
