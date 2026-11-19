@@ -60,7 +60,7 @@ Evaluating Steel and scheme-rs turned up standard procedures that real programs 
 12. **Reader extensions:** keywords (SRFI 88, with `keyword?`), `[ ]` as parentheses, block and datum comments, datum labels.
 13. **Hash tables: SRFI 125, with SRFI 128 comparators.** SRFI 125 keeps SRFI 69's names as deprecated procedures, so most SRFI 69 code runs unchanged. Weak and ephemeral tables are the SRFI's optional hints, accepted and ignored until ephemerons exist: such a table keeps its keys and values alive. Tables are always mutable, and `hash-table-merge!` is `hash-table-union!`, which keeps the first table's values, as SRFI 125 has it.
 14. **Control: SRFI 226** (*Control Features*): prompts and delimited continuations, continuation marks, and parameters defined on them (ADR 0004).
-15. **Other extensions from the start:** `list-sort` and the rest of SRFI 132 (SRFI 132 and R6RS take the same argument order), the SRFI 1 list library, SRFI 117 list queues, SRFI 127 lazy sequences and SRFI 133 vectors (in Scheme, with R7RS's own `vector-copy`, `vector-map` and the rest re-exported by `(srfi 133)`), callable records and `class-of`, and a condition hierarchy richer than R7RS's wherever error messages need it.
+15. **Other extensions from the start:** `list-sort` and the rest of SRFI 132 (SRFI 132 and R6RS take the same argument order), the SRFI 1 list library, the SRFI 117 list queues, SRFI 127 lazy sequences, SRFI 133 vectors and SRFI 158 generators and accumulators libraries, all in Scheme (`(srfi 133)` re-exports R7RS's own `vector-copy`, `vector-map` and the rest), callable records and `class-of`, and a condition hierarchy richer than R7RS's wherever error messages need it.
 16. **R6RS library names as aliases, where Vali has an equivalent:** `(rnrs base)`, `(rnrs control)`, `(rnrs lists)`, `(rnrs sorting)`, `(rnrs syntax-case)`, `(rnrs exceptions)`, and `(rnrs hashtables)` as a thin layer over SRFI 125. `(import (rnrs))` exports the union of the aliases provided. R6RS's I/O, records, enumerations and bitwise-arithmetic libraries are not provided.
 
 ### Out of scope until a later ADR
@@ -85,5 +85,5 @@ Evaluating Steel and scheme-rs turned up standard procedures that real programs 
 ## References
 
 - R7RS-small, section 6.2 (numbers) and appendix B (standard feature identifiers).
-- SRFIs 1, 88, 117, 125, 127, 128, 132, 133, 139 and 226.
+- SRFIs 1, 88, 117, 125, 127, 128, 132, 133, 139, 158 and 226.
 - R6RS, the standard libraries.
