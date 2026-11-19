@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "3d55576d_f96e1098",
+        "filename": "crates/vali-runtime/src/rust_objects.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 228,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:01:51Z",
+      "side": 1,
+      "message": "This is the finalize hook for objects freed by counting (`free_all`). Cycle collection doesn\u0027t call it: `run_epoch` in `epoch.rs` builds its own `finalize` closure for `S::collect_cycles`, which handles `retire` and `retire_module` but not `retire_syntax`.\n\nSo a syntax object reachable only from a garbage cycle keeps its slot and its Rust `Syntax`, still counts toward `max_syntaxes`, and never returns its charge. A cyclic list or a `letrec` closure is enough. Reproduced:\n- One syntax object off a self-referencing pair, dropped, then `collect_garbage()` twice, per round. Every counting strategy hit `LimitExceeded(Syntaxes)` at round 5 with `max_syntaxes \u003d 5`, with nothing live.\n- At Scheme level, 100,000 rounds of `(let ((p (list s))) (set-cdr! p p))` ended with 100,001 \"live\" slots.\n\nFix: give that closure the `retire_syntax` case (or have both call one function, so they can\u0027t drift again), and add a test that frees a syntax object through a cycle.",
+      "revId": "807b57e0afaf1b38149d52cf4674818b14087ed7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "9724d3c7_15c240e4",
+        "filename": "crates/vali-runtime/src/syntax.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 41,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-19T14:01:51Z",
+      "side": 1,
+      "message": "Objects whose count reached zero wait in the zero-count table until the next epoch, which comes after about 1 MiB of heap allocation. `collect_garbage` does nothing while Scheme runs, so a program can\u0027t force one. Meanwhile their slots still count.\n\nA loop that keeps at most one syntax object, `(datum-\u003esyntax context i)` in a loop, fails at a cap of baseline + 1000 after 1,000 iterations under deferred and precise counting. Without the cap it ends with one live slot. The test hides this by calling `collect_garbage()` between rounds.\n\nTwo things would help:\n- Charge the Rust side with `S::charge`, as `load_transient` does for a module, so syntax-heavy code brings epochs sooner.\n- At the cap, run an epoch (when not inside one) and check again before failing. Then the cap means \"live\", as ADR 0023 item 6 and the as-built note say.",
+      "revId": "807b57e0afaf1b38149d52cf4674818b14087ed7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
