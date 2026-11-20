@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "5f4e8b9c_14e93a1d",
+        "filename": "crates/vali-compiler/src/expand/context.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 333,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:25:55Z",
+      "side": 1,
+      "message": "Fixed in PS2. Both chains from this comment, and my other probes (re-exports, private bindings, macro-defining macros, conflicting imports), now print what main prints. The seeded start goes through the same walk (units.rs:326). Importing the top of a chain of 50, 100 and 200 `syntax-rules` libraries takes 0.55s, 1.05s and 1.95s, against 1.2s, 5.3s and 20.5s on main (debug build), so the walk keeps the gain.",
+      "parentUuid": "f36f3a5f_5e9efc90",
+      "revId": "89948687bdf50a23cd5ca31afebbcd76f0336464",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "63bb0487_8f865880",
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T21:29:32Z",
       "side": 1,
       "message": "\"The export of a library with only `syntax-rules` macros and no compiled syntax, which no code at expansion time looks up, is remapped when one of its macros is first used, not with its importer\" overstates it.\n\n- A library imported directly is still remapped as it is imported. Only the dependencies of an imported library (and the seed\u0027s) wait.\n- \"Which no code at expansion time looks up\" isn\u0027t true of what that library itself imports (see context.rs:333).\n\nPlease reword once the walk is fixed.",
+      "revId": "89948687bdf50a23cd5ca31afebbcd76f0336464",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "a2890699_b6d85647",
+        "filename": "docs/adr/0015-scopes-and-syntax-objects.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 40,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:25:55Z",
+      "side": 1,
+      "message": "The new wording is accurate. Thanks.",
+      "parentUuid": "63bb0487_8f865880",
       "revId": "89948687bdf50a23cd5ca31afebbcd76f0336464",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
