@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "6f43bddd_37440fbc",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 4
+      },
+      "lineNbr": 1330,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T18:51:38Z",
+      "side": 1,
+      "message": "Fixed in PS5, and the shared depth goes further than I asked:\n\n- 500 and 1,000 set-of-sets keys get 500 and 1,000 distinct hashes, in 1.7 s and 3.6 s.\n- 500 and 1,000 hashmap-of-hashmap keys also get distinct hashes, in 1.8 s and 4.4 s.\n- A set, bag or hashmap of n boxes that each hold it costs one element hash per box for n \u003e 16 (3,840 boxes: 0.08 s), and 4,368 at n \u003d 16.\n- A set holding hashmaps that hold the set is now linear too: 960 element hashes for 960 boxes, where PS4 needed 922,560.",
+      "parentUuid": "955389ba_028628c5",
+      "revId": "7927067d755666801355bf92ae16c5aa1a29a687",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "6f26f4d9_1a1c5110",
         "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
         "patchSetId": 4
