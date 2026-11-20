@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "99406fbc_6967a335",
+        "filename": "crates/vali-cli/src/args.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 154,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:36Z",
+      "side": 1,
+      "message": "Fixed in PS2: `vali -I lib build -o out -- main.scm` prints `out: 2 libraries compiled, 0 already there` and doesn\u0027t run the program. `build -o out -- main.scm extra` exits 2 with `build takes one file, got extra`, and `build -o out --` with `no program file after --`. Covered in args.rs and tests/cache.rs.",
+      "parentUuid": "a1fc27f1_c1e6f1a4",
+      "revId": "7c220f5c509c63a3722487b1a14de484fd88abb0",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "d4dc9a42_fe3cf918",
         "filename": "crates/vali-cli/src/args.rs",
         "patchSetId": 1
@@ -31,6 +49,24 @@
       "writtenOn": "2026-11-19T21:18:40Z",
       "side": 1,
       "message": "Nits:\n\n- `-o`/`--output` is accepted for `run` and the REPL and silently ignored. `vali -o bo main.scm` runs and makes no `bo`. Refuse it outside `build`.\n- An empty `--cache-dir\u003d` is accepted and writes entries to `./\u003cstamp\u003e/` in the current directory. Then `cache dir` prints an empty line, and `stats` reports 0 entries because `read_dir(\"\")` fails. An empty `VALI_CACHE_DIR` counts as unset; treat the flag the same, or refuse it.",
+      "revId": "7c220f5c509c63a3722487b1a14de484fd88abb0",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "4d76df7c_3430b1be",
+        "filename": "crates/vali-cli/src/args.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 180,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:36Z",
+      "side": 1,
+      "message": "Both fixed in PS2. `vali -o bo main.scm` and `vali -o bo repl` exit 2 with `-o and --output apply to build only` and make no `bo`. `--cache-dir\u003d`, `--cache-dir \u0027\u0027`, `-o \u0027\u0027` and `--output\u003d` exit 2 with `\u003cflag\u003e needs a directory, not an empty name`.",
+      "parentUuid": "d4dc9a42_fe3cf918",
       "revId": "7c220f5c509c63a3722487b1a14de484fd88abb0",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
