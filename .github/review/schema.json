@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["review", "codeReview", "comments"],
+  "properties": {
+    "review": {
+      "type": "string",
+      "description": "The review's summary, in Markdown."
+    },
+    "codeReview": {
+      "type": "integer",
+      "enum": [-1, 0, 1],
+      "description": "-1 for something that must change before it lands, 1 if it looks good, 0 for no vote."
+    },
+    "comments": {
+      "type": "array",
+      "description": "Inline comments on the patch set's files, at most 100.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "message"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The file's path in the repository."
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "description": "The line in the patch set's version of the file, or null for a comment on the whole file."
+          },
+          "message": {
+            "type": "string",
+            "description": "The comment, in Markdown, at most 8,000 characters."
+          }
+        }
+      }
+    }
+  }
+}
