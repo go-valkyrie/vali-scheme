@@ -18,6 +18,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "81bf7bd2_4bca8991",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 166,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:33Z",
+      "side": 1,
+      "message": "Fixed in PS2: whether the optimiser ran is in the key (line 216). The PS1 probe now leaves two entries, 904 bytes from the `VALI_NO_OPT\u003d1` run and 907 from the optimised one. With only the 904-byte entry there, a `VALI_NO_OPT\u003d1` run loads it and an optimised run compiles and stores its own.",
+      "parentUuid": "29fcf80a_fe7ee9ea",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "67e78ec3_86c6bf55",
@@ -37,6 +55,24 @@
     {
       "unresolved": true,
       "key": {
+        "uuid": "acf49a29_837114a1",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 172,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:33Z",
+      "side": 1,
+      "message": "Partly fixed. The PS1 probe now prints `with-opt-feature` once `-I extra` is added and `without` once it\u0027s dropped, and so do a `cond-expand` in an included file and one nested in a `let`. But a `cond-expand` that reaches the body through a macro from another library still gets a stale entry:\n\n```scheme\n;; lib/shim.sld\n(define-library (shim)\n  (import (scheme base))\n  (export if-feature)\n  (begin\n    (define-syntax if-feature\n      (syntax-rules ()\n        ((_ yes no) (cond-expand ((library (opt feature)) yes) (else no)))))))\n;; lib/user.sld\n(define-library (user)\n  (import (scheme base) (shim))\n  (export which)\n  (begin (define which (if-feature \u0027with-opt-feature \u0027without))))\n;; main.scm\n(import (scheme base) (scheme write) (user))\n(display which) (newline)\n```\n\n- `vali --cache-dir C -I lib main.scm` prints `without` (cold).\n- `vali --cache-dir C -I lib -I extra main.scm`, where `extra/opt/feature.sld` exists, traces `loaded user.sld` and `stored shim.sld`, and prints `without`. `--no-cache` prints `with-opt-feature`.\n- The reverse also happens: a cache filled with `-I extra` keeps saying `with-opt-feature` after `extra` is dropped.\n\n`shim`\u0027s walk asks about `(opt feature)`, so its hash changes and it\u0027s recompiled. `user`\u0027s text has no `cond-expand`, so its hash is the same, and its `depends` check passes because `shim`\u0027s `library` and `syntax` sections didn\u0027t change. The answer `user` followed came from `cond_expand` (expand.rs:504), which reads the run-wide `available`.\n\nRecord in the artifact the answers that check gave while expanding the library and check them at load, or don\u0027t store a library whose expansion asked about a name its own walk didn\u0027t hash.",
+      "parentUuid": "67e78ec3_86c6bf55",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
         "uuid": "aeec660a_b897be7a",
         "filename": "crates/vali-compiler/src/cache.rs",
         "patchSetId": 1
@@ -48,6 +84,24 @@
       "writtenOn": "2026-11-19T21:18:39Z",
       "side": 1,
       "message": "This takes any `*.vac` or `.tmp-*` file in any subdirectory of the root as an entry, and `remove_empty_dirs` (line 320) removes every empty subdirectory, not just stamp directories.\n\nWith a root holding `notes/design.vac`, `notes/readme.txt`, `build/.tmp-session` and an empty `emptydir/`, `vali --cache-dir D cache clean` leaves only `notes/readme.txt`. `prune` matches the same files.\n\nThat contradicts 1260917\u0027s ADR text (\"Only files the cache itself names are ever deleted, so a directory that holds other things is safe to point it at\"), and `--cache-dir`/`VALI_CACHE_DIR` invite pointing it at a project directory.\n\nMatch only what `entry` and the temp writer make: directories named with 16 hex digits, files named `\u003c64 hex\u003e.vac` or the exact temp pattern. And only remove those directories.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "81af11c2_bf4919bf",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 247,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:33Z",
+      "side": 1,
+      "message": "Fixed in PS2. With the PS1 root (`notes/design.vac`, `notes/readme.txt`, `build/.tmp-session`, an empty `emptydir/`) plus `0123456789abcdef/mine.txt` and, in the stamp directory, `other.vac`, `.tmp-x-y`, `\u003c64 a\u0027s\u003e.txt` and `sub/\u003c64 b\u0027s\u003e.vac`, `cache clean` printed `deleted 1 entries` and removed only the real entry. Everything else is still there.",
+      "parentUuid": "aeec660a_b897be7a",
       "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
@@ -71,6 +125,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "dea3814a_5fa49503",
+        "filename": "crates/vali-compiler/src/lib.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 426,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:33Z",
+      "side": 1,
+      "message": "Fixed in PS2: the error goes to `report.failed` (line 429) and the run goes on. The PS1 library now prints `((x) (x))` and exits 0 with the cache on, cold and warm. The trace says `could not store lbl2.sld: encoding a syntax export: a datum label in a syntax export`, and no entry is written. `vali build` reports `could not write lbl2.sld: ...` and exits 1, which suits a build. Tests added in both crates.",
+      "parentUuid": "3412a953_7ea43120",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "e29a5c8a_07f1c514",
         "filename": "crates/vali-compiler/src/lib.rs",
         "patchSetId": 1
@@ -82,6 +154,24 @@
       "writtenOn": "2026-11-19T21:18:39Z",
       "side": 1,
       "message": "Nit: \"or tampered with\" (here, in cache.rs\u0027s module docs, the `--help` text and ADR line 87) overstates it. An edit that keeps the artifact valid and updates the entry\u0027s SHA-256 is loaded; flipping a bit in an arity or a name and re-hashing gets past the checks. ADR line 87 rightly says the hash isn\u0027t a defence against someone who can write the directory. \"Damaged, or failing validation\" would match what\u0027s checked.",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "a1823e67_50be9683",
+        "filename": "crates/vali-compiler/src/lib.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 462,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:35:33Z",
+      "side": 1,
+      "message": "Done in PS2: \"damaged, or fails validation\" here, in cache.rs, in `--help` and in the ADR, which also says now that an edit that stays valid, with the hash updated, is loaded.",
+      "parentUuid": "e29a5c8a_07f1c514",
       "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
