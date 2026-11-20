@@ -191,3 +191,127 @@ jobs:
           jq -n --arg ticket "$TICKET" --arg result "$RESULT" '{ticket: $ticket, result: $result}' |
           curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
             --data @- "$WORKER/vote"
+
+  # Asks Muse Code to review the patch set, through gerrithub-ci, which holds
+  # the LLM key: the job gets a short-lived token for this patch set alone
+  # (POST /muse-token), Muse calls the LLM through the Worker's /v1 proxy,
+  # and the job posts what Muse answers (POST /review). A trivial rebase or
+  # an unchanged patch set has nothing new to review, so it is skipped here,
+  # and the Worker refuses a token for one anyway (409).
+  #
+  # Anyone's patch set can reach this job through a "recheck", and the job
+  # holds id-token: write. So Muse comes from main's mise configuration and
+  # main's prompt, never the patch set's; it may read the checkout but runs
+  # no shell, writes nothing and has no web tools; the step that runs it
+  # cannot ask for an OIDC token; and the checkout's AGENTS.md and the rest
+  # are material to review, never loaded as instructions (the workspace
+  # stays untrusted).
+  review:
+    needs: verify
+    if: >-
+      always()
+      && github.event.client_payload.change_kind != 'TRIVIAL_REBASE'
+      && github.event.client_payload.change_kind != 'NO_CHANGE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TICKET: ${{ github.event.client_payload.ticket }}
+      WORKER: ${{ vars.GERRITHUB_CI_URL }}
+    steps:
+      - name: Check out main's review configuration
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            bin/
+            mise.toml
+            mise.review.toml
+            .github/review/
+
+      - name: Check out the patch set
+        run: |
+          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
+          git init -q patchset
+          cd patchset
+          git fetch -q --depth=2 "$REPO_URL" "$REF"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - name: Install Muse Code
+        working-directory: trusted
+        env:
+          MISE_ENV: review
+        run: |
+          bin/mise install
+          echo "MUSE=$(bin/mise which muse)" >> "$GITHUB_ENV"
+
+      - name: Get a review token from gerrithub-ci
+        id: token
+        run: |
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=gerrithub-ci" | jq -r .value)
+          code=$(jq -n --arg ticket "$TICKET" '{ticket: $ticket}' |
+            curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' \
+              -H "Authorization: Bearer $oidc" -H 'Content-Type: application/json' \
+              --data @- "$WORKER/muse-token")
+          if [ "$code" = 409 ]; then
+            echo 'Nothing new to review.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'review=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$code" = 200
+          echo 'review=true' >> "$GITHUB_OUTPUT"
+
+      - name: Review the patch set
+        if: steps.token.outputs.review == 'true'
+        working-directory: patchset
+        env:
+          # Nothing in this step may ask GitHub for an OIDC token.
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          CHANGE: ${{ github.event.client_payload.change }}
+          PATCHSET: ${{ github.event.client_payload.patchset }}
+          CHANGE_KIND: ${{ github.event.client_payload.change_kind }}
+        run: |
+          {
+            cat ../trusted/.github/review/prompt.md
+            printf '\nChange %s, patch set %s (%s), revision %s.\n' \
+              "$CHANGE" "$PATCHSET" "${CHANGE_KIND:-unknown kind}" "$REVISION"
+          } > "$RUNNER_TEMP/prompt.md"
+          # The token goes in on stdin, so it is in no environment or
+          # command line; it is good for this patch set and a short while.
+          jq -j .token "$RUNNER_TEMP/token.json" |
+            "$MUSE" exec \
+              --api-key-stdin \
+              --base-url "$WORKER/v1" \
+              --prompt-file "$RUNNER_TEMP/prompt.md" \
+              --output-schema ../trusted/.github/review/schema.json \
+              --approval-mode never \
+              --disable-shell \
+              --disable-write \
+              --disable-web-tools \
+              --disable-request-user-input \
+              --no-foreign-personal-context \
+              --no-session-log \
+              --max-model-steps 200 \
+              > "$RUNNER_TEMP/review.json"
+          rm -f "$RUNNER_TEMP/token.json"
+          # Only a well-formed answer is posted.
+          jq -e '(.review | type == "string") and (.codeReview | IN(-1, 0, 1)) and (.comments | type == "array")' \
+            "$RUNNER_TEMP/review.json" > /dev/null
+
+      - name: Post the review to Gerrit
+        if: steps.token.outputs.review == 'true'
+        run: |
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=gerrithub-ci" | jq -r .value)
+          jq --arg ticket "$TICKET" '{ticket: $ticket, review, codeReview, comments}' \
+            "$RUNNER_TEMP/review.json" |
+            curl -fsS -H "Authorization: Bearer $oidc" -H 'Content-Type: application/json' \
+              --data @- "$WORKER/review"

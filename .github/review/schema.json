@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A review for gerrithub-ci's POST /review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["review", "codeReview", "comments"],
+  "properties": {
+    "review": {
+      "type": "string",
+      "description": "The review's summary, in Markdown."
+    },
+    "codeReview": {
+      "type": "integer",
+      "enum": [-1, 0, 1],
+      "description": "-1 for something that must change before it lands, 1 if it looks good, 0 for no vote."
+    },
+    "comments": {
+      "type": "array",
+      "maxItems": 100,
+      "description": "Inline comments on the patch set's files.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "message"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The file's path in the repository."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The line in the patch set's version of the file; omit for a file-level comment."
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 8000,
+            "description": "The comment, in Markdown."
+          }
+        }
+      }
+    }
+  }
+}
