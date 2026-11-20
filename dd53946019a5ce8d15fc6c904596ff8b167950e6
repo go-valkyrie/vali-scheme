@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "2e11f30d_c3b3d684",
+        "filename": "docs/adr/0001-phasing-and-artifact-sections.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 57,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T17:00:42Z",
+      "side": 1,
+      "message": "Nit: this still says the `depends` section \"has two lists\" and then describes a third. \"has three lists\" (or \"two lists of identities and hashes, and a third...\").",
+      "revId": "dd53946019a5ce8d15fc6c904596ff8b167950e6",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
