@@ -375,12 +375,21 @@ jobs:
           session=$(cat /proc/sys/kernel/random/uuid)
           echo "SESSION=$session" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/muse-review"
+          # Muse sends its key only to an endpoint its settings name, with the
+          # auth pinned; a --base-url flag alone gets no key. Its settings go
+          # in a config directory of their own. Through this endpoint Muse
+          # fetches its model catalog (/muse-code/models) and calls the model
+          # (/v1/...), both of which gerrithub-ci proxies.
+          config="$RUNNER_TEMP/muse-config"
+          mkdir -p "$config/muse"
+          jq -n --arg url "$WORKER/v1" \
+            '{schema_version: 1, endpoint_transport: {base_url: $url, auth: "bearer"}}' \
+            > "$config/muse/settings.json"
           # The token goes in on stdin, so it is in no environment or
           # command line; it is good for this patch set and a short while.
           printf '%s' "$token" |
-            "$MUSE" exec \
+            XDG_CONFIG_HOME="$config" "$MUSE" exec \
               --api-key-stdin \
-              --base-url "$WORKER/v1" \
               --session-id "$session" \
               --output-schema .github/review/schema.json \
               --trust-workspace \
@@ -458,7 +467,9 @@ jobs:
       # Posted before anything else, so a failure to render can't lose it.
       # Gerrit refuses a whole review if one new comment is on a file the
       # patch set doesn't change, or if a reply to a patch-set-level thread
-      # has a line, so those comments go into the summary instead.
+      # has a line, so those comments go into the summary instead. If Muse
+      # gave no well-formed answer there is nothing to post; the session is
+      # still rendered below, to show why.
       - name: Post the review to Gerrit
         shell: bash
         env:
@@ -469,8 +480,12 @@ jobs:
           set -o pipefail
           review="$RUNNER_TEMP/muse-review/review.json"
           # Only a well-formed answer is posted.
-          jq -e '(.review | type == "string") and (.codeReview | IN(-1, 0, 1)) and (.comments | type == "array")' \
-            "$review" > /dev/null
+          if ! jq -e '(.review | type == "string") and (.codeReview | IN(-1, 0, 1)) and (.comments | type == "array")' \
+            "$review" > /dev/null 2>&1; then
+            echo '::warning::Muse gave no review to post; see the session below.'
+            echo 'Muse gave no review to post; the muse-session artifact shows why.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           case "$CHANGE,$PATCHSET" in *[!0-9,]*) echo "bad change or patch set"; exit 1 ;; esac
           project=${REPO_URL#*://*/}
           host=${REPO_URL%"/$project"}
