@@ -191,3 +191,343 @@ jobs:
           jq -n --arg ticket "$TICKET" --arg result "$RESULT" '{ticket: $ticket, result: $result}' |
           curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
             --data @- "$WORKER/vote"
+
+  # Asks Muse Code to review the patch set, through gerrithub-ci, which holds
+  # the LLM key: the job gets a short-lived token for this patch set alone
+  # (POST /muse-token), Muse calls the LLM through the Worker's /v1 proxy,
+  # and post-review posts what Muse answers (POST /review). A trivial rebase
+  # or an unchanged patch set has nothing new to review, so it is skipped
+  # here, and the Worker refuses a token for one anyway (409).
+  #
+  # Muse works in a checkout of main, with the patch set fetched in as a
+  # commit it reads through git. So everything Muse takes as instructions is
+  # main's: AGENTS.md, the gerrit-review skill (.claude/skills) and the mise
+  # configuration Muse comes from. The change is only ever material to
+  # review, which is why the workspace can be trusted.
+  #
+  # Anyone's patch set can reach this job through a "recheck", and Muse
+  # builds and runs the change to probe it. So once the change's code can
+  # run, nothing in this job can get a token: the review token is minted
+  # first and is then only in Muse's memory, and every later step has no way
+  # to ask for an OIDC token. Muse's shell runs in its sandbox (writes kept
+  # to the workspace and a temporary directory) with the network open, and
+  # Muse may search and fetch the web; nothing secret is in reach. Whatever
+  # the sandbox may have written stays here: this job only uploads Muse's
+  # answer and session, and post-review, on a runner of its own, reads them
+  # as data. The worst a hostile patch set can do is steer its review and
+  # use the runner until the timeout. Should that become a problem, reviews
+  # can be started only by a trusted reviewer's comment, as "recheck" is.
+  review:
+    needs: verify
+    # !cancelled(), not always(): a run that a newer patch set cancels must
+    # not go on to review the patch set it replaced.
+    if: >-
+      !cancelled()
+      && github.event.client_payload.change_kind != 'TRIVIAL_REBASE'
+      && github.event.client_payload.change_kind != 'NO_CHANGE'
+    runs-on: ubuntu-latest
+    # Probes build the change, which takes a while on a cold cache.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      review: ${{ steps.token.outputs.review }}
+    env:
+      TICKET: ${{ github.event.client_payload.ticket }}
+      WORKER: ${{ vars.GERRITHUB_CI_URL }}
+    steps:
+      # With plain git, not actions/checkout: that action's cleanup runs at
+      # the end of the job, after Muse, with the job's environment (an OIDC
+      # token can be had there), and runs git in a workspace Muse's sandbox
+      # could have written to. No action in this job runs anything from the
+      # workspace after Muse; rust-cache saves nothing (save-if: false).
+      - name: Check out main
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git init -q .
+          git fetch -q --no-tags --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$DEFAULT_BRANCH"
+          git checkout -q FETCH_HEAD
+
+      - name: Fetch the patch set
+        run: |
+          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
+          # The commit and its parent, as a ref of their own; the working
+          # tree stays main's.
+          git fetch -q --no-tags --depth=2 "$REPO_URL" "+$REF:refs/review/patchset"
+          test "$(git rev-parse refs/review/patchset)" = "$REVISION"
+
+      # The change's earlier review, so Muse can follow up its threads: every
+      # inline comment (with its id, patch set, place, author and whether it
+      # is unresolved) and every review message. It is public, so this needs
+      # no credentials, and Muse reads it from the workspace. Like the change,
+      # it is material to judge, not instructions. Without it (Gerrit down,
+      # say) the review goes ahead with an empty history.
+      - name: Fetch the change's earlier review
+        shell: bash
+        env:
+          CHANGE: ${{ github.event.client_payload.change }}
+        run: |
+          set -o pipefail
+          case "$CHANGE" in *[!0-9]*|"") echo "bad change: $CHANGE"; exit 1 ;; esac
+          project=${REPO_URL#*://*/}
+          host=${REPO_URL%"/$project"}
+          api="$host/changes/${project//\//%2F}~$CHANGE"
+          mkdir -p .review
+          get() { curl -fsS "$api/$1" | tail -c +5; }
+          if comments=$(get comments) && messages=$(get messages) &&
+            jq -n --argjson comments "$comments" --argjson messages "$messages" '{
+              comments: [$comments | to_entries[] | .key as $path | .value[]
+                | {id, patch_set, path: $path, line, in_reply_to, unresolved,
+                   author: (.author.username // .author.name), updated, message}]
+                | sort_by(.updated),
+              messages: [$messages[]
+                | {patch_set: ._revision_number, author: (.author.username // .author.name),
+                   date, message}]
+            }' > .review/history.json
+          then
+            jq -r '"\(.comments | length) earlier comments, \(.messages | length) messages"' .review/history.json
+          else
+            echo '::warning::Could not fetch the earlier review; reviewing without it.'
+            echo '{"comments": [], "messages": []}' > .review/history.json
+          fi
+
+      # What the gerrit-review skill needs to probe the change, installed
+      # beforehand so probes start quickly: main's development tools through
+      # mise, the crates main builds with, and the Rust cache, restored into
+      # target/, which Muse's scratch copy of the change links to so that only
+      # what the change touches is rebuilt.
+      - name: Install the development tools
+        env:
+          MISE_ENV: development
+        run: |
+          bin/mise install
+          bin/mise exec -- cargo fetch --locked
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # check.yml's test job saves this cache on main; it is only read.
+          shared-key: test
+          save-if: false
+
+      # Muse's shell sandbox on Linux is bubblewrap, which needs unprivileged
+      # user namespaces; Ubuntu's AppArmor policy turns those off by default.
+      - name: Let Muse's sandbox run
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Install Muse Code
+        env:
+          MISE_ENV: review
+        run: |
+          bin/mise install
+          echo "MUSE=$(bin/mise which muse)" >> "$GITHUB_ENV"
+
+      # The last step that may ask for an OIDC token, and the last before the
+      # change's code can run.
+      - name: Get a review token from gerrithub-ci
+        id: token
+        run: |
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=gerrithub-ci" | jq -r .value)
+          echo "::add-mask::$oidc"
+          code=$(jq -n --arg ticket "$TICKET" '{ticket: $ticket}' |
+            curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' \
+              -H "Authorization: Bearer $oidc" -H 'Content-Type: application/json' \
+              --data @- "$WORKER/muse-token")
+          if [ "$code" = 409 ]; then
+            echo 'Nothing new to review.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'review=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$code" = 200
+          # Masked in every later log line of the job, should anything echo it.
+          echo "::add-mask::$(jq -r .token "$RUNNER_TEMP/token.json")"
+          echo 'review=true' >> "$GITHUB_OUTPUT"
+
+      - name: Review the patch set
+        if: steps.token.outputs.review == 'true'
+        # The review token lasts 30 minutes (gerrithub-ci's
+        # MUSE_TOKEN_TTL_SECONDS); past that Muse's calls would fail anyway.
+        timeout-minutes: 28
+        env:
+          # From here on nothing may ask GitHub for an OIDC token.
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          CHANGE: ${{ github.event.client_payload.change }}
+          PATCHSET: ${{ github.event.client_payload.patchset }}
+        run: |
+          # The Worker validated these as numbers and a commit hash, so the
+          # command line holds nothing from the change itself.
+          case "$CHANGE,$PATCHSET $REVISION" in
+            *[!0-9a-f,\ ]*) echo "unexpected change, patch set or revision"; exit 1 ;;
+          esac
+          # The review token is read into memory and its file deleted before
+          # Muse starts, so nothing Muse's shell runs can find it on disk.
+          token=$(jq -r .token "$RUNNER_TEMP/token.json")
+          rm -f "$RUNNER_TEMP/token.json"
+          # Muse keeps a session log under this ID, which the next step
+          # exports; stdout carries only the final answer.
+          session=$(cat /proc/sys/kernel/random/uuid)
+          echo "SESSION=$session" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/muse-review"
+          # The token goes in on stdin, so it is in no environment or
+          # command line; it is good for this patch set and a short while.
+          printf '%s' "$token" |
+            "$MUSE" exec \
+              --api-key-stdin \
+              --base-url "$WORKER/v1" \
+              --session-id "$session" \
+              --output-schema .github/review/schema.json \
+              --trust-workspace \
+              --disable-approval \
+              --contributor-mode on \
+              --reasoning-effort xhigh \
+              --sandbox-network enabled \
+              --disable-request-user-input \
+              --no-foreign-personal-context \
+              --max-model-steps 200 \
+              "/gerrit-review $CHANGE,$PATCHSET $REVISION" \
+              > "$RUNNER_TEMP/muse-review/review.json"
+
+      # Muse's answer and session log, for post-review. Kept even when Muse
+      # failed, to see why. A workflow's subagents are sessions of their own,
+      # under the session's directory, so their logs go too.
+      - name: Collect Muse's answer and session
+        if: always() && steps.token.outputs.review == 'true' && env.SESSION != ''
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        run: |
+          out="$RUNNER_TEMP/muse-review"
+          "$MUSE" export --session "$SESSION" --out "$out/session.json"
+          session_dir=$(find "$HOME/.local/share/muse/sessions" -maxdepth 4 -type d -name "$SESSION" -print -quit 2>/dev/null || true)
+          if [ -n "$session_dir" ] && [ -d "$session_dir/subagent" ]; then
+            mkdir -p "$out/session-dir"
+            cp -R "$session_dir/subagent" "$out/session-dir/"
+          fi
+
+      - name: Keep Muse's answer and session
+        if: always() && steps.token.outputs.review == 'true' && env.SESSION != ''
+        uses: actions/upload-artifact@v4
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          name: muse-review
+          path: ${{ runner.temp }}/muse-review/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # Posts Muse's review and renders its session, on a runner of its own, so
+  # nothing the review job's sandbox wrote ever runs where an OIDC token can
+  # be had: the renderer and the schema come from a fresh checkout of main,
+  # and Muse's answer and session are only read, as data.
+  post-review:
+    needs: review
+    if: >-
+      !cancelled()
+      && needs.review.outputs.review == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TICKET: ${{ github.event.client_payload.ticket }}
+      WORKER: ${{ vars.GERRITHUB_CI_URL }}
+    steps:
+      - name: Check out main's review files
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: .github/review/
+
+      - name: Fetch Muse's answer and session
+        uses: actions/download-artifact@v4
+        with:
+          name: muse-review
+          path: ${{ runner.temp }}/muse-review
+
+      # Posted before anything else, so a failure to render can't lose it.
+      # Gerrit refuses a whole review if one new comment is on a file the
+      # patch set doesn't change, or if a reply to a patch-set-level thread
+      # has a line, so those comments go into the summary instead.
+      - name: Post the review to Gerrit
+        shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHANGE: ${{ github.event.client_payload.change }}
+          PATCHSET: ${{ github.event.client_payload.patchset }}
+        run: |
+          set -o pipefail
+          review="$RUNNER_TEMP/muse-review/review.json"
+          # Only a well-formed answer is posted.
+          jq -e '(.review | type == "string") and (.codeReview | IN(-1, 0, 1)) and (.comments | type == "array")' \
+            "$review" > /dev/null
+          case "$CHANGE,$PATCHSET" in *[!0-9,]*) echo "bad change or patch set"; exit 1 ;; esac
+          project=${REPO_URL#*://*/}
+          host=${REPO_URL%"/$project"}
+          files=$(curl -fsS "$host/changes/${project//\//%2F}~$CHANGE/revisions/$PATCHSET/files" | tail -c +5 | jq -c 'keys')
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=gerrithub-ci" | jq -r .value)
+          echo "::add-mask::$oidc"
+          # The schema has every field and uses null for "none"; the Worker
+          # takes Gerrit's names and no field at all for "none". A reply goes
+          # on its parent's patch set (Gerrit takes it nowhere else), and
+          # "resolved" is Gerrit's "unresolved", inverted. The footer says who
+          # reviewed and where the whole session is.
+          jq --arg ticket "$TICKET" --arg run "$RUN_URL" --argjson files "$files" '
+            def postable: if .inReplyTo != null then .path != "/PATCHSET_LEVEL"
+                          else (.path as $p | $files | index($p)) != null end;
+            def where: "`\(.path)\(if .line then ":\(.line)" else "" end)`";
+            ([.comments[] | select(postable)]) as $inline
+            | ([.comments[] | select(postable | not)]) as $other
+            | {ticket: $ticket,
+               review: (.review
+                 + (if ($other | length) > 0
+                    then "\n\n**Notes that can'"'"'t go inline**\n"
+                      + ([$other[] | "\n- \(where): \(.message | gsub("\n"; "\n  "))"] | join(""))
+                    else "" end)
+                 + "\n\n---\nReviewed by Muse Code with the gerrit-review skill. The whole session is in the run'"'"'s muse-session artifact: " + $run),
+               codeReview,
+               comments: [$inline[]
+                 | {path, line, message, in_reply_to: .inReplyTo, patch_set: .patchSet,
+                    unresolved: (if .resolved == null then null else (.resolved | not) end)}
+                 | with_entries(select(.value != null))]}
+            | if (.comments | length) == 0 then del(.comments) else . end' \
+            "$review" |
+            curl -fsS -H "Authorization: Bearer $oidc" -H 'Content-Type: application/json' \
+              --data @- "$WORKER/review"
+
+      # The session, readable in a browser: the artifact's session.html, with
+      # a short version in the run's summary.
+      - name: Render Muse's session
+        if: always()
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        run: |
+          in="$RUNNER_TEMP/muse-review"
+          mkdir -p "$RUNNER_TEMP/muse-session"
+          python3 -I .github/review/render-session.py \
+            "$in/session.json" "$in/review.json" \
+            --html "$RUNNER_TEMP/muse-session/session.html" \
+            --summary "$RUNNER_TEMP/summary.md" \
+            --session-dir "$in/session-dir"
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the rendered session
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: muse-session
+          path: ${{ runner.temp }}/muse-session/
+          retention-days: 30
+          if-no-files-found: ignore

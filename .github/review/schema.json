@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["review", "codeReview", "comments"],
+  "properties": {
+    "review": {
+      "type": "string",
+      "description": "The review's summary, in Markdown."
+    },
+    "codeReview": {
+      "type": "integer",
+      "enum": [-1, 0, 1],
+      "description": "-1 for something that must change before it lands, 1 if it looks good, 0 for no vote."
+    },
+    "comments": {
+      "type": "array",
+      "description": "New inline comments on this patch set, and replies to earlier threads; at most 100 in all.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "message", "inReplyTo", "patchSet", "resolved"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The file's path in the repository. For a reply, the parent comment's path."
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "description": "For a new comment, the line in this patch set's version of the file, or null for the whole file. For a reply, the parent comment's line."
+          },
+          "message": {
+            "type": "string",
+            "description": "The comment, in Markdown, at most 8,000 characters."
+          },
+          "inReplyTo": {
+            "type": ["string", "null"],
+            "description": "For a reply, the id of the comment it answers; null for a new comment."
+          },
+          "patchSet": {
+            "type": ["integer", "null"],
+            "description": "For a reply, the parent comment's patch set; null for a new comment, which goes on this patch set."
+          },
+          "resolved": {
+            "type": ["boolean", "null"],
+            "description": "true if the thread needs nothing more, false if it still needs action, null to leave it as it is."
+          }
+        }
+      }
+    }
+  }
+}
