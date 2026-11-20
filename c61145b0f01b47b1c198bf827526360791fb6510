@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "21f43f69_dd814720",
+        "filename": "crates/vali-runtime/src/cx.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 473,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:25:53Z",
+      "side": 1,
+      "message": "Fixed in PS2: `pub(crate)`.",
+      "parentUuid": "aac0d120_2c63f5a0",
+      "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "be573619_27a1d86e",
         "filename": "crates/vali-runtime/src/primitives.rs",
         "patchSetId": 1
@@ -37,6 +55,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "3e957478_53fd5e13",
+        "filename": "crates/vali-runtime/src/primitives.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 59,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:25:53Z",
+      "side": 1,
+      "message": "Done in PS2, for `car`, `cdr` and `list-ref` too: `(car (ilist 1 2))` now says \"got #\u003cilist 1 2\u003e\". A million-element vector is cut to about 130 characters, and a circular list prints with labels, so any value is safe in the message.",
+      "parentUuid": "be573619_27a1d86e",
+      "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "86331990_3babe7bb",
         "filename": "docs/adr/0002-value-representation.md",
         "patchSetId": 1
@@ -48,6 +84,24 @@
       "writtenOn": "2026-11-19T21:28:16Z",
       "side": 1,
       "message": "Nit: this row isn\u0027t indented like the rows above it, so it falls out of the list item\u0027s table and renders as a stray paragraph. Indent it four spaces.",
+      "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "a2f8f5ed_13df2bef",
+        "filename": "docs/adr/0002-value-representation.md",
+        "patchSetId": 1
+      },
+      "lineNbr": 95,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:25:53Z",
+      "side": 1,
+      "message": "Fixed in PS2.",
+      "parentUuid": "86331990_3babe7bb",
       "revId": "c61145b0f01b47b1c198bf827526360791fb6510",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
