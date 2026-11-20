@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "86853691_012354c9",
+        "filename": "crates/vali-compiler/lib/srfi/116.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 25,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:20:08Z",
+      "side": 1,
+      "message": "Nit: \"they equal what `equal?` says\" holds for ilists of ilists, but not for an ipair inside an ordinary pair or vector, which the default comparator still compares with `eqv?`:\n\n- `(equal? (ilist (list (ilist 1))) (ilist (list (ilist 1))))` is #t.\n- `(\u003d? ilist-comparator (ilist (list (ilist 1))) (ilist (list (ilist 1))))` is #f.\n\nThe same holds with a vector. Maybe say \"so ilists of ilists agree with `equal?`\", and that ipairs inside other data are compared by the default comparator.",
+      "revId": "b21321c137f028f9a8a2cd138389a987af2fee94",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "b20aea58_c3debe8a",
+        "filename": "crates/vali-compiler/lib/srfi/116.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 679,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:20:08Z",
+      "side": 1,
+      "message": "Nit: this hashes a nested ipair through `ipair-comparator`, whose hash recurses into the cdr, so it walks the whole nested ilist. `(comparator-hash ilist-comparator (ilist big))` with a 100,000-element `big` takes 2.3s in a debug build, while `(comparator-hash ilist-comparator big)` takes under 1ms, since SRFI 128\u0027s list comparator stops hashing after 64 elements (and `make-improper-ilist-comparator` here after 128). A loop over the nested ilist with such a bound would stay consistent with `%element\u003d?`.",
+      "revId": "b21321c137f028f9a8a2cd138389a987af2fee94",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
