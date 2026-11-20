@@ -379,7 +379,7 @@ jobs:
           if ! jq -e '(.review | type == "string") and (.codeReview | IN(-1, 0, 1)) and (.comments | type == "array")' \
             "$review" > /dev/null 2>&1; then
             echo '::warning::Muse gave no review to post; see the session below.'
-            echo 'Muse gave no review to post; the muse-session artifact shows why.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Muse gave no review to post; the session page shows why.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           case "$CHANGE,$PATCHSET" in *[!0-9,]*) echo "bad change or patch set"; exit 1 ;; esac
@@ -406,7 +406,7 @@ jobs:
                     then "\n\n**Notes that can'"'"'t go inline**\n"
                       + ([$other[] | "\n- \(where): \(.message | gsub("\n"; "\n  "))"] | join(""))
                     else "" end)
-                 + "\n\n---\nReviewed by Muse Code with the gerrit-review skill. The whole session is in the run'"'"'s muse-session artifact: " + $run),
+                 + "\n\n---\nReviewed by Muse Code with the gerrit-review skill. The whole session is on the run'"'"'s page: " + $run),
                codeReview,
                comments: [$inline[]
                  | {path, line, message, in_reply_to: .inReplyTo, patch_set: .patchSet,
@@ -417,30 +417,49 @@ jobs:
             curl -fsS -H "Authorization: Bearer $oidc" -H 'Content-Type: application/json' \
               --data @- "$WORKER/review"
 
-      # The session, readable in a browser: the artifact's session.html, with
-      # a short version in the run's summary.
+      # The session, readable in a browser: one self-contained HTML page,
+      # uploaded unzipped so its link opens it in the browser, with a short
+      # version in the run's summary.
       - name: Render Muse's session
         if: always()
         continue-on-error: true
         env:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
           ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          CHANGE: ${{ github.event.client_payload.change }}
+          PATCHSET: ${{ github.event.client_payload.patchset }}
         run: |
           in="$RUNNER_TEMP/muse-review"
+          page="$RUNNER_TEMP/muse-session/muse-review-$CHANGE-$PATCHSET.html"
           mkdir -p "$RUNNER_TEMP/muse-session"
           python3 -I .github/review/render-session.py \
             "$in/session.json" "$in/review.json" \
-            --html "$RUNNER_TEMP/muse-session/session.html" \
+            --html "$page" \
             --summary "$RUNNER_TEMP/summary.md" \
             --session-dir "$in/session-dir"
-          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "PAGE=$page" >> "$GITHUB_ENV"
 
+      # With archive: false the artifact is the file itself, named after it,
+      # and GitHub shows an HTML file in the browser.
       - name: Keep the rendered session
-        if: always()
+        id: page
+        if: always() && env.PAGE != ''
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: muse-session
-          path: ${{ runner.temp }}/muse-session/
+          path: ${{ env.PAGE }}
+          archive: false
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Summarise the review
+        if: always()
+        env:
+          PAGE_URL: ${{ steps.page.outputs.artifact-url }}
+        run: |
+          if [ -n "$PAGE_URL" ]; then
+            printf 'The whole session: [%s](%s)\n\n' "${PAGE##*/}" "$PAGE_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RUNNER_TEMP/summary.md" ]; then
+            cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
