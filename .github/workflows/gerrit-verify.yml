@@ -218,9 +218,11 @@ jobs:
   # use the runner until the timeout. Should that become a problem, reviews
   # can be started only by a trusted reviewer's comment, as "recheck" is.
   review:
-    needs: verify
-    # !cancelled(), not always(): a run that a newer patch set cancels must
-    # not go on to review the patch set it replaced.
+    # It needs nothing from the other jobs, so it runs alongside them rather
+    # than waiting for the tests: a review is most use when something is
+    # wrong, so a patch set that fails them is reviewed too. !cancelled(),
+    # not always(): a run that a newer patch set cancels must not go on to
+    # review the patch set it replaced.
     if: >-
       !cancelled()
       && github.event.client_payload.change_kind != 'TRIVIAL_REBASE'
