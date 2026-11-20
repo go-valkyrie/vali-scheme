@@ -1,0 +1,55 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "8803f91c_452e9ed0",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 339,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:40:49Z",
+      "side": 1,
+      "message": "Nit: this comment is now wrong. `%tab-set!` deletes the entry when the count reaches 0, so nothing has to call `sob-cleanup!` afterwards. Drop it, along with the no-op `sob-cleanup!` and its calls (457, 511, 514, ...).",
+      "revId": "1a79cba8c0dc372f730463ca56ef591229301edd",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "68b9bafe_26a3e029",
+        "filename": "crates/vali-compiler/lib/srfi/146.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 765,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:40:49Z",
+      "side": 1,
+      "message": "Nit: inserting `%hash-depth` here left the comment on `make-mapping-comparator`\u0027s ordering above `%hash-depth`. Move the define above the comment.",
+      "revId": "1a79cba8c0dc372f730463ca56ef591229301edd",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "427d46c6_5ca5df17",
+        "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 266,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:40:49Z",
+      "side": 1,
+      "message": "Missed on PS1, and not blocking: SRFI 146 calls `success` with \"the matching key of mapping\", and `mapping-search` passes the key it holds. `hashmap-search!` and `hashmap-search` (287) pass the key searched for instead. With a string-ci comparator, searching `(hashmap ci \"A\" 1)` for \"a\" calls `success` with \"a\", where `mapping-search` gives \"A\". The table can\u0027t return the key it holds, so this needs `(key . value)` entries as 113 has, or a line in the header.",
+      "revId": "1a79cba8c0dc372f730463ca56ef591229301edd",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
