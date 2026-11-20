@@ -22,9 +22,9 @@
 
 name: gerrit-verify
 # repository_dispatch runs always show the default branch; name them after
-# the change instead. Only fields the Worker validated: numbers and the
-# trigger, never the change's own text.
-run-name: "Gerrit ${{ github.event.client_payload.change }},${{ github.event.client_payload.patchset }} (${{ github.event.client_payload.trigger }})"
+# the change instead. Only fields the Worker validated: numbers and Gerrit's
+# change kind (older Workers sent the trigger), never the change's own text.
+run-name: "Gerrit ${{ github.event.client_payload.change }},${{ github.event.client_payload.patchset }} (${{ github.event.client_payload.change_kind || github.event.client_payload.trigger }})"
 
 on:
   repository_dispatch:
@@ -38,8 +38,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GERRIT_URL: https://review.gerrithub.io
-  PROJECT: ${{ github.event.client_payload.project }}
+  # Where to fetch the patch set: the Worker sends the project's Gerrit URL.
+  # Older Workers sent the project's name instead.
+  REPO_URL: ${{ github.event.client_payload.repo_url || format('https://review.gerrithub.io/{0}', github.event.client_payload.project) }}
   REF: ${{ github.event.client_payload.ref }}
   REVISION: ${{ github.event.client_payload.revision }}
   # jouet is a development aid, not needed to check the code.
@@ -58,18 +59,21 @@ jobs:
     steps:
       - name: Link the change
         env:
-          CHANGE_URL: ${{ github.event.client_payload.url }}
           CHANGE: ${{ github.event.client_payload.change }}
           PATCHSET: ${{ github.event.client_payload.patchset }}
         run: |
-          printf 'Verifying [change %s, patch set %s](%s) at revision %s.\n' \
-            "$CHANGE" "$PATCHSET" "$CHANGE_URL" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+          # REPO_URL is https://<host>/<project>; the change's page is
+          # https://<host>/c/<project>/+/<change>/<patch set>.
+          path=${REPO_URL#*://*/}
+          host=${REPO_URL%"/$path"}
+          printf 'Verifying [change %s, patch set %s](%s/c/%s/+/%s/%s) at revision %s.\n' \
+            "$CHANGE" "$PATCHSET" "$host" "$path" "$CHANGE" "$PATCHSET" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check out the patch set and its parent
         run: |
           case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
           git init -q .
-          git fetch -q --depth=2 "$GERRIT_URL/$PROJECT" "$REF"
+          git fetch -q --depth=2 "$REPO_URL" "$REF"
           git checkout -q FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$REVISION"
 
@@ -123,7 +127,7 @@ jobs:
         run: |
           case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
           git init -q .
-          git fetch -q --depth=1 "$GERRIT_URL/$PROJECT" "$REF"
+          git fetch -q --depth=1 "$REPO_URL" "$REF"
           git checkout -q FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$REVISION"
 
