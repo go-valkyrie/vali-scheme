@@ -16,6 +16,24 @@
       "message": "Original comment on patch set 1.",
       "revId": "440ce3be3336ddc25d4a9e025b659a56f0642c12",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "892800fd_c8b589f2",
+        "filename": "reply-test.txt",
+        "patchSetId": 1
+      },
+      "lineNbr": 1,
+      "author": {
+        "id": 1004381
+      },
+      "writtenOn": "2026-11-20T21:59:49Z",
+      "side": 1,
+      "message": "Reply posted on patch set 1 while patch set 3 is current: fixed.",
+      "parentUuid": "e1a42751_978cda3d",
+      "revId": "440ce3be3336ddc25d4a9e025b659a56f0642c12",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
