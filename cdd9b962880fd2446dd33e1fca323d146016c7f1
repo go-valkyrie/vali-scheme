@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "bfdc27eb_bf24fe68",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 5
+      },
+      "lineNbr": 140,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:02Z",
+      "side": 1,
+      "message": "Nit: this line wasn\u0027t rewrapped after the edit and is now 95 characters long.",
+      "revId": "cdd9b962880fd2446dd33e1fca323d146016c7f1",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "cc282dbc_b9385b6c",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 5
+      },
+      "lineNbr": 240,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:02Z",
+      "side": 1,
+      "message": "Not blocking: this checkout\u0027s cleanup step is the one step after Muse that can still get an OIDC token. It is safe only while Muse\u0027s sandbox can\u0027t write `.git`.\n\n`actions/checkout` runs a cleanup at the end of the job. It runs with the job\u0027s environment, which includes `ACTIONS_ID_TOKEN_REQUEST_*`, because the step-level blanking doesn\u0027t reach it. The cleanup runs `git submodule foreach --recursive ...` in the workspace, and that reads the index, which runs `core.fsmonitor`. I checked with a repository whose `.git/config` sets `core.fsmonitor` to a script that touches a file. `git config --get-regexp` didn\u0027t run it, but checkout\u0027s `submodule foreach` line did. So the comment\u0027s \"every later step has no way to ask for an OIDC token\" holds only while `.git` stays read-only in the sandbox. The skill says it is in CI, which is why this isn\u0027t blocking.\n\nFix: check out main with plain `git` in a `run` step, as `changes` and `verify` do (`git init`, `git fetch --depth\u003d1`, `git checkout`), so no action\u0027s cleanup runs after Muse. Alternatively, say in the comment that the boundary depends on the sandbox keeping `.git` read-only.",
+      "revId": "cdd9b962880fd2446dd33e1fca323d146016c7f1",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
