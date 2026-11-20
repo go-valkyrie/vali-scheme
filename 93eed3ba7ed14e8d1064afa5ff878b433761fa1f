@@ -16,6 +16,24 @@
       "message": "`lseq-filter` now holds on to its source\u0027s head for as long as its result is being read. The generator never `set!`s `lseq`, and the `\u0027start` branch refers to it, so every element it has read from the source stays reachable.\n\nA loop that walks `(lseq-filter even? (generator-\u003elseq counter))` one pair at a time, holding nothing else, peaks at 22 / 31 / 50 MB for 250k / 500k / 1M source elements on the debug CLI. PS1\u0027s `lseq-filter` stays at 15 MB, and so do `lseq-map`, `lseq-take`, `lseq-take-while` and `lseq-\u003egenerator` on PS2. Over an infinite source it grows without limit, and `lseq-remove` inherits it.\n\nKeep the last pair returned in `lseq` itself, as the others do:\n\n```scheme\n(let ((first? #t))  ; until the first match or the end, `lseq` is the source\n  (generator-\u003elseq\n   (lambda ()\n     (let loop ((l (cond (first? lseq)\n                         ((null? lseq) \u0027())\n                         (else (lseq-cdr lseq)))))\n       (cond ((null? l) (set! first? #f) (set! lseq \u0027()) (eof-object))\n             ((pred (lseq-car l)) (set! first? #f) (set! lseq l) (lseq-car l))\n             (else (loop (lseq-cdr l))))))))\n```\n\nThat stays at 15 MB at 1M, still reads a port no further than the last match, resumes where it was after `pred` raises, and passes srfi-127-lazy-sequences.scm.",
       "revId": "93eed3ba7ed14e8d1064afa5ff878b433761fa1f",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "11a02405_40635fb1",
+        "filename": "crates/vali-compiler/lib/srfi/127.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 163,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T18:26:56Z",
+      "side": 1,
+      "message": "Fixed in PS4. Walking `(lseq-filter even? (generator-\u003elseq counter))` one pair at a time now stays at 14 MB for 250k, 500k and 1M source elements, where PS2 and PS3 reached 22, 31 and 50 MB.",
+      "parentUuid": "c0006dc5_dc6eb64d",
+      "revId": "93eed3ba7ed14e8d1064afa5ff878b433761fa1f",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
