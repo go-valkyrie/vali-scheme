@@ -16,6 +16,24 @@
       "message": "Nit: \"ADR 0001 #5\" here and \"the checks of item 5\" in the ADR (1260917, line 87) disagree with the ADR\u0027s next line, \"item 7\u0027s first check\". As the ADR renders, the load checks sit under item 7, whose heading is about scope identities, though they describe item 5\u0027s artifacts. Moving those paragraphs under item 5, or making the references agree, would settle it.",
       "revId": "713a3a00de9a38973db7049eaa99284c4ab7aefb",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "3384740a_dd20c4b0",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 2
+      },
+      "lineNbr": 11,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T17:00:26Z",
+      "side": 1,
+      "message": "Done in PS3, here and in the ADR.",
+      "parentUuid": "df99c6d4_f24c9714",
+      "revId": "713a3a00de9a38973db7049eaa99284c4ab7aefb",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
