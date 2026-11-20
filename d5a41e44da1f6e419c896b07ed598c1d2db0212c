@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6df1fdc6_74a4cef7",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 1
+      },
+      "lineNbr": 451,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T23:54:21Z",
+      "side": 1,
+      "message": "Nit: with `archive: false` the artifact takes the file\u0027s name, and v7 refuses a name that already exists in the run unless `overwrite: true` is set. A re-run of `post-review` in the same run could then fail to upload the page. `continue-on-error` hides the failure, and that attempt\u0027s summary loses its link. Adding `overwrite: true` avoids it.",
+      "revId": "d5a41e44da1f6e419c896b07ed598c1d2db0212c",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
