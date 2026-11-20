@@ -850,4 +850,15 @@
   (let ((t (list 1 2 3)))
     (test-equal (default-hash t) (comparator-hash (make-equal-comparator) t))))
 
+;; bag-count adds each distinct element's count, so it does not loop once
+;; per occurrence.
+(let ((big (bag number-comparator)))
+  (bag-increment! big 1 10000000)
+  (bag-increment! big 2 5)
+  (test 10000005 (bag-count number? big))
+  (test 10000000 (bag-count odd? big))
+  (test 5 (bag-count even? big))
+  (test 0 (bag-count (lambda (x) (> x 5)) big))
+  (test 2 (set-count number? (set number-comparator 1 2))))
+
 (test-end "srfi-113")

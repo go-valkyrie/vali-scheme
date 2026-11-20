@@ -560,10 +560,12 @@
     ;; This is a special case of folding.
 
     (define (sob-count pred sob)
-      (sob-fold
-        (lambda (elem total) (if (pred elem) (+ total 1) total))
-        0
-        sob))
+      (let ((total 0))
+        (%tab-for-each
+          (lambda (elem count)
+            (if (pred elem) (set! total (+ total count))))
+          (sob-hash-table sob))
+        total))
 
     (define (set-count pred set)
       (check-set set)

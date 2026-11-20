@@ -309,6 +309,15 @@
       (unless (mapping? m)
         (error (string-append who ": not a mapping") m)))
 
+    ;; Using procedures on mappings of different key comparators is an
+    ;; error (only `mapping=?` and its relatives take a comparator
+    ;; argument), so the set operations raise one.
+
+    (define (%check-same who a b)
+      (unless (eq? (mapping-key-comparator a) (mapping-key-comparator b))
+        (error (string-append who ": mappings with different key comparators")
+               a b)))
+
     ;; A mapping like `m`, with `tree`.
     (define (%with m tree)
       (%make-mapping (mapping-key-comparator m) (%lt m) tree))
@@ -359,6 +368,7 @@
     (define (mapping-disjoint? m1 m2)
       (%check "mapping-disjoint?" m1)
       (%check "mapping-disjoint?" m2)
+      (%check-same "mapping-disjoint?" m1 m2)
       (not (tree-find (lambda (k v) (mapping-contains? m2 k)) (%tree m1))))
 
     ;; Accessors.
@@ -634,6 +644,7 @@
             m
             (begin
               (%check "mapping-union" (car rest))
+              (%check-same "mapping-union" m (car rest))
               (loop (tree-fold (lambda (k v acc) (%insert acc k v #f))
                                m (%tree (car rest)))
                     (cdr rest))))))
@@ -646,6 +657,7 @@
             m
             (begin
               (%check "mapping-intersection" (car rest))
+              (%check-same "mapping-intersection" m (car rest))
               (loop (mapping-filter (lambda (k v) (mapping-contains? (car rest) k))
                                     m)
                     (cdr rest))))))
@@ -658,6 +670,7 @@
             m
             (begin
               (%check "mapping-difference" (car rest))
+              (%check-same "mapping-difference" m (car rest))
               (loop (mapping-filter
                      (lambda (k v) (not (mapping-contains? (car rest) k)))
                      m)
@@ -667,6 +680,7 @@
     (define (mapping-xor m1 m2)
       (%check "mapping-xor" m1)
       (%check "mapping-xor" m2)
+      (%check-same "mapping-xor" m1 m2)
       (mapping-union (mapping-difference m1 m2) (mapping-difference m2 m1)))
     (define mapping-xor! mapping-xor)
 

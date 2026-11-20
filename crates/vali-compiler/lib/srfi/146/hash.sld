@@ -80,6 +80,15 @@
       (unless (hashmap? m)
         (error (string-append who ": not a hashmap") m)))
 
+    ;; Using procedures on hashmaps of different key comparators is an
+    ;; error (only `hashmap=?` and its relatives take a comparator
+    ;; argument), so the set operations raise one.
+
+    (define (%check-same who a b)
+      (unless (eq? (hashmap-key-comparator a) (hashmap-key-comparator b))
+        (error (string-append who ": hashmaps with different key comparators")
+               a b)))
+
     (define (%check-key m key)
       (comparator-check-type (hashmap-key-comparator m) key))
 
@@ -149,6 +158,7 @@
     (define (hashmap-disjoint? m1 m2)
       (%check "hashmap-disjoint?" m1)
       (%check "hashmap-disjoint?" m2)
+      (%check-same "hashmap-disjoint?" m1 m2)
       (not (hashmap-any? (lambda (k v) (hashmap-contains? m2 k)) m1)))
 
     ;; Accessors.
@@ -441,6 +451,7 @@
       (%check "hashmap-union!" m)
       (for-each (lambda (other)
                   (%check "hashmap-union!" other)
+                  (%check-same "hashmap-union!" m other)
                   (hashmap-for-each (lambda (k v) (%adjoin! m k v)) other))
                 rest)
       m)
@@ -450,6 +461,7 @@
       (%check "hashmap-intersection!" m)
       (for-each (lambda (other)
                   (%check "hashmap-intersection!" other)
+                  (%check-same "hashmap-intersection!" m other)
                   (hashmap-filter! (lambda (k v) (hashmap-contains? other k)) m))
                 rest)
       m)
@@ -460,6 +472,7 @@
       (%check "hashmap-difference!" m)
       (for-each (lambda (other)
                   (%check "hashmap-difference!" other)
+                  (%check-same "hashmap-difference!" m other)
                   (hashmap-filter! (lambda (k v) (not (hashmap-contains? other k)))
                                    m))
                 rest)
@@ -470,6 +483,7 @@
     (define (hashmap-xor! m1 m2)
       (%check "hashmap-xor!" m1)
       (%check "hashmap-xor!" m2)
+      (%check-same "hashmap-xor!" m1 m2)
       (let ((from-2 (hashmap-difference m2 m1)))
         (hashmap-difference! m1 m2)
         (hashmap-union! m1 from-2)))
