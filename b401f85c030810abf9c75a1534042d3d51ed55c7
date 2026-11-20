@@ -71,6 +71,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "e46008e4_382e4f24",
+        "filename": "crates/vali-compiler/src/cache.rs",
+        "patchSetId": 1
+      },
+      "lineNbr": 172,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T17:00:24Z",
+      "side": 1,
+      "message": "Fixed in PS3. Toggling `(opt feature)` on and off with a cache, in both orders, now gives what `--no-cache` gives for a `cond-expand` in the library\u0027s text, in an included file, nested in a `let`, and from another library\u0027s macro (the case above), and for a library that imports the affected one. The answers are credited to the unit being expanded (`units.last_mut()`, as `transformers.rs` already assumes), and a library\u0027s imports are all loaded before its unit is pushed, so they land on the right artifact.",
+      "parentUuid": "acf49a29_837114a1",
+      "revId": "b401f85c030810abf9c75a1534042d3d51ed55c7",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "aeec660a_b897be7a",
