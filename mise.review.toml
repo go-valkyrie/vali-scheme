@@ -1,0 +1,6 @@
+# The review environment: what gerrit-verify.yml's review job needs, on top
+# of mise.toml's hk. The job sets MISE_ENV=review, so `bin/mise install`
+# installs Muse Code and none of the development tools.
+
+[tools]
+muse = "1.4.24-R9131.1"
