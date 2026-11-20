@@ -246,6 +246,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "4288c3e8_f727457f",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 1
+      },
+      "lineNbr": 1308,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T18:27:09Z",
+      "side": 1,
+      "message": "The self-containing case is linear in PS4. A set of 3,840 boxes that each hold the set costs one element hash per box (0.12 s), and bags and hashmaps behave the same. But see the new comment on PS4 at 1330 about what this costs elsewhere.",
+      "parentUuid": "c244b9ac_b91c89db",
+      "revId": "3238d22f6af70e356c32dad7fc3ac652b3a7627b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "89094493_6f87ad86",
