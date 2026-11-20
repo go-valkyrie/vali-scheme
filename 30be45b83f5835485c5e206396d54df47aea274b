@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "aa53525f_bf932437",
+        "filename": "crates/vali-compiler/lib/srfi/158.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 138,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:40:47Z",
+      "side": 1,
+      "message": "The `guard` I suggested on PS1 goes too far: it also catches `raise-continuable`, so a handler around the call can\u0027t return a value to the procedure, and the generator ends.\n\n```scheme\n(define g (make-coroutine-generator\n           (lambda (yield) (yield (list \u0027got (raise-continuable \u0027warning))) (yield 2))))\n(with-exception-handler (lambda (e) 42) (lambda () (g)))\n```\n\nPS1 gives `(got 42)` and then `2`. PS2 raises \"an exception handler returned from a non-continuable exception\", and the next `(g)` gives eof. This happens on the first call too, which PS1 got right.\n\nSuspend the procedure at the raise instead of unwinding it:\n\n- Inside the `guard`, wrap `(proc yield)` in a `with-exception-handler` whose handler saves its own continuation as `resume` and passes the condition out through `return`, tagged.\n- The generator raises it again with `raise-continuable`. If the handler returns a value, resume the procedure with it and treat what comes back as this call\u0027s result.\n- If a plain `raise` gets a value back from the handler, the procedure raises a secondary error, which the `guard` passes on as it does now. If the caller\u0027s handler escaped instead, end the generator on the next call.\n\nA version along these lines gives `(got 42)` then `2`, still gives `second` for the PS1 example, leaves the procedure\u0027s own `guard`s alone, and passes srfi-158-generators.scm. Add the `raise-continuable` case to the test.",
+      "revId": "30be45b83f5835485c5e206396d54df47aea274b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "61186b09_c727009b",
+        "filename": "tests/regressions/srfi-158-generators.scm",
+        "patchSetId": 2
+      },
+      "lineNbr": 441,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T16:40:47Z",
+      "side": 1,
+      "message": "Nit: the comment says output goes to the port current at the first call, but the test only checks that the values are `(1 2)`. Have the procedure write to the current port and check which port gets the output, or drop the comment.",
+      "revId": "30be45b83f5835485c5e206396d54df47aea274b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
