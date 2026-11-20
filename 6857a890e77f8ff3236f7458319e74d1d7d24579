@@ -1,0 +1,157 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "8afbf53b_6fd5d81c",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 4
+      },
+      "lineNbr": 48,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "In the review job this clone has no copy of the patch set, so the checkout on the next line fails.\n\n`actions/checkout` fetches main at depth 1, so the workspace is shallow. Git won\u0027t clone a shallow repository locally: it ignores `--shared`, writes no `alternates`, and fetches only branches and `HEAD`, not `refs/review/patchset`. I set up a copy the way the job does (main at depth 1, the patch set fetched at depth 2 into `refs/review/patchset`) and ran the recipe:\n\n```\n$ git -C \"$scratch\" checkout -q --detach 6857a890e77f8ff3236f7458319e74d1d7d24579\nfatal: reference is not a tree: 6857a890e77f8ff3236f7458319e74d1d7d24579\n```\n\nSo every probe starts with a failure that Muse has to get round. The easy way round is to check out `REV` in the working tree. The skill forbids that, and it puts the change\u0027s own `render-session.py` in front of the Render step (see gerrit-verify.yml:386).\n\nFix: `git worktree add -q --detach \"$scratch\" REV` works on the shallow repository and shares its objects. I ran it, and it gives 6857a89 on 8c7b120. Remove it afterwards with `git worktree remove --force \"$scratch\"`. Fetching the ref into the clone before the checkout also works: `git -C \"$scratch\" fetch -q \"$repo\" refs/review/patchset`.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "04219c8f_1c9da9dc",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 4
+      },
+      "lineNbr": 134,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "Nit: \"You can\u0027t run the code\" contradicts the probe section above, which says to time probes at N, 4N and 16N. A model that reads this line may skip the timing.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6f83f8bc_2285bb40",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 4
+      },
+      "lineNbr": 144,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "Nit: the scope is optional (AGENTS.md:58), and this change\u0027s own subject, `ci: ...`, has none. As written, Muse could vote −1 on a valid subject. Something like \"`type(scope): description`, with an optional scope that `hk.pkl` lists\" would fix it.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "8d1b73a1_e96b2356",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 4
+      },
+      "lineNbr": 218,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "Gerrit refuses an inline comment on a file the patch set doesn\u0027t change, and the whole review with it.\n\nGerrit\u0027s `CommentsValidator` checks each comment\u0027s path against the files the revision changes. One miss fails the whole request with 400: `file \u003cpath\u003e not found in revision`. The Worker then answers 502, `curl -f` fails, and nothing is posted, after the review has been paid for. \"One finding per comment, on the line where it happens\" leads to exactly this. Typical cases are a caller the change didn\u0027t update, or `check.yml`\u0027s copy of the list that gerrit-verify.yml says must match. Two more cases fail the same way:\n\n- A reply to a `/PATCHSET_LEVEL` thread has no line. The Worker sends `line: 0`, and Gerrit refuses that with `Patchset-level comments can\u0027t have side, range, or line`. This one is gerrithub-ci\u0027s to fix: leave `line` out when none was given.\n- The skill doesn\u0027t say where commit-message findings (rule 5) go. Gerrit\u0027s `/COMMIT_MSG` starts with a `Parent:`/`Author:`/`Commit:` header, so its line numbers aren\u0027t those of `git log -1 --format\u003d%B`.\n\nFix: tell the skill to put new comments only on files `git diff --name-only REV^ REV` lists, or on `/COMMIT_MSG` with that header taken into account. Anything else goes in the summary. Then have the Post step enforce it by moving any other comment into the summary, so one stray path can\u0027t sink the review.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "b3756a57_945bc6b8",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 218,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "`always()` keeps this job running when a newer patch set cancels the run.\n\nWhen GitHub cancels a run, it re-checks each job\u0027s `if`, and `always()` stays true, so this job isn\u0027t cancelled. If it hasn\u0027t started yet, it starts once `verify` is cancelled. (The vote job relies on the same behaviour, which is why the Worker handles a `cancelled` result.) So when a patch set is replaced while it builds, the old run still mints a token, runs a full `xhigh` review of up to 200 steps, and posts it with a vote on the replaced patch set. The cancelled run stays in progress until this job ends, so the new patch set\u0027s run should wait behind it in the `gerrit-\u003cchange\u003e` group, for up to 45 minutes. It will happen often: this change\u0027s PS2 came four minutes after PS1.\n\nFix: `!cancelled()` in place of `always()`. A patch set whose build failed still gets reviewed.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "699be3d3_6951c254",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 223,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "Not blocking: the review token lasts 30 minutes, but the job allows 45.\n\ngerrithub-ci\u0027s `MUSE_TOKEN_TTL_SECONDS` defaults to 1800, and Muse starts only after the setup steps. A long `xhigh` session with cold-cache builds will start getting 401s from `/v1` near its end, when most of its tokens are already spent, and nothing gets posted.\n\nFix: raise the Worker\u0027s TTL (it is capped at 3600), or make the job\u0027s and Muse\u0027s limits fit within 30 minutes.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "f6a8414a_0724b757",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 259,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "Not blocking: when a fetch fails, this step fails instead of falling back.\n\nWithout a `shell`, a step runs `bash -e` with no `pipefail`. So `get` returns `tail`\u0027s status, and `comments\u003d$(get comments)` succeeds with empty output. `jq --argjson comments \"\"` then fails, and `-e` ends the step. I ran the step with a change number that doesn\u0027t exist:\n\n```\ncurl: (22) The requested URL returned error: 404\njq: invalid JSON text passed to --argjson\nexit\u003d2\n```\n\nA brief Gerrit outage would therefore fail the job, not review without the history as the warning says.\n\nFix: `shell: bash` (that adds `pipefail`), and move the `jq` into the `if` condition, so bad JSON falls back as well.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "0d71538e_6e5e75ce",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 386,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "This step runs a file the change\u0027s code can rewrite, and it can still get an OIDC token.\n\nThe skill has Muse build and test the change (`cargo build -p vali-cli`, `cargo test`), so the change\u0027s `build.rs` files and tests run in Muse\u0027s sandbox. The sandbox can write the workspace (line 209). It has to, for the skill\u0027s `target` symlink to work. Only the Muse step blanks `ACTIONS_ID_TOKEN_REQUEST_*` (line 332), so this step still has both, and `TICKET` from the job\u0027s `env`.\n\nSo a patch set can add a `build.rs` that overwrites `.github/review/render-session.py`. The workspace is reachable from `OUT_DIR`, which is under the workspace\u0027s `target/`. Then this step runs the new script, which does what the vote job does: it gets an OIDC token for `gerrithub-ci` and POSTs `/review` with the ticket. That posts any text it likes, with Code-Review +1, as the CI account. Or it POSTs `/muse-token` and uses the LLM key through `/v1` until the run ends, which it can hold off for the job\u0027s 45 minutes. No hostile `build.rs` is needed if Muse gets round SKILL.md:48 by checking out `REV` in the working tree: this step then runs the change\u0027s own copy of the script.\n\nA trusted reviewer\u0027s \"recheck\" can bring anyone\u0027s patch set here. That is more than \"the worst a hostile one can do is steer its review\", and it breaks the header\u0027s rule that the jobs that run the change\u0027s code get no token.\n\nFix: anything that can get an OIDC token must not run a file the sandbox could have written. For example, upload `review.json` and the session export as artifacts, and render and post in a job of their own that `needs: review`, checks out main afresh and has `id-token: write`. Then blank `ACTIONS_ID_TOKEN_REQUEST_*` on every review-job step after the token step. Copying the script to `$RUNNER_TEMP` before Muse and blanking the variables here also works. Post would still run `jq` and `curl` from a `PATH` that has `~/.local/bin` and `~/.cargo/bin` ahead of `/usr/bin`, so check that the sandbox can\u0027t write there.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "0bc8bce6_451e7a2a",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 402,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:40:38Z",
+      "side": 1,
+      "message": "Not blocking: if Render or Keep fails, this step is skipped and the review is lost.\n\nThe `if` here has an implicit `success()`. So if `render-session.py` throws on an export shape it doesn\u0027t expect, or the artifact upload fails, the review Muse finished is never posted.\n\nFix: post first, then render and upload under `always()`. Or give Render and Keep `continue-on-error: true`. Moving the post into a job of its own (see line 386) also fixes this.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
