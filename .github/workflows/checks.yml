@@ -191,6 +191,14 @@ jobs:
         if: matrix.check == 'lint'
         run: bin/mise run lint
 
+      # The debugger tests fail, not skip, when CI is set and these are
+      # missing. The base test pass runs them too (cargo test --workspace
+      # includes their test binary), so it needs them as well,
+      # before any test step runs.
+      - name: Install the debuggers
+        if: matrix.check == 'test' || matrix.check == 'debugger'
+        run: sudo apt-get update && sudo apt-get install -y gdb lldb
+
       - name: Test
         if: matrix.check == 'test'
         run: bin/mise run test-base
@@ -202,13 +210,6 @@ jobs:
       - name: Test with eager conversion
         if: matrix.check == 'test-eager'
         run: bin/mise run test-eager
-
-      # The debugger tests fail, not skip, when CI is set and these are
-      # missing. The base test pass runs them too (cargo test --workspace
-      # includes their test binary), so it needs them as well.
-      - name: Install the debuggers
-        if: matrix.check == 'test' || matrix.check == 'debugger'
-        run: sudo apt-get update && sudo apt-get install -y gdb lldb
 
       - name: Debugger tests
         if: matrix.check == 'debugger'
