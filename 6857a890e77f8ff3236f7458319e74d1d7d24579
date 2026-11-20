@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "6613b82e_834dbc7d",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 4
+      },
+      "lineNbr": 48,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5. I ran the new recipe (`git init`, then `fetch --depth\u003d2 \"$repo\" REV`) on a workspace set up as the job does it, with main at depth 1. It checks out cdd9b96 on 8c7b120.",
+      "parentUuid": "8afbf53b_6fd5d81c",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "04219c8f_1c9da9dc",
         "filename": ".claude/skills/gerrit-review/SKILL.md",
         "patchSetId": 4
@@ -69,6 +87,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "cc03754c_3a81a12f",
+        "filename": ".claude/skills/gerrit-review/SKILL.md",
+        "patchSetId": 4
+      },
+      "lineNbr": 218,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5. The skill now keeps new comments to changed files and puts commit-message findings in the summary. The Post step enforces it too. I ran its `jq` on test input: a new comment on a file Gerrit doesn\u0027t list and a reply to a `/PATCHSET_LEVEL` thread both moved under **Notes that can\u0027t go inline**. A changed-file comment, a reply on an earlier patch set and a `/COMMIT_MSG` comment stayed inline. One side effect: Muse can\u0027t resolve a `/PATCHSET_LEVEL` thread until gerrithub-ci stops sending `line: 0`.",
+      "parentUuid": "8d1b73a1_e96b2356",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "b3756a57_945bc6b8",
@@ -82,6 +118,24 @@
       "writtenOn": "2026-11-20T22:40:38Z",
       "side": 1,
       "message": "`always()` keeps this job running when a newer patch set cancels the run.\n\nWhen GitHub cancels a run, it re-checks each job\u0027s `if`, and `always()` stays true, so this job isn\u0027t cancelled. If it hasn\u0027t started yet, it starts once `verify` is cancelled. (The vote job relies on the same behaviour, which is why the Worker handles a `cancelled` result.) So when a patch set is replaced while it builds, the old run still mints a token, runs a full `xhigh` review of up to 200 steps, and posts it with a vote on the replaced patch set. The cancelled run stays in progress until this job ends, so the new patch set\u0027s run should wait behind it in the `gerrit-\u003cchange\u003e` group, for up to 45 minutes. It will happen often: this change\u0027s PS2 came four minutes after PS1.\n\nFix: `!cancelled()` in place of `always()`. A patch set whose build failed still gets reviewed.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "5cd67cc5_7f39e8dc",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 218,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5: `review` and `post-review` both use `!cancelled()`.",
+      "parentUuid": "b3756a57_945bc6b8",
       "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
@@ -103,6 +157,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "515d2a7b_0e341d96",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 223,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5: the Muse step has `timeout-minutes: 28`, inside the token\u0027s 30 minutes.",
+      "parentUuid": "699be3d3_6951c254",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "f6a8414a_0724b757",
@@ -116,6 +188,24 @@
       "writtenOn": "2026-11-20T22:40:38Z",
       "side": 1,
       "message": "Not blocking: when a fetch fails, this step fails instead of falling back.\n\nWithout a `shell`, a step runs `bash -e` with no `pipefail`. So `get` returns `tail`\u0027s status, and `comments\u003d$(get comments)` succeeds with empty output. `jq --argjson comments \"\"` then fails, and `-e` ends the step. I ran the step with a change number that doesn\u0027t exist:\n\n```\ncurl: (22) The requested URL returned error: 404\njq: invalid JSON text passed to --argjson\nexit\u003d2\n```\n\nA brief Gerrit outage would therefore fail the job, not review without the history as the warning says.\n\nFix: `shell: bash` (that adds `pipefail`), and move the `jq` into the `if` condition, so bad JSON falls back as well.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6ab0cb30_2c16bd7c",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 259,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5: `shell: bash` with `pipefail`, and the `jq` is part of the `if` condition, so a failed fetch or bad JSON falls back to an empty history.",
+      "parentUuid": "f6a8414a_0724b757",
       "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
@@ -137,6 +227,24 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "89947e19_81176c11",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 386,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5. Rendering and posting now run in `post-review`, on a fresh runner with a fresh checkout of main, and the review job only uploads Muse\u0027s answer and session as data. Collect and Keep blank `ACTIONS_ID_TOKEN_REQUEST_*`. One step can still get a token after Muse runs: `actions/checkout`\u0027s cleanup at the end of the job. That holds only while Muse\u0027s sandbox can\u0027t write `.git`; see the new note on PS5 line 240.",
+      "parentUuid": "0d71538e_6e5e75ce",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "0bc8bce6_451e7a2a",
@@ -150,6 +258,24 @@
       "writtenOn": "2026-11-20T22:40:38Z",
       "side": 1,
       "message": "Not blocking: if Render or Keep fails, this step is skipped and the review is lost.\n\nThe `if` here has an implicit `success()`. So if `render-session.py` throws on an export shape it doesn\u0027t expect, or the artifact upload fails, the review Muse finished is never posted.\n\nFix: post first, then render and upload under `always()`. Or give Render and Keep `continue-on-error: true`. Moving the post into a job of its own (see line 386) also fixes this.",
+      "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "fbc2b163_73eed2fe",
+        "filename": ".github/workflows/gerrit-verify.yml",
+        "patchSetId": 4
+      },
+      "lineNbr": 402,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T22:54:00Z",
+      "side": 1,
+      "message": "Fixed in PS5: `post-review` posts first, and rendering and upload run afterwards under `always()` with `continue-on-error`.",
+      "parentUuid": "0bc8bce6_451e7a2a",
       "revId": "6857a890e77f8ff3236f7458319e74d1d7d24579",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
