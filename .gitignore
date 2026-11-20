@@ -3,3 +3,7 @@ __pycache__/
 
 # Per-machine mise overrides (e.g. a local RUSTC_WRAPPER)
 mise.local.toml
+
+# The gerrit-verify review job's scratch space: the earlier review, the
+# patch set's build and Muse's probes.
+/.review/
