@@ -281,8 +281,17 @@ jobs:
           jq -n --arg url "$WORKER/v1" \
             '{schema_version: 1, endpoint_transport: {base_url: $url, auth: "bearer"}}' \
             > "$config/muse/settings.json"
+          # Muse's session log, followed alongside it, shows in this step's
+          # log what Muse does as it does it. The model and the change write
+          # that text, so GitHub reads none of it as a workflow command.
+          stop=$(cat /proc/sys/kernel/random/uuid)
+          echo "::stop-commands::$stop"
+          # (Its stderr would only say it was stopped.)
+          .github/review/watch-session.sh "$session" 2> /dev/null &
+          watcher=$!
           # The token goes in on stdin, so it is in no environment or
           # command line; it is good for this patch set and a short while.
+          status=0
           printf '%s' "$token" |
             XDG_CONFIG_HOME="$config" "$MUSE" exec \
               --api-key-stdin \
@@ -297,7 +306,13 @@ jobs:
               --no-foreign-personal-context \
               --max-model-steps 200 \
               "/gerrit-review $CHANGE,$PATCHSET $REVISION" \
-              > "$RUNNER_TEMP/muse-review/review.json"
+              > "$RUNNER_TEMP/muse-review/review.json" || status=$?
+          # Let the viewer print the last of the log, then stop it.
+          sleep 2
+          pkill -P "$watcher" 2> /dev/null || true
+          kill "$watcher" 2> /dev/null || true
+          echo "::$stop::"
+          exit "$status"
 
       # Muse's answer and session log, for post-review. Kept even when Muse
       # failed, to see why. A workflow's subagents are sessions of their own,
