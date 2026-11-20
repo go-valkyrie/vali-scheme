@@ -80,6 +80,15 @@
       (unless (hashmap? m)
         (error (string-append who ": not a hashmap") m)))
 
+    ;; Using procedures on hashmaps of different key comparators is an
+    ;; error (only `hashmap=?` and its relatives take a comparator
+    ;; argument), so the set operations raise one.
+
+    (define (%check-same who a b)
+      (unless (eq? (hashmap-key-comparator a) (hashmap-key-comparator b))
+        (error (string-append who ": hashmaps with different key comparators")
+               a b)))
+
     (define (%check-key m key)
       (comparator-check-type (hashmap-key-comparator m) key))
 
@@ -149,6 +158,7 @@
     (define (hashmap-disjoint? m1 m2)
       (%check "hashmap-disjoint?" m1)
       (%check "hashmap-disjoint?" m2)
+      (%check-same "hashmap-disjoint?" m1 m2)
       (not (hashmap-any? (lambda (k v) (hashmap-contains? m2 k)) m1)))
 
     ;; Accessors.
@@ -434,46 +444,65 @@
     (define (hashmap>? comparator m . rest)
       (%chain "hashmap>?" (lambda (c a b) (%proper? c b a)) comparator m rest))
 
-    ;; Set theory: keys are compared, and the first hashmap in which a key
-    ;; appears supplies its association.
+;; Set theory: keys are compared, and the first hashmap in which a key
+    ;; appears supplies its association. Every argument is checked against
+    ;; the first, under the caller's name, before any work is done.
 
-    (define (hashmap-union! m . rest)
-      (%check "hashmap-union!" m)
+    (define (%check-all who m rest)
+      (%check who m)
       (for-each (lambda (other)
-                  (%check "hashmap-union!" other)
+                  (%check who other)
+                  (%check-same who m other))
+                rest))
+
+    (define (%union! m rest)
+      (for-each (lambda (other)
                   (hashmap-for-each (lambda (k v) (%adjoin! m k v)) other))
                 rest)
       m)
-    (define (hashmap-union m . rest) (apply hashmap-union! (hashmap-copy m) rest))
-
-    (define (hashmap-intersection! m . rest)
-      (%check "hashmap-intersection!" m)
+    (define (%intersection! m rest)
       (for-each (lambda (other)
-                  (%check "hashmap-intersection!" other)
                   (hashmap-filter! (lambda (k v) (hashmap-contains? other k)) m))
                 rest)
       m)
-    (define (hashmap-intersection m . rest)
-      (apply hashmap-intersection! (hashmap-copy m) rest))
-
-    (define (hashmap-difference! m . rest)
-      (%check "hashmap-difference!" m)
+    (define (%difference! m rest)
       (for-each (lambda (other)
-                  (%check "hashmap-difference!" other)
                   (hashmap-filter! (lambda (k v) (not (hashmap-contains? other k)))
                                    m))
                 rest)
       m)
+    (define (%xor! m1 m2)
+      (let ((from-2 (%difference! (hashmap-copy m2) (list m1))))
+        (%difference! m1 (list m2))
+        (%union! m1 (list from-2))))
+
+    (define (hashmap-union! m . rest)
+      (%check-all "hashmap-union!" m rest)
+      (%union! m rest))
+    (define (hashmap-union m . rest)
+      (%check-all "hashmap-union" m rest)
+      (%union! (hashmap-copy m) rest))
+
+    (define (hashmap-intersection! m . rest)
+      (%check-all "hashmap-intersection!" m rest)
+      (%intersection! m rest))
+    (define (hashmap-intersection m . rest)
+      (%check-all "hashmap-intersection" m rest)
+      (%intersection! (hashmap-copy m) rest))
+
+    (define (hashmap-difference! m . rest)
+      (%check-all "hashmap-difference!" m rest)
+      (%difference! m rest))
     (define (hashmap-difference m . rest)
-      (apply hashmap-difference! (hashmap-copy m) rest))
+      (%check-all "hashmap-difference" m rest)
+      (%difference! (hashmap-copy m) rest))
 
     (define (hashmap-xor! m1 m2)
-      (%check "hashmap-xor!" m1)
-      (%check "hashmap-xor!" m2)
-      (let ((from-2 (hashmap-difference m2 m1)))
-        (hashmap-difference! m1 m2)
-        (hashmap-union! m1 from-2)))
-    (define (hashmap-xor m1 m2) (hashmap-xor! (hashmap-copy m1) m2))
+      (%check-all "hashmap-xor!" m1 (list m2))
+      (%xor! m1 m2))
+    (define (hashmap-xor m1 m2)
+      (%check-all "hashmap-xor" m1 (list m2))
+      (%xor! (hashmap-copy m1) m2))
 
     ;; Comparators: equal when `hashmap=?`, and no order.
 
