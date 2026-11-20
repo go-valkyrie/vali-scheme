@@ -20,6 +20,24 @@
     {
       "unresolved": false,
       "key": {
+        "uuid": "dda49773_6630fe59",
+        "filename": "crates/vali-compiler/lib/srfi/158.sld",
+        "patchSetId": 2
+      },
+      "lineNbr": 138,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T18:26:58Z",
+      "side": 1,
+      "message": "Fixed in PS4. My example gives `(got 42)`, then `2`, then eof, and the PS1 example still gives `1`, then `second`. Also checked:\n\n- The handler runs in the caller\u0027s `parameterize`.\n- With one generator calling another, an answer gets through both.\n- A `dynamic-wind` around the raise inside the procedure is left before the handler runs and entered again after it.\n- `make-for-each-generator` behaves the same way.\n- A `guard` inside the procedure still sees its own raise first.\n- A handler that raises something else finishes the generator.",
+      "parentUuid": "aa53525f_bf932437",
+      "revId": "30be45b83f5835485c5e206396d54df47aea274b",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
         "uuid": "61186b09_c727009b",
         "filename": "tests/regressions/srfi-158-generators.scm",
         "patchSetId": 2
