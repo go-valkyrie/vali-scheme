@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "955389ba_028628c5",
+        "filename": "crates/vali-compiler/lib/srfi/113.sld",
+        "patchSetId": 4
+      },
+      "lineNbr": 1330,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T18:27:01Z",
+      "side": 1,
+      "message": "This trades the cubic case for a worse one. A set nested in the set being hashed now counts by its size alone, so all sets whose nested sets have the same sizes hash alike.\n\nTake a hash table keyed by `{{i}, {i+n}}`, for i below n:\n\n- 500 keys: PS3 takes 1.6 s and gives 500 distinct hashes. PS4 takes 64 s, and every key has the same hash.\n- 1,000 keys: PS3 takes 4.2 s. PS4 takes 279 s.\n\nHashmaps keyed by hashmaps behave the same (hash.sld:487): 500 keys take 75 s on PS4 against 1.8 s on PS3. 146.sld:789 has the same rule for mappings. Sets of sets as keys are far more likely than a set that holds itself, so my PS2 comment pushed the wrong way. I\u0027d rather have PS3\u0027s depth bound back than this.\n\nThe two can be combined. Keep `%hash-depth`, and hash a nested sob in full only while it has at most 16 distinct elements. I tried it on PS4, with the test `(or (\u003e\u003d %hash-depth 3) (and (\u003e %hash-depth 0) (\u003e size 16)))`:\n\n- A set of n boxes that each hold the set costs one element hash per box once n \u003e 16 (3,840 boxes: 0.12 s). At n \u003d 16 it costs 4,368.\n- The 1,000 set-of-sets keys get 1,000 distinct hashes, in 3.9 s.\n- srfi-113-sets-and-bags.scm passes all 394 tests.\n\nWhatever the rule, it may look only at the depth and at the nested sob itself. If it looked at which objects were already seen, equal sets could hash differently.\n\nNot blocking: each of the three libraries has its own flag, so a set holding hashmaps that hold the set still costs n². With 960 of each that is 922,560 element hashes, 36 s. A depth counter shared by 113, 146 and 146/hash would make that linear too.",
+      "revId": "7927067d755666801355bf92ae16c5aa1a29a687",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6f26f4d9_1a1c5110",
+        "filename": "crates/vali-compiler/lib/srfi/146/hash.sld",
+        "patchSetId": 4
+      },
+      "lineNbr": 487,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-20T18:27:01Z",
+      "side": 1,
+      "message": "Same as 113.sld:1330. A hashmap nested in the one being hashed counts by its size alone, so 500 hashmap-of-hashmap keys share one hash. That takes 75 s, against 1.8 s on PS3.",
+      "revId": "7927067d755666801355bf92ae16c5aa1a29a687",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
