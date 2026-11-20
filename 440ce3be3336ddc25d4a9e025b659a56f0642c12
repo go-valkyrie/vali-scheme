@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "e1a42751_978cda3d",
+        "filename": "reply-test.txt",
+        "patchSetId": 1
+      },
+      "lineNbr": 1,
+      "author": {
+        "id": 1004381
+      },
+      "writtenOn": "2026-11-20T21:59:12Z",
+      "side": 1,
+      "message": "Original comment on patch set 1.",
+      "revId": "440ce3be3336ddc25d4a9e025b659a56f0642c12",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
