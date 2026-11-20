@@ -204,9 +204,10 @@ jobs:
         run: bin/mise run test-eager
 
       # The debugger tests fail, not skip, when CI is set and these are
-      # missing.
+      # missing. The base test pass runs them too (cargo test --workspace
+      # includes their test binary), so it needs them as well.
       - name: Install the debuggers
-        if: matrix.check == 'debugger'
+        if: matrix.check == 'test' || matrix.check == 'debugger'
         run: sudo apt-get update && sudo apt-get install -y gdb lldb
 
       - name: Debugger tests
