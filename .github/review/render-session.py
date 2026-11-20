@@ -434,8 +434,7 @@ def render_summary(export, review, session_dir=None):
     tool_count = sum(1 for x in entries if x["type"] == "tool")
     lines = ["### Muse review",
              f"{model or 'unknown model'}: {tool_count} tool calls, {sums['input_tokens']:,} input and "
-             f"{sums['output_tokens']:,} output tokens{f' (with {agents} subagents)' if agents else ''}. The whole session is `session.html` in the "
-             "`muse-session` artifact."]
+             f"{sums['output_tokens']:,} output tokens{f' (with {agents} subagents)' if agents else ''}."]
     if review:
         vote = review.get("codeReview")
         lines += ["", f"**Code-Review {vote:+d}**" if isinstance(vote, int) else "**No vote**", "",
