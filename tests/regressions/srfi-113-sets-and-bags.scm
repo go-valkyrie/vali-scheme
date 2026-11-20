@@ -850,4 +850,16 @@
   (let ((t (list 1 2 3)))
     (test-equal (default-hash t) (comparator-hash (make-equal-comparator) t))))
 
+;; bag-count tests each distinct element once and adds its count, so it
+;; does not call the predicate once per occurrence.
+(let ((b (bag number-comparator)) (calls 0))
+  (bag-increment! b 1 1000)
+  (test 1000 (bag-count (lambda (x) (set! calls (+ calls 1)) #t) b))
+  (test 1 calls))
+(let ((b (bag number-comparator 1 1 1 2 2)))
+  (test 3 (bag-count odd? b))
+  (test 2 (bag-count even? b))
+  (test 5 (bag-count number? b))
+  (test 2 (set-count number? (set number-comparator 1 2))))
+
 (test-end "srfi-113")

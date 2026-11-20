@@ -309,6 +309,16 @@
       (unless (mapping? m)
         (error (string-append who ": not a mapping") m)))
 
+    ;; Using procedures on mappings of different key comparators is an
+    ;; error (SRFI 146 excepts only `mapping=?`, which returns `#f`, as its
+    ;; relatives here do through `%submapping?`), so the set operations
+    ;; raise one.
+
+    (define (%check-same who a b)
+      (unless (eq? (mapping-key-comparator a) (mapping-key-comparator b))
+        (error (string-append who ": mappings with different key comparators")
+               a b)))
+
     ;; A mapping like `m`, with `tree`.
     (define (%with m tree)
       (%make-mapping (mapping-key-comparator m) (%lt m) tree))
@@ -359,6 +369,7 @@
     (define (mapping-disjoint? m1 m2)
       (%check "mapping-disjoint?" m1)
       (%check "mapping-disjoint?" m2)
+      (%check-same "mapping-disjoint?" m1 m2)
       (not (tree-find (lambda (k v) (mapping-contains? m2 k)) (%tree m1))))
 
     ;; Accessors.
@@ -627,48 +638,72 @@
     ;; Set theory. Only keys are compared, and the first mapping in which
     ;; a key appears supplies its association.
 
-    (define (mapping-union m . rest)
-      (%check "mapping-union" m)
+    ;; Every argument is checked against the first, under the caller's
+    ;; name (the `!` forms are entries of their own, so that an error
+    ;; names the procedure the caller used), and the workers do not check.
+
+    (define (%check-all who m rest)
+      (%check who m)
+      (for-each (lambda (other)
+                  (%check who other)
+                  (%check-same who m other))
+                rest))
+
+    (define (%union m rest)
       (let loop ((m m) (rest rest))
         (if (null? rest)
             m
-            (begin
-              (%check "mapping-union" (car rest))
-              (loop (tree-fold (lambda (k v acc) (%insert acc k v #f))
-                               m (%tree (car rest)))
-                    (cdr rest))))))
-    (define mapping-union! mapping-union)
+            (loop (tree-fold (lambda (k v acc) (%insert acc k v #f))
+                             m (%tree (car rest)))
+                  (cdr rest)))))
+
+    (define (%intersection m rest)
+      (let loop ((m m) (rest rest))
+        (if (null? rest)
+            m
+            (loop (mapping-filter (lambda (k v) (mapping-contains? (car rest) k))
+                                  m)
+                  (cdr rest)))))
+
+    (define (%difference m rest)
+      (let loop ((m m) (rest rest))
+        (if (null? rest)
+            m
+            (loop (mapping-filter
+                   (lambda (k v) (not (mapping-contains? (car rest) k)))
+                   m)
+                  (cdr rest)))))
+
+    (define (%xor m1 m2)
+      (%union (%difference m1 (list m2)) (list (%difference m2 (list m1)))))
+
+    (define (mapping-union m . rest)
+      (%check-all "mapping-union" m rest)
+      (%union m rest))
+    (define (mapping-union! m . rest)
+      (%check-all "mapping-union!" m rest)
+      (%union m rest))
 
     (define (mapping-intersection m . rest)
-      (%check "mapping-intersection" m)
-      (let loop ((m m) (rest rest))
-        (if (null? rest)
-            m
-            (begin
-              (%check "mapping-intersection" (car rest))
-              (loop (mapping-filter (lambda (k v) (mapping-contains? (car rest) k))
-                                    m)
-                    (cdr rest))))))
-    (define mapping-intersection! mapping-intersection)
+      (%check-all "mapping-intersection" m rest)
+      (%intersection m rest))
+    (define (mapping-intersection! m . rest)
+      (%check-all "mapping-intersection!" m rest)
+      (%intersection m rest))
 
     (define (mapping-difference m . rest)
-      (%check "mapping-difference" m)
-      (let loop ((m m) (rest rest))
-        (if (null? rest)
-            m
-            (begin
-              (%check "mapping-difference" (car rest))
-              (loop (mapping-filter
-                     (lambda (k v) (not (mapping-contains? (car rest) k)))
-                     m)
-                    (cdr rest))))))
-    (define mapping-difference! mapping-difference)
+      (%check-all "mapping-difference" m rest)
+      (%difference m rest))
+    (define (mapping-difference! m . rest)
+      (%check-all "mapping-difference!" m rest)
+      (%difference m rest))
 
     (define (mapping-xor m1 m2)
-      (%check "mapping-xor" m1)
-      (%check "mapping-xor" m2)
-      (mapping-union (mapping-difference m1 m2) (mapping-difference m2 m1)))
-    (define mapping-xor! mapping-xor)
+      (%check-all "mapping-xor" m1 (list m2))
+      (%xor m1 m2))
+    (define (mapping-xor! m1 m2)
+      (%check-all "mapping-xor!" m1 (list m2))
+      (%xor m1 m2))
 
     ;; Ordered keys.
 
@@ -746,22 +781,31 @@
                   (%with m r+) (%with m r)))))
     (define mapping-split! mapping-split)
 
-    (define (mapping-catenate comparator m1 key value m2)
-      (%check "mapping-catenate" m1)
-      (%check "mapping-catenate" m2)
+    ;; The keys of `m1`, `key` and the keys of `m2` must be in order, or
+    ;; the tree would be corrupt for good. The comparator must be that of
+    ;; both mappings.
+    (define (%catenate who comparator m1 key value m2)
+      (%check who m1)
+      (%check who m2)
+      (%check-same who m1 m2)
+      (unless (eq? comparator (mapping-key-comparator m1))
+        (error (string-append who ": mappings with different key comparators")
+               comparator m1))
       (let* ((m (%empty comparator))
              (lt (%lt m))
              (t1 (%tree m1))
              (t2 (%tree m2)))
         (%check-key m key)
-        ;; The keys of `m1`, `key` and the keys of `m2` must be in order,
-        ;; or the tree would be corrupt for good.
         (unless (and (or (null? t1) (lt (node-key (tree-max-node t1)) key))
                      (or (null? t2) (lt key (node-key (tree-min-node t2)))))
-          (error "mapping-catenate: the keys are not in increasing order" key))
+          (error (string-append who ": the keys are not in increasing order")
+                 key))
         (%with m (link key value t1 t2))))
+    (define (mapping-catenate comparator m1 key value m2)
+      (%catenate "mapping-catenate" comparator m1 key value m2))
     (define (mapping-catenate! m1 key value m2)
-      (mapping-catenate (mapping-key-comparator m1) m1 key value m2))
+      (%check "mapping-catenate!" m1)
+      (%catenate "mapping-catenate!" (mapping-key-comparator m1) m1 key value m2))
 
     ;; ---- Comparators
 

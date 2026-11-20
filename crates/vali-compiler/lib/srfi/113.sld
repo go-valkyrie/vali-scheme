@@ -557,13 +557,16 @@
       (sob-find pred bag failure))
 
     ;; Count the number of elements in the sob that satisfy the predicate.
-    ;; This is a special case of folding.
+    ;; Each distinct element is tested once, and when it satisfies the
+    ;; predicate its multiplicity is added to the total.
 
     (define (sob-count pred sob)
-      (sob-fold
-        (lambda (elem total) (if (pred elem) (+ total 1) total))
-        0
-        sob))
+      (let ((total 0))
+        (%tab-for-each
+          (lambda (elem count)
+            (if (pred elem) (set! total (+ total count))))
+          (sob-hash-table sob))
+        total))
 
     (define (set-count pred set)
       (check-set set)
