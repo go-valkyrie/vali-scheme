@@ -64,17 +64,20 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # Says what this job reports, which runs whatever the checks' result.
       - name: Link the change
         env:
           CHANGE: ${{ github.event.client_payload.change }}
           PATCHSET: ${{ github.event.client_payload.patchset }}
+          RESULT: ${{ needs.checks.result }}
         run: |
           # REPO_URL is https://<host>/<project>; the change's page is
           # https://<host>/c/<project>/+/<change>/<patch set>.
           path=${REPO_URL#*://*/}
           host=${REPO_URL%"/$path"}
-          printf 'Verified [change %s, patch set %s](%s/c/%s/+/%s/%s) at revision %s.\n' \
-            "$CHANGE" "$PATCHSET" "$host" "$path" "$CHANGE" "$PATCHSET" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RESULT" = success ]; then verdict=Verified; else verdict="Not verified ($RESULT)"; fi
+          printf '%s: [change %s, patch set %s](%s/c/%s/+/%s/%s) at revision %s.\n' \
+            "$verdict" "$CHANGE" "$PATCHSET" "$host" "$path" "$CHANGE" "$PATCHSET" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report the result to gerrithub-ci
         env:
