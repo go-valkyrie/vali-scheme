@@ -1,0 +1,222 @@
+# The checks CI runs on a commit: formatting and Clippy, every test,
+# documentation and dependency licences. check.yml calls it for pushes to
+# main and pull requests, and gerrit-verify.yml for patch sets under review
+# on GerritHub, so both run the same checks with the same rules.
+#
+# The changes job decides which checks a commit needs, from the files it
+# changes; this is the one list of files no check reads. Each check is then
+# a job of its own, so they run side by side: in one job Clippy and the test
+# build fight over the runner's cores, and the test passes (bin/mise run
+# test's parts) wait for one another.
+#
+# Each check keeps a Rust cache under a shared key named after it. Only
+# check.yml saves them, on main; a patch set restores them and never saves,
+# so it can't poison the cache main's CI uses. The test passes share one
+# cache, which only the base pass saves.
+name: checks
+
+on:
+  workflow_call:
+    inputs:
+      repo-url:
+        description: Fetch the commit from this repository, by `ref`, instead of checking out the run's own commit.
+        type: string
+        default: ""
+      ref:
+        description: With `repo-url`, the ref to fetch, a Gerrit change ref.
+        type: string
+        default: ""
+      revision:
+        description: With `repo-url`, the commit `ref` must be.
+        type: string
+        default: ""
+      save-cache:
+        description: Save the Rust caches, for later runs to restore.
+        type: boolean
+        default: false
+      check-commit-message:
+        description: Check the commit message with hk too.
+        type: boolean
+        default: false
+    outputs:
+      code:
+        description: '"true" when the commit changes anything the checks read, and they ran.'
+        value: ${{ jobs.changes.outputs.code }}
+
+permissions:
+  contents: read
+
+env:
+  REPO_URL: ${{ inputs.repo-url }}
+  REF: ${{ inputs.ref }}
+  REVISION: ${{ inputs.revision }}
+  # jouet is a development aid, not needed to check the code.
+  MISE_DISABLE_TOOLS: jouet
+  CARGO_TERM_COLOR: always
+  # Function names and line numbers are enough for test failures, and full
+  # debug info makes every test binary slower to build and link. Set for
+  # every job: rust-cache folds CARGO_* variables into its key.
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  # Which checks the commit needs, from the files it changes. It reads them
+  # with git and runs none of the commit's code.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.choose.outputs.code }}
+      checks: ${{ steps.choose.outputs.checks }}
+    steps:
+      - name: Check out the commit
+        if: inputs.repo-url == ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Fetch the commit and its parent
+        if: inputs.repo-url != ''
+        run: |
+          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
+          git init -q .
+          git fetch -q --depth=2 "$REPO_URL" "$REF"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - name: Choose the checks
+        id: choose
+        shell: bash
+        env:
+          # What the change is compared with: a pull request's base (before a
+          # push's "before", which a pull request's update also carries), a
+          # push's previous head, or (for a patch set) the commit's parent.
+          BASE: ${{ inputs.repo-url == '' && (github.event.pull_request.base.sha || github.event.before) || '' }}
+          COMMIT_MESSAGE: ${{ inputs.check-commit-message }}
+        run: |
+          set -o pipefail
+          # Files no check reads: prose, agent settings, the fuzz targets
+          # (which fuzz.yml builds), and the Muse review job's files (which
+          # no check reads, and which a patch set's own run can't exercise:
+          # GerritHub's dispatch always runs main's gerrit-verify.yml). In a
+          # case pattern * also matches /.
+          ignored() {
+            case "$1" in
+              docs/* | *.md | LICENSE | .gitignore | .claude/* | .jouet/* | \
+                fuzz/* | .github/workflows/fuzz.yml | \
+                .github/workflows/gerrit-verify.yml | .github/review/* | \
+                mise.review.toml) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          base=HEAD^
+          if [ -n "$BASE" ]; then
+            case "$BASE" in
+              *[!0]*) git fetch -q --depth=1 origin "$BASE" && base=$BASE || base= ;;
+              *) base= ;;  # a new branch: nothing to compare with
+            esac
+          fi
+          code=false
+          if [ -n "$base" ] && git rev-parse -q --verify "$base^{commit}" > /dev/null; then
+            # Without renames, a moved file counts where it was and where it
+            # is now. Written to a file first, so a failing diff fails the step.
+            git diff --no-renames --name-only -z "$base" HEAD > "$RUNNER_TEMP/files"
+            while IFS= read -r -d '' file; do
+              ignored "$file" || { code=true; break; }
+            done < "$RUNNER_TEMP/files"
+          else
+            # Nothing to compare with.
+            code=true
+          fi
+          if [ "$code" = true ]; then
+            checks='["lint","test","test-no-opt","test-eager","debugger","docs"]'
+          elif [ "$COMMIT_MESSAGE" = true ]; then
+            checks='["commit-message"]'
+            echo 'It only changes files the checks never read, so only its commit message is checked.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            checks='[]'
+            echo 'It only changes files the checks never read, so none run.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "checks=$checks" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: changes
+    if: needs.changes.outputs.checks != '[]'
+    name: ${{ matrix.check }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.changes.outputs.checks) }}
+    env:
+      # Checking a commit message needs hk alone, which mise.toml has; the
+      # development environment (.miserc.toml's default) adds the Rust
+      # toolchain and the rest. An empty MISE_ENV turns it off. (Written
+      # this way round: `&& '' ||` would always give 'development'.)
+      MISE_ENV: ${{ matrix.check != 'commit-message' && 'development' || '' }}
+    steps:
+      - name: Check out the commit
+        if: inputs.repo-url == ''
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch the commit
+        if: inputs.repo-url != ''
+        run: |
+          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
+          git init -q .
+          git fetch -q --depth=1 "$REPO_URL" "$REF"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.check != 'commit-message'
+        with:
+          # The test passes build the same, so they share the base pass's
+          # cache; the others keep their own.
+          shared-key: ${{ startsWith(matrix.check, 'test') && 'test' || matrix.check }}
+          save-if: ${{ inputs.save-cache && (matrix.check == 'test' || !startsWith(matrix.check, 'test')) }}
+
+      - name: Install the pinned toolchain
+        run: bin/mise install
+
+      - name: Commit message
+        if: inputs.check-commit-message && (matrix.check == 'lint' || matrix.check == 'commit-message')
+        run: |
+          git log -1 --format=%B > "$RUNNER_TEMP/commit-msg"
+          bin/mise exec -- hk run commit-msg "$RUNNER_TEMP/commit-msg"
+
+      - name: Lint
+        if: matrix.check == 'lint'
+        run: bin/mise run lint
+
+      - name: Test
+        if: matrix.check == 'test'
+        run: bin/mise run test-base
+
+      - name: Test unoptimised
+        if: matrix.check == 'test-no-opt'
+        run: bin/mise run test-no-opt
+
+      - name: Test with eager conversion
+        if: matrix.check == 'test-eager'
+        run: bin/mise run test-eager
+
+      # The debugger tests fail, not skip, when CI is set and these are
+      # missing.
+      - name: Install the debuggers
+        if: matrix.check == 'debugger'
+        run: sudo apt-get update && sudo apt-get install -y gdb lldb
+
+      - name: Debugger tests
+        if: matrix.check == 'debugger'
+        run: |
+          bin/mise run test-debugger
+          bin/mise run test-debugger-optimised
+
+      - name: Docs and dependencies
+        if: matrix.check == 'docs'
+        run: |
+          bin/mise run docs
+          bin/mise run deny

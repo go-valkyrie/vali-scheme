@@ -1,22 +1,20 @@
-# Verifies changes under review on GerritHub, and votes Verified on them.
+# Verifies changes under review on GerritHub, votes Verified on them, and
+# reviews them with Muse Code.
 #
 # The gerrithub-ci Worker (https://github.com/go-valkyrie/gerrithub-ci) sends
 # a repository_dispatch for each patch set it has confirmed with Gerrit: new
 # patch sets from trusted uploaders, and anyone's patch set once a trusted
-# reviewer comments "recheck". This workflow fetches the patch set from
-# GerritHub, runs check.yml's checks on it, and reports the result to the
-# Worker, which votes with its own Gerrit account.
+# reviewer comments "recheck". This workflow runs the checks (checks.yml) on
+# the patch set, fetched from GerritHub, and reports the result to the
+# Worker, which votes with its own Gerrit account. checks.yml decides which
+# checks the patch set needs; one that only touches files the checks never
+# read gets just its commit message checked, and is verified on that.
 #
-# repository_dispatch has no path filters, so the changes job applies
-# check.yml's paths-ignore itself. A patch set that only touches files the
-# checks never read gets just its commit message checked, and is verified
-# on that; anything else, including a file it deletes or renames, gets every
-# check. The lists here and in check.yml must stay the same.
-#
-# GitHub holds no GerritHub credentials. Only the vote job may request an
-# OIDC token, which is how it proves itself to the Worker; the jobs that run
-# the change's code get no secrets and no token. They restore the Rust cache
-# but never save it, so a patch set can't poison the cache main's CI uses.
+# GitHub holds no GerritHub credentials. Only the vote, review and
+# post-review jobs may request an OIDC token, which is how they prove
+# themselves to the Worker; the jobs that run the change's code get no
+# secrets and no token. They restore the Rust caches but never save them,
+# so a patch set can't poison the caches main's CI uses.
 #
 # Needs the repository variable GERRITHUB_CI_URL, the Worker's URL.
 
@@ -46,16 +44,25 @@ env:
   # jouet is a development aid, not needed to check the code.
   MISE_DISABLE_TOOLS: jouet
   CARGO_TERM_COLOR: always
-  # As in check.yml, for every job, so the rust-cache keys match.
+  # As in checks.yml, so the review job's rust-cache key matches the test
+  # cache it restores.
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
-  # Which checks the patch set needs, from the files it changes. It reads
-  # them with git and runs none of the change's code.
-  changes:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      repo-url: ${{ github.event.client_payload.repo_url || format('https://review.gerrithub.io/{0}', github.event.client_payload.project) }}
+      ref: ${{ github.event.client_payload.ref }}
+      revision: ${{ github.event.client_payload.revision }}
+      check-commit-message: true
+
+  vote:
+    needs: checks
+    if: always()
     runs-on: ubuntu-latest
-    outputs:
-      checks: ${{ steps.choose.outputs.checks }}
+    permissions:
+      id-token: write
     steps:
       - name: Link the change
         env:
@@ -66,123 +73,12 @@ jobs:
           # https://<host>/c/<project>/+/<change>/<patch set>.
           path=${REPO_URL#*://*/}
           host=${REPO_URL%"/$path"}
-          printf 'Verifying [change %s, patch set %s](%s/c/%s/+/%s/%s) at revision %s.\n' \
+          printf 'Verified [change %s, patch set %s](%s/c/%s/+/%s/%s) at revision %s.\n' \
             "$CHANGE" "$PATCHSET" "$host" "$path" "$CHANGE" "$PATCHSET" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Check out the patch set and its parent
-        run: |
-          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
-          git init -q .
-          git fetch -q --depth=2 "$REPO_URL" "$REF"
-          git checkout -q FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "$REVISION"
-
-      - name: Choose the checks
-        id: choose
-        run: |
-          # check.yml's paths-ignore: files no check reads. In a case
-          # pattern * also matches /, as ** does there.
-          ignored() {
-            case "$1" in
-              docs/* | *.md | LICENSE | .gitignore | .claude/* | .jouet/* | \
-                fuzz/* | .github/workflows/fuzz.yml) return 0 ;;
-              *) return 1 ;;
-            esac
-          }
-          code=false
-          if git rev-parse -q --verify 'HEAD^' > /dev/null; then
-            # Without renames, a moved file counts where it was and where it
-            # is now. Written to a file first, so a failing diff fails the step.
-            git diff --no-renames --name-only -z 'HEAD^' HEAD > "$RUNNER_TEMP/files"
-            while IFS= read -r -d '' file; do
-              ignored "$file" || { code=true; break; }
-            done < "$RUNNER_TEMP/files"
-          else
-            # Nothing to compare with.
-            code=true
-          fi
-          if [ "$code" = true ]; then
-            echo 'checks=["lint","test","docs"]' >> "$GITHUB_OUTPUT"
-          else
-            echo 'checks=["commit-message"]' >> "$GITHUB_OUTPUT"
-            echo 'It only changes files the checks never read, so only its commit message is checked.' >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-  verify:
-    needs: changes
-    name: ${{ matrix.check }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        check: ${{ fromJSON(needs.changes.outputs.checks) }}
-    env:
-      # Checking a commit message needs hk alone, which mise.toml has; the
-      # development environment (.miserc.toml's default) adds the Rust
-      # toolchain and the rest. An empty MISE_ENV turns it off. (Written
-      # this way round: `&& '' ||` would always give 'development'.)
-      MISE_ENV: ${{ matrix.check != 'commit-message' && 'development' || '' }}
-    steps:
-      - name: Check out the patch set
-        run: |
-          case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
-          git init -q .
-          git fetch -q --depth=1 "$REPO_URL" "$REF"
-          git checkout -q FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "$REVISION"
-
-      - uses: Swatinem/rust-cache@v2
-        if: matrix.check != 'commit-message'
-        with:
-          # check.yml's job of the same name saves this cache on main;
-          # a patch set restores it but never writes one.
-          shared-key: ${{ matrix.check }}
-          save-if: false
-
-      - name: Install the pinned toolchain
-        run: bin/mise install
-
-      - name: Commit message
-        if: matrix.check == 'lint' || matrix.check == 'commit-message'
-        run: |
-          git log -1 --format=%B > "$RUNNER_TEMP/commit-msg"
-          bin/mise exec -- hk run commit-msg "$RUNNER_TEMP/commit-msg"
-
-      - name: Lint
-        if: matrix.check == 'lint'
-        run: bin/mise run lint
-
-      # The debugger tests fail, not skip, when CI is set and these are
-      # missing.
-      - name: Install the debuggers
-        if: matrix.check == 'test'
-        run: sudo apt-get update && sudo apt-get install -y gdb lldb
-
-      - name: Test
-        if: matrix.check == 'test'
-        run: bin/mise run test
-
-      - name: Debugger tests, optimised
-        if: matrix.check == 'test'
-        run: bin/mise run test-debugger-optimised
-
-      - name: Docs and dependencies
-        if: matrix.check == 'docs'
-        run: |
-          bin/mise run docs
-          bin/mise run deny
-
-  vote:
-    needs: [changes, verify]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-    steps:
       - name: Report the result to gerrithub-ci
         env:
-          # verify is skipped when changes fails, so report that instead.
-          RESULT: ${{ needs.changes.result == 'success' && needs.verify.result || needs.changes.result }}
+          RESULT: ${{ needs.checks.result }}
           TICKET: ${{ github.event.client_payload.ticket }}
           WORKER: ${{ vars.GERRITHUB_CI_URL }}
         run: |
