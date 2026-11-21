@@ -744,3 +744,102 @@ fn a_call_with_many_arguments_converts_or_is_refused() {
         }
     }
 }
+
+/// Libraries whose macros expand to quoted data with shared and circular
+/// structure, by datum labels, in the templates of their syntax exports.
+fn labelled() -> Map {
+    Map(vec![(
+        "(test labels)",
+        "(define-library (test labels)
+           (import (scheme base))
+           (export shared circular vector-cycle both)
+           (begin
+             (define-syntax shared
+               (syntax-rules () ((_) '(#1=(x) #1#))))
+             (define-syntax circular
+               (syntax-rules () ((_) '#2=(a b . #2#))))
+             (define-syntax vector-cycle
+               (syntax-rules () ((_) '#5=#(1 #5#))))
+             ;; Two labels in one template, one inside the other.
+             (define-syntax both
+               (syntax-rules ()
+                 ((_) '(#7=(p #8=(q) #8#) #7# #8#))))))"
+            .to_owned(),
+    )])
+}
+
+const LABELLED_PROGRAM: &str = "
+    (import (scheme base) (test labels))
+    (define s (shared))
+    (define c (circular))
+    (define v (vector-cycle))
+    (define b (both))
+    (list
+      (equal? (car s) '(x))
+      (eq? (car s) (cadr s))
+      (eq? c (cddr c))
+      (eq? (cdr c) (cddr (cdr c)))
+      (eq? v (vector-ref v 1))
+      (eq? (car b) (cadr b))
+      (eq? (cadr (car b)) (car (cddr (car b))))
+      (eq? (cadr (car b)) (car (cddr b))))";
+
+#[test]
+fn shared_and_circular_templates_survive_an_artifact() {
+    let loader = labelled();
+    let compile = |artifacts: &Artifacts| {
+        compile_program_with(LABELLED_PROGRAM, &Identity::new("main"), &loader, artifacts)
+            .map_err(|e| e.message)
+    };
+    // Every pair of the structure is as the templates say, so what the
+    // artifact gives back is checked by sharing and cycles, not printing.
+    let expected = "(#t #t #t #t #t #t #t #t)";
+    assert_eq!(run(compile(&Artifacts::default()).unwrap()), expected);
+    let written = compile(&Artifacts {
+        write: true,
+        ..Artifacts::default()
+    })
+    .unwrap()
+    .artifacts;
+    let names: Vec<&str> = written.iter().map(|(i, _)| i.as_str()).collect();
+    assert!(names.contains(&"lib:(test labels)"), "{names:?}");
+    assert_eq!(run(compile(&reading(&written)).unwrap()), expected);
+    // And what was loaded writes the same bytes again.
+    let again = compile(&Artifacts {
+        write: true,
+        ..reading(&written)
+    })
+    .unwrap()
+    .artifacts;
+    assert_eq!(again, written);
+}
+
+#[test]
+fn more_datum_labels_than_the_limit_cannot_be_written() {
+    let mut template = String::from("'(");
+    for n in 0..=(1 << 14) {
+        template.push_str(&format!("#{n}=a "));
+    }
+    template.push(')');
+    let library = format!(
+        "(define-library (test many)
+           (import (scheme base))
+           (export m)
+           (begin (define-syntax m (syntax-rules () ((_) {template})))))"
+    );
+    let loader = Map(vec![("(test many)", library)]);
+    let r = compile_program_with(
+        "(import (scheme base) (test many)) (m)",
+        &Identity::new("main"),
+        &loader,
+        &Artifacts {
+            write: true,
+            ..Artifacts::default()
+        },
+    );
+    let Err(e) = r else {
+        panic!("the export cannot be encoded");
+    };
+    let e = e.message;
+    assert!(e.contains("datum labels"), "{e}");
+}

@@ -291,7 +291,7 @@ fn the_optimiser_setting_is_part_of_the_key() {
 }
 
 #[test]
-fn a_library_the_cache_cannot_hold_still_runs() {
+fn a_library_with_datum_labels_in_its_macros_is_cached() {
     let dir = directory(
         "label",
         &[
@@ -308,12 +308,11 @@ fn a_library_the_cache_cannot_hold_still_runs() {
             ),
         ],
     );
-    let (lib, main, cache) = (dir.join("lib"), dir.join("main.scm"), dir.join("cache"));
-    let output = vali(&["--cache-dir", text(&cache), "-I", text(&lib), text(&main)]);
-    // Under a round-trip build the library does not compile at all.
-    if std::env::var_os("VALI_ROUND_TRIP").is_none() {
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "((x) (x))");
-        assert!(entries(&cache).is_empty());
-    }
+    let cache = dir.join("cache");
+    let (code, out, trace) = traced(&dir, &cache, &[]);
+    assert_eq!((code, out.as_str()), (Some(0), "((x) (x))"));
+    assert_eq!(count(&trace, "stored"), 1, "{trace:?}");
+    let (code, out, trace) = traced(&dir, &cache, &[]);
+    assert_eq!((code, out.as_str()), (Some(0), "((x) (x))"));
+    assert_eq!(count(&trace, "loaded"), 1, "{trace:?}");
 }

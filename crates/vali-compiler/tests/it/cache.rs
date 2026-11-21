@@ -336,39 +336,6 @@ fn a_changed_library_test_in_a_body_invalidates() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A library whose artifact cannot be written is left out of the cache,
-/// and the run goes on.
-#[test]
-fn a_library_that_cannot_be_encoded_is_left_out() {
-    // A round-trip build encodes every syntax export as it is made, so
-    // the library does not compile at all.
-    if std::env::var_os("VALI_ROUND_TRIP").is_some() {
-        return;
-    }
-    let dir = scratch("unencodable");
-    let cache = Cache::new(&dir);
-    let loader = Map::new(&[(
-        "(test label)",
-        "(define-library (test label)
-           (import (scheme base))
-           (export m)
-           (begin (define-syntax m (syntax-rules () ((_) '(#1=(x) #1#))))))",
-    )]);
-    let program = compile_program_cached(
-        "(import (scheme base) (test label)) (m)",
-        &Identity::new("main"),
-        &loader,
-        &cache,
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    assert!(program.cache.stored.is_empty());
-    assert_eq!(program.cache.failed.len(), 1);
-    assert!(program.cache.failed[0].1.contains("datum label"));
-    assert_eq!(run(program), "((x) (x))");
-    assert!(entries(&dir).is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// A `cond-expand` that a macro from another library puts in a library's
 /// body is not in that library's text, but its answer is what the library
 /// was compiled with.
