@@ -61,7 +61,7 @@ The caps for 1 and 2 must hold under every memory strategy, `NoCollection` inclu
 
 ## Left open
 
-- Depth limits for expansion and nesting (#5), and `ScopeContext::with_limit`'s scope count, are not host-configurable yet. They belong in this type when they are.
+- Depth limits for expansion and nesting (#5), and `ScopeContext::with_limit`'s scope count, are not host-configurable yet. They belong in this type when they are. The same goes for the datum labels a syntax export may define (16,384, fixed in the artifact decoder and encoder), which ADR 0001 #7 describes.
 - Freeing the syntax data `eval` merges with its module (#45) and the weak symbol table (#46).
 
 ## References

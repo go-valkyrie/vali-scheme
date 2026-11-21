@@ -22,6 +22,14 @@
 //!
 //! Numbers are written as their external representation, which reading
 //! gives back exactly.
+//!
+//! A datum label in a template or a quoted datum is written as a
+//! definition, which takes the next index (labels are numbered from 0 in
+//! the order the export defines them, whatever the source called them),
+//! or as a reference to an index. The decoder checks that a definition's
+//! index is the next one and a reference's is one already begun, so
+//! sharing and cycles come back as written and nothing refers to a label
+//! the stream has not reached. At most [`MAX_DATUM_LABELS`] are defined.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -34,8 +42,8 @@ use crate::CompileError;
 use crate::pattern::{Pattern, Repeat, Template};
 use crate::phase::Compiled;
 use vali_syntax::{
-    BindingTable, DatumKind, Origin, Phase, Phases, Scope, ScopeContext, ScopeSetId, SourceId,
-    Span, Syntax,
+    BindingTable, Datum, DatumKind, Origin, Phase, Phases, Scope, ScopeContext, ScopeSetId,
+    SourceId, Span, Syntax,
 };
 
 use super::{MAX_PHASE, RED_ZONE, STACK_GROWTH};
@@ -52,6 +60,10 @@ struct Encoder<'a> {
     units: HashMap<usize, usize>,
     source_refs: HashMap<SourceId, usize>,
     origins: HashMap<*const Origin, usize>,
+    /// The index each datum label's latest definition was given.
+    labels: HashMap<u64, u32>,
+    /// How many datum labels have been defined: the next one's index.
+    defined: u32,
 }
 
 /// Encodes `state`, a syntax export in a context of its own.
@@ -67,6 +79,8 @@ pub(super) fn encode(
         units: HashMap::new(),
         source_refs: HashMap::new(),
         origins: HashMap::new(),
+        labels: HashMap::new(),
+        defined: 0,
     };
     let context = &state.context;
     e.w.usize(context.scope_count());
@@ -334,7 +348,23 @@ impl Encoder<'_> {
     }
 
     fn atom(&mut self, atom: &DatumKind) -> Result<()> {
-        match atom {
+        self.datum_kind(atom)
+    }
+
+    /// A datum inside a label definition: its kind, then its span.
+    fn datum(&mut self, d: &Datum) -> Result<()> {
+        stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || {
+            self.datum_kind(&d.kind)?;
+            self.span(d.span)
+        })
+    }
+
+    /// A datum's kind. A label definition takes the next index, whatever
+    /// the source called it, and a reference takes the index its label's
+    /// latest definition was given, so an export's labels are numbered
+    /// from 0 in the order the stream defines them.
+    fn datum_kind(&mut self, kind: &DatumKind) -> Result<()> {
+        match kind {
             DatumKind::Number(n) => {
                 self.w.byte(0);
                 self.w.str(&n.to_string());
@@ -363,7 +393,46 @@ impl Encoder<'_> {
                 self.w.byte(6);
                 self.w.bytes(bytes);
             }
-            _ => return Err("a datum label in a syntax export".into()),
+            DatumKind::Labelled(label, inner) => {
+                if self.defined >= MAX_DATUM_LABELS {
+                    return Err(format!(
+                        "more than {MAX_DATUM_LABELS} datum labels in a syntax export"
+                    ));
+                }
+                let index = self.defined;
+                self.defined += 1;
+                self.labels.insert(*label, index);
+                self.w.byte(7);
+                self.w.u32(index);
+                self.datum(inner)?;
+            }
+            DatumKind::LabelRef(label) => {
+                let index = *self
+                    .labels
+                    .get(label)
+                    .ok_or_else(|| format!("a reference to datum label {label}, not defined"))?;
+                self.w.byte(8);
+                self.w.u32(index);
+            }
+            DatumKind::List { items, tail } => {
+                self.w.byte(9);
+                self.w.usize(items.len());
+                for item in items {
+                    self.datum(item)?;
+                }
+                self.w.bool(tail.is_some());
+                if let Some(tail) = tail {
+                    self.datum(tail)?;
+                }
+            }
+            DatumKind::Vector(items) => {
+                self.w.byte(10);
+                self.w.usize(items.len());
+                for item in items {
+                    self.datum(item)?;
+                }
+            }
+            _ => return Err("a kind of datum a syntax export cannot hold".into()),
         }
         Ok(())
     }
@@ -482,6 +551,8 @@ struct Decoder<'a, 'b> {
     resolve: &'b dyn Fn(&str) -> Option<usize>,
     units: Vec<usize>,
     origins: Vec<Arc<Origin>>,
+    /// How many datum labels have been defined so far in the export.
+    labels: u32,
     /// How deep in patterns and templates the decoder is.
     depth: usize,
     /// What the pattern being decoded has bound.
@@ -494,6 +565,13 @@ struct Decoder<'a, 'b> {
 /// them recursively, so the depth is what the stack must hold, and what
 /// the input says is not trusted with it.
 const MAX_DECODED_NESTING: usize = 2 * MAX_NESTING;
+
+/// How many datum labels a syntax export may define, in all of its
+/// templates, patterns and quoted data. Each is a target the lowering
+/// numbers and resolves references to, so what the input says is not
+/// trusted with more than any library needs. Like the nesting bound, it is
+/// not host-configurable yet (ADR 0023, left open).
+const MAX_DATUM_LABELS: u32 = 1 << 14;
 
 /// What decoding a pattern met, to check it as a whole once its variable
 /// count is known.
@@ -563,6 +641,7 @@ pub(super) fn decode(
         resolve,
         units: Vec::new(),
         origins: Vec::new(),
+        labels: 0,
         depth: 0,
         facts: Facts::default(),
     };
@@ -950,6 +1029,25 @@ impl Decoder<'_, '_> {
     }
 
     fn atom(&mut self) -> Decoded<DatumKind> {
+        self.datum_kind(false)
+    }
+
+    /// A datum inside a label definition: its kind, then its span.
+    fn datum(&mut self) -> Decoded<Datum> {
+        self.nested("a datum", |d| {
+            let kind = d.datum_kind(true)?;
+            let span = d.span()?;
+            Ok(Datum { kind, span })
+        })
+    }
+
+    /// A datum's kind. Labels are defined from 0, in the order the stream
+    /// has them, so a definition names the next index and no other (which
+    /// refuses a label defined twice), and a reference names one already
+    /// begun, a definition's own included, which is how a cycle closes.
+    /// Lists and vectors are only found inside a definition: outside one,
+    /// a syntax object's lists and vectors are syntax, not atoms.
+    fn datum_kind(&mut self, inside: bool) -> Decoded<DatumKind> {
         Ok(match self.r.byte()? {
             0 => {
                 let text = self.r.str()?;
@@ -970,6 +1068,50 @@ impl Decoder<'_, '_> {
             4 => DatumKind::Symbol(self.r.str()?.to_owned()),
             5 => DatumKind::Keyword(self.r.str()?.to_owned()),
             6 => DatumKind::Bytevector(self.r.bytes()?.to_vec()),
+            7 => {
+                let index = self.r.u32()?;
+                if index < self.labels {
+                    return Err(self
+                        .r
+                        .error(format!("datum label {index} is defined twice")));
+                }
+                if index > self.labels {
+                    return Err(self.r.error(format!(
+                        "datum label {index} is defined before label {}",
+                        self.labels
+                    )));
+                }
+                if index >= MAX_DATUM_LABELS {
+                    return Err(self
+                        .r
+                        .error(format!("more than {MAX_DATUM_LABELS} datum labels")));
+                }
+                self.labels += 1;
+                DatumKind::Labelled(u64::from(index), Box::new(self.datum()?))
+            }
+            8 => {
+                let index = self.r.u32()?;
+                if index >= self.labels {
+                    return Err(self.r.error(format!(
+                        "a reference to datum label {index}, not defined yet"
+                    )));
+                }
+                DatumKind::LabelRef(u64::from(index))
+            }
+            9 if inside => {
+                let n = self.r.count(1)?;
+                let items = (0..n).map(|_| self.datum()).collect::<Decoded<Vec<_>>>()?;
+                let tail = if self.r.bool()? {
+                    Some(Box::new(self.datum()?))
+                } else {
+                    None
+                };
+                DatumKind::List { items, tail }
+            }
+            10 if inside => {
+                let n = self.r.count(1)?;
+                DatumKind::Vector((0..n).map(|_| self.datum()).collect::<Decoded<Vec<_>>>()?)
+            }
             b => return Err(self.r.error(format!("unknown atom tag {b}"))),
         })
     }
@@ -1170,6 +1312,8 @@ pub(super) fn encode_library(record: &LibraryRecord, identities: &[String]) -> R
         units: HashMap::new(),
         source_refs: HashMap::new(),
         origins: HashMap::new(),
+        labels: HashMap::new(),
+        defined: 0,
     };
     e.w.str(&record.identity);
     e.w.str(&record.key);
@@ -1209,6 +1353,7 @@ pub(super) fn decode_library(
         resolve,
         units: Vec::new(),
         origins: Vec::new(),
+        labels: 0,
         depth: 0,
         facts: Facts::default(),
     };
