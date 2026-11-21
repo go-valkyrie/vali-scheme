@@ -25,7 +25,7 @@ The caps for 1 and 2 must hold under every memory strategy, `NoCollection` inclu
    | `max_syntaxes` | Runtime syntax objects alive at once | unlimited |
    | `scope_bit_set_bytes` | Scope bit-set memory, shared by everything the isolate or a build expands | 256 MiB, today's `BIT_SET_BUDGET` |
 
-   Fuel stays a separate argument of the run, since a host sets it per run and not per isolate.
+   Fuel stays a per-call option (ADR 0026 #9), since a host sets it per run and not per isolate; the one isolate-wide fuel setting, `metered`, which fuel limits need (ADR 0026 #8), is a field here and defaults to `false`.
 
 2. **A cap is checked on a miss, before anything is allocated.** `intern`, `keyword_raw` and `syntax_raw` look the name up first, and a hit costs nothing. A miss that would pass `max_symbols` or `max_syntaxes`, or the memory limit counting the Rust-side bytes below, fails before it allocates. A call that makes one object, `string->symbol` or a read, leaves the isolate as it was. A module load that reaches a cap partway fails cleanly, keeping what it already built: the constants of ADR 0020 are never freed, and the next load does not need to rebuild them.
 

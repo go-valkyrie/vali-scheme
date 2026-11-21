@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-16
-- **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit), 0017 (the IR)
+- **Related:** 0003 (stack maps, return barrier), 0005 (the VM's calling convention), 0006 (frame layout in the ABI), 0007 (SRFI 226), 0008 (tasks), 0009 (memory limit), 0017 (the IR), 0026 (async integration)
 
 ## Context
 
@@ -56,8 +56,8 @@ How frames are represented decides all of this:
    - **`call/cc` is Scheme over `%call/cc` and `%continue`:** the continuation procedure travels from the current winders to the captured ones, running after and before thunks, then restores the registers and returns to the continuation.
    - **Handlers run where the raise happens** (R7RS 6.11): `raise` and `raise-continuable` call the innermost handler with the outer ones installed. An error from a Rust procedure or an instruction does the same: while a handler is installed, the VM calls the raise procedure (scheme base) registered, with the condition, in a frame past the failing frame's slots. That frame's position word has `RAISED`, so returning through it is an error. With no handler installed the error unwinds to the host as before, with the same message and backtrace. `%raise` stays the one raw escape, to the innermost `%catch`.
    - **`guard` captures only when something is raised.** Its handler runs at the raise, captures the continuation there, and escapes with it to the guard's `%catch`. The guard restores its own dynamic environment, running after thunks, and tries its clauses; if none applies, it re-enters the raise and calls `raise-continuable` there with the handlers outside the guard, exactly as R7RS says. Only `guard` uses `%catch` now.
-9. **A task can suspend at any call.** When Scheme calls an async bridge, the task switches back to the thread's stack and its segments stay as they are. The isolate then runs another of its ready tasks, or, if none is ready, its future returns `Pending` (ADR 0008). When the bridge's future completes, the task becomes ready, and the host polls the isolate again, possibly on another thread, which switches the task back in. This is how Wasmtime's fibers work.
-10. **Rust code is never in the middle of a Scheme stack.** A bridge returns a value, asks the runtime to tail-call a Scheme procedure, or returns a future. When Rust really must call Scheme and wait for the answer (a comparison callback inside a Rust sort, say), it starts a nested run behind a continuation barrier. Continuations captured inside the nested run can escape out of it, but cannot re-enter it once it has returned.
+9. **A task can suspend at any call.** When Scheme calls an async bridge, the task leaves the VM and its segments stay as they are. In tier 0 the VM already runs on the thread's own stack, so leaving is a return from the interpreter with the registers it kept in locals saved in the task. In JIT and AOT code, whose frames are native, it is a switch from the task's stack to the thread's. The isolate then runs another of its ready tasks, or, if none is ready, its future returns `Pending` (ADR 0008). The call's own future, which the host polls outside the isolate's lock, drives the bridge's future, and when it completes the next poll, possibly on another thread, swaps the task back in and resumes it with the result as the call's return value. This is how Wasmtime's fibers work. ADR 0026 settles it: each host call is a task, and the same pause happens when fuel runs out.
+10. **Rust code is never in the middle of a Scheme stack.** A bridge returns a value, asks the runtime to tail-call a Scheme procedure, or returns a future. When Rust really must call Scheme and wait for the answer (a comparison callback inside a Rust sort, say), it starts a nested run behind a continuation barrier. Continuations captured inside the nested run can escape out of it, but cannot re-enter it once it has returned. A nested run is synchronous, for synchronous hosts: an async bridge reached inside one is an error at the barrier, since the Rust frame below it cannot be parked. Async hosts call Scheme from Rust as a future instead (ADR 0026 #15 and #30).
 11. **WebAssembly needs a target of its own,** designed in a later ADR. It has no standard stack switching yet, and running Vali's VM inside a WebAssembly engine's own VM is at best a fallback. A real target probably compiles Scheme to WebAssembly directly.
 
 ## Consequences
@@ -81,7 +81,7 @@ How frames are represented decides all of this:
 
 - Segment sizes and growth policy.
 - Moving the dynamic environment's registers to SRFI 226's continuation marks and parameterizations, and giving each task its own (ADR 0008).
-- The stack-switching implementation: Vali's own assembly, or a crate.
+- The stack-switching implementation: Vali's own assembly, or a crate. JIT frames need it to pause a task at an async bridge or when fuel runs out (ADR 0026 #22); tier 0 does not.
 - The WebAssembly target (item 11), for a later ADR.
 - Debugging and profiling, for a later ADR, including:
   - registering JIT code with debuggers (the GDB JIT interface) and with perf (`jitdump` files);
