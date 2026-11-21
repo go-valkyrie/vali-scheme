@@ -38,6 +38,10 @@ on:
         description: Check the commit message with hk too.
         type: boolean
         default: false
+      check-all:
+        description: Run every check, whatever the commit changes.
+        type: boolean
+        default: false
     outputs:
       code:
         description: '"true" when the commit changes anything the checks read, and they ran.'
@@ -87,10 +91,10 @@ jobs:
         id: choose
         shell: bash
         env:
-          # What the change is compared with: a pull request's base (before a
-          # push's "before", which a pull request's update also carries), a
-          # push's previous head, or (for a patch set) the commit's parent.
-          BASE: ${{ inputs.repo-url == '' && (github.event.pull_request.base.sha || github.event.before) || '' }}
+          # What the change is compared with: a pull request's base, or (for
+          # a patch set) the commit's parent.
+          BASE: ${{ inputs.repo-url == '' && github.event.pull_request.base.sha || '' }}
+          CHECK_ALL: ${{ inputs.check-all }}
           COMMIT_MESSAGE: ${{ inputs.check-commit-message }}
         run: |
           set -o pipefail
@@ -110,13 +114,12 @@ jobs:
           }
           base=HEAD^
           if [ -n "$BASE" ]; then
-            case "$BASE" in
-              *[!0]*) git fetch -q --depth=1 origin "$BASE" && base=$BASE || base= ;;
-              *) base= ;;  # a new branch: nothing to compare with
-            esac
+            git fetch -q --depth=1 origin "$BASE" && base=$BASE || base=
           fi
           code=false
-          if [ -n "$base" ] && git rev-parse -q --verify "$base^{commit}" > /dev/null; then
+          if [ "$CHECK_ALL" = true ]; then
+            code=true
+          elif [ -n "$base" ] && git rev-parse -q --verify "$base^{commit}" > /dev/null; then
             # Without renames, a moved file counts where it was and where it
             # is now. Written to a file first, so a failing diff fails the step.
             git diff --no-renames --name-only -z "$base" HEAD > "$RUNNER_TEMP/files"

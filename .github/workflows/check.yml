@@ -3,16 +3,23 @@
 # plus the benchmarks. Other branches are checked through their pull
 # requests, so a branch with one is not checked twice.
 #
-# A change only to files the checks never read skips them, and the
-# benchmarks too; checks.yml holds the list. Runs here save the Rust caches,
-# which gerrit-verify.yml's runs restore, so changes under review build on
-# main's last cache.
+# A pull request that only changes files the checks never read skips them,
+# and the benchmarks too; checks.yml holds the list. A push to main always
+# runs everything: the checks test the tree, so a run on the newest commit
+# covers every commit before it, and a newer push can cancel an older run
+# without leaving anything unchecked. A batch of changes landing together
+# costs one run. Every change was checked on its own under review already;
+# main's run catches what changes do together. Runs here save the Rust
+# caches, which gerrit-verify.yml's runs restore, so changes under review
+# build on main's last cache.
 name: check
 
 on:
   push:
     branches: [main]
   pull_request:
+  # A full run, by hand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,6 +33,7 @@ jobs:
     uses: ./.github/workflows/checks.yml
     with:
       save-cache: ${{ github.event_name == 'push' }}
+      check-all: ${{ github.event_name != 'pull_request' }}
 
   # Recorded, not gated: compare runs with `bin/mise run bench-compare`. It
   # waits for checks only to learn whether the commit changed any code, and
