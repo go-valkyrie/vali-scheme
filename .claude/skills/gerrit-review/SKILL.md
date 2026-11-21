@@ -150,8 +150,12 @@ and `line` to its `path` and `line`. A new comment has `inReplyTo` and
    Conventional Commit, `type(scope): description` or `type: description`;
    the scope is optional, and when there is one `hk.pkl` lists it. The
    description starts lower-case, with no full stop. The body wraps at 72
-   columns. The only trailers are `Co-Authored-By` and `Change-Id`. Docs and
-   comments follow the repository's existing prose style.
+   columns. The only trailers are `Fixes: #N`, `Co-Authored-By` and
+   `Change-Id`. A change that resolves a GitHub issue names it in a
+   `Fixes:` trailer, so the issue closes when the change lands; a missing
+   one, or one naming an issue the change doesn't resolve, is worth a
+   comment, not a -1. Docs and comments follow the repository's existing
+   prose style.
 
 ## How to review
 

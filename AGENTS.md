@@ -57,7 +57,7 @@ Commit messages are Conventional Commits, and `hk.pkl` checks them:
 
 - **Subject:** `type(scope): description`, where `type` is one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `security`, `style` or `test`. `scope` is optional and must be one of the scopes listed in `hk.pkl`: the crate without its `vali-` prefix, or `adr`, `bench`, `debugger`, `fuzz` or `mise`. Add a scope there when a new crate or area appears. Start the description lower-case (acronyms such as ADR or IR are fine), and don't end it with a full stop.
 - **Body:** wrap at 72 characters. URLs, indented or fenced code, and trailers may run longer.
-- **Trailers:** only `Co-Authored-By`, plus the `Change-Id` the hook adds.
+- **Trailers:** `Fixes: #N` for each GitHub issue the change resolves, so the issue closes when the commit reaches `main` on GitHub; `Co-Authored-By`; and the `Change-Id` the hook adds. No others.
 
 Install the hooks once per machine with `hk install --global --mise` (Git 2.54 or later), or `hk install --mise` in this clone. They run rustfmt before a commit, then check the message and add the `Change-Id` Gerrit needs.
 
