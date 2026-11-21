@@ -369,6 +369,61 @@ fn a_library_that_cannot_be_encoded_is_left_out() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A library a macro's argument names in a `cond-expand`, which no source
+/// writes out for the loader to be asked about beforehand, is still a
+/// dependency of the library that used the macro: the cache refuses it
+/// when the answer changes, and keeps it while it does not.
+#[test]
+fn a_library_test_made_from_a_macro_argument_invalidates() {
+    let dir = scratch("argument");
+    let cache = Cache::new(&dir);
+    let loader = Map::new(&[(
+        "(test user)",
+        "(define-library (test user)
+           (import (scheme base))
+           (export which)
+           (begin
+             (define-syntax if-lib
+               (syntax-rules ()
+                 ((_ lib yes no) (cond-expand ((library lib) yes) (else no)))))
+             (define which (if-lib (opt feature) 'with-feature 'without))))",
+    )]);
+    let feature = "(define-library (opt feature)
+                     (import (scheme base)) (export x) (begin (define x 1)))";
+    let compile = |loader: &Map| {
+        compile_program_cached(
+            "(import (scheme base) (test user)) which",
+            &Identity::new("main"),
+            loader,
+            &cache,
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    };
+    let first = compile(&loader);
+    assert_eq!(first.cache.stored.len(), 1);
+    assert_eq!(run(first), "without");
+    let warm = compile(&loader);
+    assert_eq!(warm.cache.hits.len(), 1, "{:?}", warm.cache.refused);
+    assert_eq!(run(warm), "without");
+    loader.add("(opt feature)", feature);
+    let with = compile(&loader);
+    assert!(
+        with.cache
+            .refused
+            .iter()
+            .any(|(i, why)| i.as_str() == "lib:(test user)" && why.contains("(opt feature)")),
+        "{:?}",
+        with.cache.refused
+    );
+    assert_eq!(run(with), "with-feature");
+    let warm = compile(&loader);
+    assert_eq!(warm.cache.hits.len(), 1, "{:?}", warm.cache.refused);
+    assert_eq!(run(warm), "with-feature");
+    loader.remove("(opt feature)");
+    assert_eq!(run(compile(&loader)), "without");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A `cond-expand` that a macro from another library puts in a library's
 /// body is not in that library's text, but its answer is what the library
 /// was compiled with.

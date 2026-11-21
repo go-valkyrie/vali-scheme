@@ -218,9 +218,29 @@ fn prepare<S: Strategy>(
     // Libraries compiled already are not fetched again, so their sources
     // are not read again either.
     let mut sources = std::mem::take(&mut expander.sources);
-    let graph = loader::fetch_beyond(&program, &identity, &fetcher, &mut sources, &|name| {
-        expander.has_library(name)
-    });
+    // A `cond-expand` in the code, or in a library compiled for it, that
+    // tests a library its source never names asks the loader then.
+    let resolver: crate::expand::Resolver = match &evaluator.loader {
+        Some(loader) => {
+            let loader = Arc::clone(loader);
+            Arc::new(move |name, importer| {
+                matches!(
+                    loader.load(name, Some(&Identity::new(importer))),
+                    Ok(Some(_))
+                )
+            })
+        }
+        None => Arc::new(|_, _| false),
+    };
+    expander.set_resolver(Some(resolver));
+    let graph = loader::fetch_beyond(
+        &program,
+        &identity,
+        &fetcher,
+        &mut sources,
+        &|name| expander.has_library(name),
+        &loader::Available::new(),
+    );
     expander.sources = sources;
     let graph = graph.map_err(compile_error)?;
     expander.add_includes(graph.includes);

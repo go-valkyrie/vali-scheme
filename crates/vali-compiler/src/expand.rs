@@ -289,6 +289,9 @@ pub(crate) fn repl_global(name: &str) -> String {
     format!("repl:{name}")
 }
 
+/// Asks a loader whether it has a library, for the identity importing it.
+pub(crate) type Resolver = Arc<dyn Fn(&LibraryName, &str) -> bool + Send + Sync>;
+
 pub(crate) struct Expander {
     pub(crate) vars: Vec<VarInfo>,
     pub(crate) lambdas: Vec<Lambda>,
@@ -363,6 +366,13 @@ pub(crate) struct Expander {
     includes: crate::loader::Includes,
     /// Which libraries bodies' `cond-expand`s may find (`add_available`).
     available: crate::loader::Available,
+    /// Asks the host's loader whether a library exists, for a name the
+    /// import graph's walk did not ask about (`library_answer`).
+    resolver: Option<Resolver>,
+    /// The library a `cond-expand` or an artifact's record asked about
+    /// that nothing could answer yet, and who asked: the caller answers
+    /// it, then expands again with the answer in `add_available`.
+    needed: Option<(LibraryName, String)>,
     /// The sources read, which spans' source ids index.
     pub(crate) sources: vali_syntax::Sources,
     /// The IR of the last module compiled.
@@ -419,6 +429,8 @@ impl Expander {
             next_hashed: false,
             includes: crate::loader::Includes::new(),
             available: crate::loader::Available::new(),
+            resolver: None,
+            needed: None,
             sources: vali_syntax::Sources::new(),
             last_ir: None,
             last_lowered: None,
@@ -441,6 +453,47 @@ impl Expander {
     /// Notes which libraries bodies' `cond-expand`s may find.
     pub(crate) fn add_available(&mut self, available: crate::loader::Available) {
         self.available.extend(available);
+    }
+
+    /// Lets expansion ask `resolver` about a library the walk before
+    /// expansion did not ask about, as `eval` does: its loader is at
+    /// hand, and what it compiled is not redone.
+    pub(crate) fn set_resolver(&mut self, resolver: Option<Resolver>) {
+        self.resolver = resolver;
+    }
+
+    /// Whether expansion stopped for a library it needs an answer about.
+    pub(crate) fn needs_answer(&self) -> bool {
+        self.needed.is_some()
+    }
+
+    /// The library expansion needed an answer about and had none for, if
+    /// it stopped for that.
+    pub(crate) fn take_needed(&mut self) -> Option<(LibraryName, String)> {
+        self.needed.take()
+    }
+
+    /// Whether the library `name` is available to `importer`'s tests: the
+    /// walk's answer if it asked, else a compiled library's, else the
+    /// resolver's, which is kept so the answer is the same each time. With
+    /// no resolver, `None`, and `name` is noted as needed: the loader is
+    /// not at hand, so whoever started expansion answers and starts again.
+    fn library_answer(&mut self, name: &LibraryName, importer: &str) -> Option<bool> {
+        if let Some(&found) = self.available.get(name) {
+            return Some(found);
+        }
+        if self.has_library(name) {
+            return Some(true);
+        }
+        let Some(resolver) = &self.resolver else {
+            if self.needed.is_none() {
+                self.needed = Some((name.clone(), importer.to_owned()));
+            }
+            return None;
+        };
+        let found = resolver(name, importer);
+        self.available.insert(name.clone(), found);
+        Some(found)
     }
 
     /// The forms `(include path ...)`, or `include-ci`, stands for: each
@@ -485,8 +538,9 @@ impl Expander {
 
     /// The forms of the first `cond-expand` clause whose requirement holds
     /// (R7RS 4.2.1), or none. A `(library name)` requirement holds for
-    /// Vali's libraries and those the loader said it has, asked before
-    /// expansion.
+    /// Vali's libraries and those the loader has: asked before expansion
+    /// for each name written out in the source, and when the test is met
+    /// for a name expansion made (`library_answer`).
     fn cond_expand(&mut self, items: &[Syntax], span: Span) -> Result<Vec<Syntax>> {
         for clause in &items[1..] {
             let Exposed::List {
@@ -500,17 +554,26 @@ impl Expander {
                 return Err(error("cond-expand: expected a clause", clause.span()));
             };
             let requirement = requirement.to_datum();
-            let available = &self.available;
+            let importer = self.units.last().map(|u| u.identity.clone());
+            let importer = importer.unwrap_or_default();
             let mut asked = Vec::new();
             let satisfied = crate::features::is_else(&requirement)
                 || crate::features::satisfied(&requirement, &mut |n| {
                     if crate::loader::is_standard(n) {
                         return true;
                     }
-                    let found = available.get(n) == Some(&true);
+                    let Some(found) = self.library_answer(n, &importer) else {
+                        return false;
+                    };
                     asked.push((n.to_string(), found));
                     found
                 })?;
+            if let Some((name, _)) = &self.needed {
+                return Err(error(
+                    format!("cond-expand: library {name} was not asked about"),
+                    span,
+                ));
+            }
             // The unit being expanded followed what it found.
             if let Some(unit) = self.units.last_mut() {
                 for answer in asked {
@@ -523,7 +586,6 @@ impl Expander {
                 return Ok(body.to_vec());
             }
         }
-        let _ = span;
         Ok(Vec::new())
     }
 

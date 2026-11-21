@@ -165,9 +165,12 @@ pub fn compile_program_with(
     loader: &impl Loader,
     artifacts: &Artifacts,
 ) -> Result<Program, CompileError> {
-    let mut sources = vali_syntax::Sources::new();
-    let mut program = loader::program(&read(source, identity.as_str(), &mut sources)?)
-        .map_err(|e| e.located(&sources))?;
+    compile_sync(source, identity, loader, artifacts, None, true)
+}
+
+/// Lets a program import `(vali primitive)`'s internal names, and imports
+/// them implicitly if it has no `import` form.
+fn make_internal(program: &mut loader::Program) {
     program.internal = true;
     if program.implicit {
         // Only the internal names: (scheme base) exports the others.
@@ -186,9 +189,67 @@ pub fn compile_program_with(
             internal,
         ));
     }
-    let graph =
-        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(&program, graph, identity, sources, artifacts, None)
+}
+
+/// Why building a program stopped.
+enum Attempt {
+    Failed(CompileError),
+    /// Expansion met a `cond-expand` test of a library that only it could
+    /// name, as a macro's argument, which the import graph's walk did not
+    /// ask the loader about. The answer is the loader's: fetch the graph
+    /// again with it, and build again.
+    Need(LibraryName, String),
+}
+
+impl From<CompileError> for Attempt {
+    fn from(e: CompileError) -> Attempt {
+        Attempt::Failed(e)
+    }
+}
+
+/// The failure for a library expansion asks about again after it was
+/// answered, which would loop for ever.
+fn asked_twice(name: &LibraryName) -> CompileError {
+    CompileError {
+        message: format!("library {name}: asked about again after it was answered"),
+        span: None,
+        location: None,
+    }
+}
+
+/// Reads, fetches and builds the program `source` with a synchronous
+/// loader, once more for each library a `cond-expand` asks about that the
+/// walk did not (`Attempt::Need`).
+fn compile_sync(
+    source: &str,
+    identity: &Identity,
+    loader: &impl Loader,
+    artifacts: &Artifacts,
+    cache: Option<&Cache>,
+    internal: bool,
+) -> Result<Program, CompileError> {
+    let mut seed = loader::Available::new();
+    loop {
+        let mut sources = vali_syntax::Sources::new();
+        let mut program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+            .map_err(|e| e.located(&sources))?;
+        if internal {
+            make_internal(&mut program);
+        }
+        let graph = loader::fetch_seeded(&program, identity, loader, &mut sources, &seed)
+            .map_err(|e| e.located(&sources))?;
+        match build(&program, graph, identity, sources, artifacts, cache) {
+            Ok(built) => return Ok(built),
+            Err(Attempt::Failed(e)) => return Err(e),
+            Err(Attempt::Need(name, importer)) => {
+                if seed.contains_key(&name) {
+                    return Err(asked_twice(&name));
+                }
+                let found = loader::ask(&program, &importer, &name, loader);
+                seed.insert(name, found);
+            }
+        }
+    }
 }
 
 /// The expander that compiled a program that imports `(scheme eval)`,
@@ -301,19 +362,7 @@ pub fn compile_program(
     identity: &Identity,
     loader: &impl Loader,
 ) -> Result<Program, CompileError> {
-    let mut sources = vali_syntax::Sources::new();
-    let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
-        .map_err(|e| e.located(&sources))?;
-    let graph =
-        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(
-        &program,
-        graph,
-        identity,
-        sources,
-        &Artifacts::default(),
-        None,
-    )
+    compile_sync(source, identity, loader, &Artifacts::default(), None, false)
 }
 
 /// As [`compile_program`], for Vali's own tests: the program may import
@@ -334,20 +383,33 @@ pub async fn compile_program_async(
     identity: &Identity,
     loader: &impl AsyncLoader,
 ) -> Result<Program, CompileError> {
-    let mut sources = vali_syntax::Sources::new();
-    let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
-        .map_err(|e| e.located(&sources))?;
-    let graph = loader::fetch_async(&program, identity, loader, &mut sources)
-        .await
-        .map_err(|e| e.located(&sources))?;
-    build(
-        &program,
-        graph,
-        identity,
-        sources,
-        &Artifacts::default(),
-        None,
-    )
+    let mut seed = loader::Available::new();
+    loop {
+        let mut sources = vali_syntax::Sources::new();
+        let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
+            .map_err(|e| e.located(&sources))?;
+        let graph = loader::fetch_async_seeded(&program, identity, loader, &mut sources, &seed)
+            .await
+            .map_err(|e| e.located(&sources))?;
+        match build(
+            &program,
+            graph,
+            identity,
+            sources,
+            &Artifacts::default(),
+            None,
+        ) {
+            Ok(built) => return Ok(built),
+            Err(Attempt::Failed(e)) => return Err(e),
+            Err(Attempt::Need(name, importer)) => {
+                if seed.contains_key(&name) {
+                    return Err(asked_twice(&name));
+                }
+                let found = loader::ask_async(&program, &importer, &name, loader).await;
+                seed.insert(name, found);
+            }
+        }
+    }
 }
 
 /// Expands and compiles each library of the graph, or loads it from its
@@ -359,7 +421,7 @@ fn build(
     sources: vali_syntax::Sources,
     artifacts: &Artifacts,
     cache: Option<&Cache>,
-) -> Result<Program, CompileError> {
+) -> Result<Program, Attempt> {
     // The libraries a cache may hold: those a host served from source it
     // read, not Vali's own, native or the program's own.
     let cacheable: Vec<(Identity, vali_dist::Digest)> = match cache {
@@ -458,7 +520,10 @@ fn build(
                 cache: report,
             })
         }
-        Err(e) => Err(e.located(&expander.sources)),
+        Err(e) => Err(match expander.take_needed() {
+            Some((name, importer)) => Attempt::Need(name, importer),
+            None => Attempt::Failed(e.located(&expander.sources)),
+        }),
     }
 }
 
@@ -475,18 +540,13 @@ pub fn compile_program_cached(
     loader: &impl Loader,
     cache: &Cache,
 ) -> Result<Program, CompileError> {
-    let mut sources = vali_syntax::Sources::new();
-    let program = loader::program(&read(source, identity.as_str(), &mut sources)?)
-        .map_err(|e| e.located(&sources))?;
-    let graph =
-        loader::fetch(&program, identity, loader, &mut sources).map_err(|e| e.located(&sources))?;
-    build(
-        &program,
-        graph,
+    compile_sync(
+        source,
         identity,
-        sources,
+        loader,
         &Artifacts::default(),
         Some(cache),
+        false,
     )
 }
 
@@ -548,6 +608,11 @@ fn expand_all(
                         module
                     }
                     Err(e) => {
+                        // Refused for want of an answer: ask, rather than
+                        // compile what the answer may make a hit.
+                        if expander.needs_answer() {
+                            return Err(e);
+                        }
                         report.refused.push((library.identity.clone(), e.message));
                         compile_library(expander, library)?
                     }
