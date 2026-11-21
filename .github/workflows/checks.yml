@@ -103,12 +103,19 @@ jobs:
           # no check reads, and which a patch set's own run can't exercise:
           # GerritHub's dispatch always runs main's gerrit-verify.yml). In a
           # case pattern * also matches /.
+          #
+          # A patch set (fetched by repo-url) can't exercise any of .github:
+          # its run is GerritHub's dispatch of main's gerrit-verify.yml, which
+          # uses main's checks.yml. So for a patch set all of .github is
+          # skipped; a pull request runs its own workflows, so there only the
+          # files above are.
           ignored() {
             case "$1" in
               docs/* | *.md | LICENSE | .gitignore | .claude/* | .jouet/* | \
                 fuzz/* | .github/workflows/fuzz.yml | \
                 .github/workflows/gerrit-verify.yml | .github/review/* | \
                 mise.review.toml) return 0 ;;
+              .github/*) [ -n "$REPO_URL" ] ;;
               *) return 1 ;;
             esac
           }
