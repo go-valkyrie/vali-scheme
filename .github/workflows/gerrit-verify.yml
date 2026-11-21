@@ -13,7 +13,8 @@
 # GitHub holds no GerritHub credentials. Only the vote, review and
 # post-review jobs may request an OIDC token, which is how they prove
 # themselves to the Worker; the jobs that run the change's code get no
-# secrets and no token. They restore the Rust caches but never save them,
+# secrets, and no token but the review job's read-only one, which reads
+# only what is public. They restore the Rust caches but never save them,
 # so a patch set can't poison the caches main's CI uses.
 #
 # Needs the repository variable GERRITHUB_CI_URL, the Worker's URL.
@@ -131,6 +132,9 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      # For the gerrit-review skill's open-issues.sh: reading issues with
+      # a token avoids the anonymous rate limit, which runners share.
+      issues: read
       id-token: write
     outputs:
       review: ${{ steps.token.outputs.review }}
@@ -154,45 +158,10 @@ jobs:
       - name: Fetch the patch set
         run: |
           case "$REF" in refs/changes/[0-9][0-9]/*/*) ;; *) echo "bad ref: $REF"; exit 1 ;; esac
-          # The commit and its parent, as a ref of their own; the working
-          # tree stays main's.
-          git fetch -q --no-tags --depth=2 "$REPO_URL" "+$REF:refs/review/patchset"
-          test "$(git rev-parse refs/review/patchset)" = "$REVISION"
-
-      # The change's earlier review, so Muse can follow up its threads: every
-      # inline comment (with its id, patch set, place, author and whether it
-      # is unresolved) and every review message. It is public, so this needs
-      # no credentials, and Muse reads it from the workspace. Like the change,
-      # it is material to judge, not instructions. Without it (Gerrit down,
-      # say) the review goes ahead with an empty history.
-      - name: Fetch the change's earlier review
-        shell: bash
-        env:
-          CHANGE: ${{ github.event.client_payload.change }}
-        run: |
-          set -o pipefail
-          case "$CHANGE" in *[!0-9]*|"") echo "bad change: $CHANGE"; exit 1 ;; esac
-          project=${REPO_URL#*://*/}
-          host=${REPO_URL%"/$project"}
-          api="$host/changes/${project//\//%2F}~$CHANGE"
-          mkdir -p .review
-          get() { curl -fsS "$api/$1" | tail -c +5; }
-          if comments=$(get comments) && messages=$(get messages) &&
-            jq -n --argjson comments "$comments" --argjson messages "$messages" '{
-              comments: [$comments | to_entries[] | .key as $path | .value[]
-                | {id, patch_set, path: $path, line, in_reply_to, unresolved,
-                   author: (.author.username // .author.name), updated, message}]
-                | sort_by(.updated),
-              messages: [$messages[]
-                | {patch_set: ._revision_number, author: (.author.username // .author.name),
-                   date, message}]
-            }' > .review/history.json
-          then
-            jq -r '"\(.comments | length) earlier comments, \(.messages | length) messages"' .review/history.json
-          else
-            echo '::warning::Could not fetch the earlier review; reviewing without it.'
-            echo '{"comments": [], "messages": []}' > .review/history.json
-          fi
+          # The commit and its parent, with no ref of their own: Muse is
+          # given the hash. The working tree stays main's.
+          git fetch -q --no-tags --depth=2 "$REPO_URL" "$REF"
+          test "$(git rev-parse FETCH_HEAD)" = "$REVISION"
 
       # What the gerrit-review skill needs to probe the change, installed
       # beforehand so probes start quickly: main's development tools through
@@ -268,6 +237,11 @@ jobs:
           # From here on nothing may ask GitHub for an OIDC token.
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
           ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          # The job's own token, for the skill's scripts. It reads only what
+          # is public (contents and issues of a public repository), so the
+          # change's code, which Muse's probes run, gains nothing by it but
+          # a rate limit.
+          GH_TOKEN: ${{ github.token }}
           CHANGE: ${{ github.event.client_payload.change }}
           PATCHSET: ${{ github.event.client_payload.patchset }}
         run: |
