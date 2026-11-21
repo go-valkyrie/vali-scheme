@@ -21,6 +21,7 @@ mod cycles;
 pub mod debug;
 mod epoch;
 mod fixnums;
+mod flonums;
 mod handle;
 mod hashing;
 mod isolate;
