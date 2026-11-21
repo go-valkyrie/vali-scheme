@@ -29,8 +29,10 @@ running the scripts from the repository root
 1. `review.sh init CHANGE PATCHSET [REV]`: starts your answer, fetching the
    patch set if it isn't here, and numbers the earlier threads
    (**Your answer**).
-2. `review.sh threads` and `history.sh CHANGE`: the earlier review (**The
-   earlier review**).
+2. `review.sh threads`: the earlier threads, numbered, each with its place,
+   status and first and last comments (**The earlier review**). Reply by
+   these numbers; `history.sh CHANGE` has the same numbers (`thread`) if you
+   need every comment or the earlier review summaries.
 3. `stack.sh CHANGE REV`, `open-changes.sh CHANGE` and `open-issues.sh`:
    the stack and everything else in flight (**What else is going on**).
 4. From the open changes, pick those that touch the same files, the same
@@ -122,8 +124,9 @@ A change is reviewed again with each patch set. The scripts beside this
 skill read Gerrit for you, with no credentials, and print JSON; run them
 from the repository root. The earlier review is
 `.claude/skills/gerrit-review/scripts/history.sh CHANGE`: `comments`, every
-inline comment on any patch set (`id`, `patch_set`, `path`, `line`,
-`in_reply_to`, `unresolved`, `author`, `updated`, `message`), and
+inline comment on any patch set (`thread`, the number `review.sh threads`
+shows, then `id`, `patch_set`, `path`, `line`, `in_reply_to`, `unresolved`,
+`author`, `updated`, `message`), grouped by thread, and
 `messages`, each review's summary with its patch set and author. If it has
 no comments and only upload messages, this is the first review. If the
 script fails (Gerrit down, say), review without it and say so in the

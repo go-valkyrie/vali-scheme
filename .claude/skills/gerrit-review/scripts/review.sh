@@ -94,13 +94,12 @@ case "$cmd" in
     fi
     jq --argjson change "$1" --argjson patchset "$2" \
       --arg rev "$rev" --argjson files "$files" '
-      .comments as $all
-      | ($all | map({key: .id, value: .}) | from_entries) as $by
-      | def root($c): if $c.in_reply_to and $by[$c.in_reply_to] then root($by[$c.in_reply_to]) else $c end;
-      ($all | group_by(root(.).id) | map(sort_by(.updated)) | sort_by(.[0].updated, .[0].id)) as $threads
+      # history.sh numbers the threads; group by its numbers, so there is
+      # one numbering, the one every script shows.
+      (.comments | group_by(.thread) | map(sort_by(.updated)) | sort_by(.[0].thread)) as $threads
       | {change: $change, patchset: $patchset, rev: $rev, files: $files,
          threads: [$threads | to_entries[] | .value as $t | ($t | last) as $l
-           | {number: (.key + 1), patch_set: $l.patch_set, path: $l.path, line: $l.line,
+           | {number: $t[0].thread, patch_set: $l.patch_set, path: $l.path, line: $l.line,
               started_on: $t[0].patch_set, latest: $l.id, unresolved: $l.unresolved, comments: ($t | length),
               author: $t[0].author, first: $t[0].message, last: $l.message}],
          history_unavailable: (.unavailable // false)}' <<< "$history" > "$context"
@@ -198,6 +197,7 @@ case "$cmd" in
         and (.resolved == null or (.resolved | type == "boolean")))' "$file" > /dev/null ||
       die "$file isn't a complete answer: it needs a summary (\`review.sh summary\`), a vote (\`review.sh vote\`) and well-formed comments"
     echo "The answer is complete: vote $(jq '.codeReview' "$file"), $(jq '.comments | length' "$file") comments."
+    echo "Nothing more to do: there is no submit step. The review job posts this file as it is."
     ;;
 
   "" | -h | --help | help)
