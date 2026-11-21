@@ -2676,6 +2676,70 @@ fn evaluating_with_a_loader() {
     );
 }
 
+/// A loader that gains `(opt feature)` when evaluated code includes
+/// `flip`, and loses it when it includes `unflip`.
+struct Changing(std::sync::atomic::AtomicBool);
+
+impl Loader for Changing {
+    fn load(
+        &self,
+        name: &LibraryName,
+        _importer: Option<&Identity>,
+    ) -> Result<Option<Source>, LoadError> {
+        let present = self.0.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(
+            (present && *name == LibraryName::new(["opt", "feature"])).then(|| {
+                Source::scheme(
+                    Identity::new("test:opt/feature"),
+                    "(define-library (opt feature)
+                   (import (scheme base)) (export x) (begin (define x 1)))",
+                )
+            }),
+        )
+    }
+
+    fn include(&self, path: &str, _from: &Identity) -> Result<Option<String>, LoadError> {
+        match path {
+            "flip" | "unflip" => self
+                .0
+                .store(path == "flip", std::sync::atomic::Ordering::SeqCst),
+            _ => return Ok(None),
+        }
+        Ok(Some("1".to_owned()))
+    }
+}
+
+/// What evaluated code finds about a library is what the loader has as
+/// that code is evaluated, not what it had the first time: a miss is not
+/// kept, and a library the program has compiled counts even if the loader
+/// no longer serves it.
+#[test]
+fn evaluated_cond_expand_follows_the_loader() {
+    let source = "(import (scheme base) (scheme eval))
+        (define env (environment '(scheme base)))
+        (define (probe)
+          (eval '(let-syntax ((m (syntax-rules ()
+                                   ((_ lib) (cond-expand ((library lib) 'yes) (else 'no))))))
+                   (m (opt feature)))
+                env))
+        (define (host what) (eval `(begin (include ,what) 0) env))
+        (let* ((before (probe))
+               (_ (host \"flip\"))
+               (after (probe))
+               (imported (eval 'x (environment '(opt feature))))
+               (_ (host \"unflip\"))
+               (kept (probe)))
+          (list before after imported kept))";
+    let program =
+        vali_compiler::compile_program(source, &Identity::new("test"), &NoLibraries).unwrap();
+    let mut cx = Cx::<PreciseHeadered>::new(&HeapConfig::default());
+    cx.install_primitives().unwrap();
+    let loader = std::sync::Arc::new(Changing(std::sync::atomic::AtomicBool::new(false)));
+    let id = vali_compiler::load_with(&mut cx, program, loader).unwrap();
+    let result = cx.run(id).unwrap();
+    assert_eq!(cx.write_string(&result).unwrap(), "(no yes 1 yes)");
+}
+
 #[test]
 fn console_ports() {
     let program = vali_compiler::compile_program(

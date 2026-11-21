@@ -50,6 +50,17 @@ impl LibraryName {
     }
 }
 
+/// The library name `text` spells, as `LibraryName`'s `Display` writes it.
+pub(crate) fn parse_name(text: &str) -> Option<LibraryName> {
+    let mut sources = vali_syntax::Sources::new();
+    let id = sources.add("library name", text);
+    let read = vali_syntax::read(text, id);
+    match &read.datums[..] {
+        [datum] if read.errors.is_empty() => library_name(datum).ok(),
+        _ => None,
+    }
+}
+
 impl fmt::Display for LibraryName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(")?;
