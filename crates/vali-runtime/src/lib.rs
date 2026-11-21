@@ -20,6 +20,7 @@ mod cx;
 mod cycles;
 pub mod debug;
 mod epoch;
+mod fixnums;
 mod handle;
 mod hashing;
 mod isolate;
