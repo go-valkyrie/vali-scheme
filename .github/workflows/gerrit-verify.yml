@@ -255,7 +255,9 @@ jobs:
           token=$(jq -r .token "$RUNNER_TEMP/token.json")
           rm -f "$RUNNER_TEMP/token.json"
           # Muse keeps a session log under this ID, which the next step
-          # exports; stdout carries only the final answer.
+          # exports. It builds its answer with the skill's review.sh, in
+          # .review/answer.json, so no one writes the JSON by hand; stdout
+          # carries only its closing message.
           session=$(cat /proc/sys/kernel/random/uuid)
           echo "SESSION=$session" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/muse-review"
@@ -292,7 +294,6 @@ jobs:
             XDG_CONFIG_HOME="$config" "$MUSE" exec \
               --api-key-stdin \
               --session-id "$session" \
-              --output-schema .github/review/schema.json \
               --trust-workspace \
               --disable-approval \
               --contributor-mode on \
@@ -302,7 +303,10 @@ jobs:
               --no-foreign-personal-context \
               --max-model-steps 200 \
               "/gerrit-review $CHANGE,$PATCHSET $REVISION" \
-              > "$RUNNER_TEMP/muse-review/review.json" || status=$?
+              > "$RUNNER_TEMP/muse-review/final.md" || status=$?
+          # The answer, copied out of the workspace as data; the post job
+          # checks it with its own copy of review.sh, not the workspace's.
+          cp .review/answer.json "$RUNNER_TEMP/muse-review/review.json" 2> /dev/null || true
           # Let the viewer print the last of the log, then stop it.
           sleep 2
           kill -- -"$watcher" 2> /dev/null || true
@@ -340,7 +344,7 @@ jobs:
 
   # Posts Muse's review and renders its session, on a runner of its own, so
   # nothing the review job's sandbox wrote ever runs where an OIDC token can
-  # be had: the renderer and the schema come from a fresh checkout of main,
+  # be had: the renderer and review.sh come from a fresh checkout of main,
   # and Muse's answer and session are only read, as data.
   post-review:
     needs: review
@@ -362,7 +366,9 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
           sparse-checkout-cone-mode: false
-          sparse-checkout: .github/review/
+          sparse-checkout: |
+            .github/review/
+            .claude/skills/gerrit-review/scripts/
 
       - name: Fetch Muse's answer and session
         uses: actions/download-artifact@v4
@@ -385,9 +391,9 @@ jobs:
         run: |
           set -o pipefail
           review="$RUNNER_TEMP/muse-review/review.json"
-          # Only a well-formed answer is posted.
-          if ! jq -e '(.review | type == "string") and (.codeReview | IN(-1, 0, 1)) and (.comments | type == "array")' \
-            "$review" > /dev/null 2>&1; then
+          # Only a complete, well-formed answer is posted, checked by main's
+          # review.sh from this job's own checkout.
+          if ! .claude/skills/gerrit-review/scripts/review.sh check "$review"; then
             echo '::warning::Muse gave no review to post; see the session below.'
             echo 'Muse gave no review to post; the session page shows why.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -399,7 +405,7 @@ jobs:
           oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=gerrithub-ci" | jq -r .value)
           echo "::add-mask::$oidc"
-          # The schema has every field and uses null for "none"; the Worker
+          # The answer has every field and uses null for "none"; the Worker
           # takes Gerrit's names and no field at all for "none". A reply goes
           # on its parent's patch set (Gerrit takes it nowhere else), and
           # "resolved" is Gerrit's "unresolved", inverted. The footer says who
