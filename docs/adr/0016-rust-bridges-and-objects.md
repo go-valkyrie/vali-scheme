@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-17
-- **Related:** 0002 (the Port and Rust-object heap types), 0003 (handles, freeing), 0004 (Rust never in the middle of a Scheme stack), 0007 #5 (bridges declare Rust types), 0008 (isolates are `Send`), 0009 (loaders, expansion-safe bridges)
+- **Related:** 0002 (the Port and Rust-object heap types), 0003 (handles, freeing), 0004 (Rust never in the middle of a Scheme stack), 0007 #5 (bridges declare Rust types), 0008 (isolates are `Send`), 0009 (loaders, expansion-safe bridges), 0026 (async bridges)
 
 ## Context
 
@@ -57,10 +57,10 @@ The expander needs a library's export names at compile time; the isolate needs t
 6. **Bridges see the isolate through an object-safe context, not `Cx<S>`.** A native library must not depend on the memory strategy, since the compiler sees it through the loader without knowing which strategy will run it. Conversions reach the isolate through a `dyn` context trait that `Cx<S>` implements: one dynamic call at the boundary. Vali's core primitives stay monomorphic `NativeFn<S>`, as now, where calls are hot.
 7. **Borrows are checked per object.** Each table entry has a borrow flag, set as a receiver or another `&T` or `&mut T` parameter converts and cleared when the call ends, however it ends; host code borrowing through `Cx::with` checks it too. A conflicting borrow raises "*procedure*: *name* is already borrowed", never undefined behaviour.
 8. **Native libraries come through the loader.** A loader serves a library either as source or as a native library, `Arc<NativeLibrary>`. The compiler turns a native library into a module whose variables link to its functions, each by the library's identity and the function's name, and exports them, so expansion, imports and linking treat it as any other library. The compiled program keeps the `Arc`, and loading it registers the library with the isolate, where the module's links find exactly those functions as it loads, so the export list and the bindings cannot disagree. No procedure turns a string into a native function, so code can reach a native library only by importing it. The expander's isolate registers the program's native libraries too, but there a function not marked expansion-safe is a stub that fails when called (ADR 0009 #17). Vali's own native libraries, such as `(vali ports)`, are deterministic and marked so; every isolate registers them as it installs the primitives.
-9. **A panic in a bridge becomes a Scheme condition** naming the procedure (ADR 0007), and leaves the isolate usable; the borrow guards and the table stay consistent because both are released by `Drop`. **A panic in a core primitive poisons the isolate.** Primitives work on raw heap words, so one that panics partway through an update may leave an object Scheme can still reach half-written. The VM catches the panic so it never unwinds through frames, records it, and returns `Error::Poisoned` naming the primitive. Like `Exit` and `OutOfFuel` it is not a condition: no `guard`, handler or `dynamic-wind` after thunk runs, since that is Scheme code on a suspect heap. Every later `Cx::call` or `run` returns the same error, and the host drops the isolate. An error a primitive returns is unchanged and stays catchable. Poisoning the isolate rather than only the task is deliberate: tasks share one heap.
+9. **A panic poisons the isolate,** in a bridge, sync or async, and in a core primitive alike. It is a programmer error, not a condition (ADR 0026 #18). Primitives work on raw heap words, so one that panics partway through an update may leave an object Scheme can still reach half-written, and a bridge's panic is treated the same, for one rule. The VM catches the panic so it never unwinds through frames, records it, and re-raises it as a panic from the host call that hit it. No `guard`, handler or `dynamic-wind` after thunk runs, since that is Scheme code on a suspect heap. Every later call returns `Error::Poisoned`, naming the procedure and what the panic said, and the host drops the isolate. An error a bridge or primitive returns is unchanged and stays catchable, and a bridge author who wants resilience catches the panic inside the bridge and returns `Err`. Poisoning the isolate rather than only the task is deliberate: tasks share one heap.
 10. **Ports are Vali's first Rust objects.** One `Port` type, with an input or output direction, textual or binary, its procedures bridges in the native library `(vali ports)` that `(scheme base)` wraps to supply the current ports. Its data is a string or a bytevector for now; each isolate's console ports are string ports the host gives input to and takes output from. Files and sockets, and backends a host adds, come with capabilities, through a backend trait. `port?` is a type check on `Port`.
 
-11. **Async bridges** (`async fn`, ADR 0008 #8) come with the async integration, converting through the same traits.
+11. **Async bridges** (`async fn`, ADR 0008 #8) convert through the same traits and are declared as functions that return a future, which must be `Send + 'static` and holds no Scheme value and no borrow across an await. ADR 0026 #13 to #17 settles them: a bridge returns a future whose synchronous part does the borrowing, `Resume<T>` serves callback-style APIs, and `SchemeFn` lets a bridge call a Scheme procedure as a future. Not built yet.
 
 ## Consequences
 
@@ -76,7 +76,7 @@ The per-call alias check was rejected for the borrow flag: the flag costs about 
 
 ## Left open
 
-- The async bridge API, with the async integration.
+- The macro's spelling of async bridges, and how a result that may be a value or a future is typed (ADR 0026 #13 to #16).
 - Weak handles, for Rust objects that must refer to Scheme values in cycles.
 
 ## References
