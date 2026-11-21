@@ -12,7 +12,8 @@
 # Each check keeps a Rust cache under a shared key named after it. Only
 # check.yml saves them, on main; a patch set restores them and never saves,
 # so it can't poison the cache main's CI uses. The test passes share one
-# cache, which only the base pass saves.
+# cache, which only the base pass saves. mise and its tools share one cache,
+# which lint saves, the same way.
 name: checks
 
 on:
@@ -31,7 +32,7 @@ on:
         type: string
         default: ""
       save-cache:
-        description: Save the Rust caches, for later runs to restore.
+        description: Save the Rust and mise caches, for later runs to restore.
         type: boolean
         default: false
       check-commit-message:
@@ -188,18 +189,34 @@ jobs:
           shared-key: ${{ startsWith(matrix.check, 'test') && 'test' || matrix.check }}
           save-if: ${{ inputs.save-cache && (matrix.check == 'test' || !startsWith(matrix.check, 'test')) }}
 
+      # mise and the tools it installs come from mise-action's cache, so a
+      # run doesn't download them again from their release pages. The key
+      # changes when the pinned versions do. Only lint saves it, on main;
+      # the other jobs install the same, and patch sets only restore it.
+      # The commit-message job restores it too, for hk, without installing
+      # the rest. Steps then run the mise the action put on PATH, at
+      # bin/mise's version, rather than bin/mise, which would fetch its own.
+      - name: Read mise's pinned version
+        id: mise
+        run: echo "version=$(sed -n 's/.*MISE_VERSION:-\([0-9][0-9.]*\)}.*/\1/p' bin/mise | head -n 1)" >> "$GITHUB_OUTPUT"
+
       - name: Install the pinned toolchain
-        run: bin/mise install
+        uses: jdx/mise-action@v5
+        with:
+          version: ${{ steps.mise.outputs.version }}
+          install: ${{ matrix.check != 'commit-message' }}
+          cache_key: mise-${{ runner.os }}-${{ runner.arch }}-development-${{ hashFiles('bin/mise', 'mise.toml', 'mise.*.toml', '.miserc.toml', 'rust-toolchain.toml') }}
+          cache_save: ${{ inputs.save-cache && matrix.check == 'lint' }}
 
       - name: Commit message
         if: inputs.check-commit-message && (matrix.check == 'lint' || matrix.check == 'commit-message')
         run: |
           git log -1 --format=%B > "$RUNNER_TEMP/commit-msg"
-          bin/mise exec -- hk run commit-msg "$RUNNER_TEMP/commit-msg"
+          mise exec -- hk run commit-msg "$RUNNER_TEMP/commit-msg"
 
       - name: Lint
         if: matrix.check == 'lint'
-        run: bin/mise run lint
+        run: mise run lint
 
       # The debugger tests fail, not skip, when CI is set and these are
       # missing. The base test pass runs them too (cargo test --workspace
@@ -211,24 +228,24 @@ jobs:
 
       - name: Test
         if: matrix.check == 'test'
-        run: bin/mise run test-base
+        run: mise run test-base
 
       - name: Test unoptimised
         if: matrix.check == 'test-no-opt'
-        run: bin/mise run test-no-opt
+        run: mise run test-no-opt
 
       - name: Test with eager conversion
         if: matrix.check == 'test-eager'
-        run: bin/mise run test-eager
+        run: mise run test-eager
 
       - name: Debugger tests
         if: matrix.check == 'debugger'
         run: |
-          bin/mise run test-debugger
-          bin/mise run test-debugger-optimised
+          mise run test-debugger
+          mise run test-debugger-optimised
 
       - name: Docs and dependencies
         if: matrix.check == 'docs'
         run: |
-          bin/mise run docs
-          bin/mise run deny
+          mise run docs
+          mise run deny

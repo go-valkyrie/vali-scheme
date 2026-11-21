@@ -199,6 +199,17 @@ jobs:
       # mise, the crates main builds with, and the Rust cache, restored into
       # target/, which Muse's scratch copy of the change links to so that only
       # what the change touches is rebuilt.
+      #
+      # mise and those tools, and Muse Code, come from the cache check.yml's
+      # review-tools job saves on main, so they are downloaded only when
+      # main's pinned versions change. Restored here and never saved, as
+      # with the Rust cache, so a patch set can't poison it; restore has no
+      # post step, so nothing runs after Muse.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.local/share/mise
+          key: mise-${{ runner.os }}-${{ runner.arch }}-review-${{ hashFiles('bin/mise', 'mise.toml', 'mise.*.toml', '.miserc.toml', 'rust-toolchain.toml') }}
+
       - name: Install the development tools
         env:
           MISE_ENV: development
