@@ -85,6 +85,12 @@ fn libraries() -> Map {
                 .to_owned(),
         ),
         (
+            "(test stx)",
+            "(define-library (test stx) (import (scheme base)) (export stx)
+               (begin (define (stx) #'(foo bar))))"
+                .to_owned(),
+        ),
+        (
             "(test pub)",
             "(define-library (test pub) (import (scheme base))
                (export shown)
@@ -716,6 +722,128 @@ fn a_syntax_export_cannot_bind_another_librarys_private_variable() {
     let evil = replace_section(find(&set, EVIL), "syntax", export);
     let r = attempt("the same name", PEEKS, &with(&set, EVIL, evil));
     assert!(r.contains("does not export"), "{r}");
+}
+
+const STX: &str = "lib:(test stx)";
+const STX_PROGRAM: &str = "(import (scheme base) (test stx)) (syntax->datum (stx))";
+
+/// What a library's code may do with the syntax primitives is call them
+/// for its own unit: they look the unit they are given up in tables that
+/// hold every loaded library's.
+#[test]
+fn a_procedure_may_call_syntax_primitives_for_its_own_unit_only() {
+    // `(test stx)` makes a syntax object with `#'` in a procedure, so its
+    // code calls `%syntax-build` with its own key. Whole, it loads.
+    let set = written(STX_PROGRAM);
+    let r = attempt("a procedure making syntax", STX_PROGRAM, &set);
+    assert!(r.starts_with("ran: (foo bar)"), "{r}");
+    // Naming another library's unit would build from its templates.
+    let bytes = find(&set, STX);
+    let mut ir = vali_dist::decode(&section(bytes, "invoke")).unwrap();
+    let mut changed = 0;
+    for c in &mut ir.constants {
+        if matches!(c, vali_dist::Constant::String(s) if &**s == STX) {
+            *c = vali_dist::Constant::String(GREET.into());
+            changed += 1;
+        }
+    }
+    assert!(changed > 0, "the code names its own unit by a constant");
+    let invoke = vali_dist::encode(&ir).unwrap();
+    let hostile = with(&set, STX, replace_section(bytes, "invoke", invoke));
+    let r = attempt("another library's unit", STX_PROGRAM, &hostile);
+    assert!(r.starts_with("refused"), "{r}");
+    assert!(r.contains("lib:(test stx)"), "{r}");
+    assert!(r.contains("%syntax-build"), "{r}");
+}
+
+#[test]
+fn a_syntax_primitive_may_not_be_used_as_a_value() {
+    // The call's callee is also passed to the call as an argument, which
+    // would let code hand the primitive on and call it for any unit.
+    let set = written(STX_PROGRAM);
+    let bytes = find(&set, STX);
+    let mut ir = vali_dist::decode(&section(bytes, "invoke")).unwrap();
+    let mut changed = 0;
+    let module = ir.clone();
+    for f in &mut ir.functions {
+        // The variables bound to a read of `%syntax-build`.
+        let reads: Vec<_> = f
+            .terms
+            .iter()
+            .filter_map(|t| match t {
+                vali_dist::Term::Let {
+                    var,
+                    value: vali_dist::Value::Global(g),
+                    ..
+                } if &*module.globals[g.0 as usize].name == "%syntax-build" => Some(*var),
+                _ => None,
+            })
+            .collect();
+        let is_read =
+            |op: vali_dist::Operand| matches!(op, vali_dist::Operand::Var(v) if reads.contains(&v));
+        for t in &mut f.terms {
+            match t {
+                vali_dist::Term::Let {
+                    value: vali_dist::Value::Call { callee, args },
+                    ..
+                }
+                | vali_dist::Term::TailCall { callee, args, .. }
+                    if is_read(*callee) =>
+                {
+                    args.push(*callee);
+                    changed += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(changed > 0, "the code calls %syntax-build");
+    let invoke = vali_dist::encode(&ir).unwrap();
+    let hostile = with(&set, STX, replace_section(bytes, "invoke", invoke));
+    let r = attempt("a primitive used as a value", STX_PROGRAM, &hostile);
+    assert!(r.starts_with("refused"), "{r}");
+    assert!(r.contains("lib:(test stx)"), "{r}");
+    assert!(r.contains("%syntax-build"), "{r}");
+}
+
+#[test]
+fn a_transformer_may_call_syntax_primitives_for_its_own_unit_only() {
+    // `count-args` of (test greet) matches and builds syntax, with its own
+    // key written among the macro's constants, as the key of its compiled
+    // syntax is. Each place the key is written, in turn, is made another
+    // library's of the same length. The one that is the constant the
+    // transformer's calls name is refused for it; the others are the
+    // key of the compiled syntax, which fails another check, or text
+    // that no code reads.
+    let set = written(PROGRAM);
+    let r = attempt("a transformer", PROGRAM, &set);
+    assert!(r.starts_with("ran"), "{r}");
+    let bytes = find(&set, GREET);
+    let syntax = section(bytes, "syntax");
+    let needle = GREET.as_bytes();
+    let other = SHOUT.as_bytes();
+    assert_eq!(needle.len(), other.len());
+    let places: Vec<usize> = (0..syntax.len() - needle.len())
+        .filter(|&at| &syntax[at..at + needle.len()] == needle)
+        .collect();
+    assert!(!places.is_empty());
+    let results: Vec<String> = places
+        .iter()
+        .map(|&at| {
+            let mut patched = syntax.clone();
+            patched[at..at + other.len()].copy_from_slice(other);
+            let hostile = with(&set, GREET, replace_section(bytes, "syntax", patched));
+            attempt("a transformer naming another unit", PROGRAM, &hostile)
+        })
+        .collect();
+    assert!(
+        results.iter().any(|r| r.contains(
+            "lib:(test greet): the transformer count-args uses %syntax-build other than to call it"
+        ) || r.contains(
+            "lib:(test greet): the transformer count-args uses %syntax-match other than to call it"
+        )),
+        "{results:?}"
+    );
 }
 
 #[test]
