@@ -12,6 +12,7 @@
 pub mod arith;
 pub mod bitwise;
 mod complex;
+pub mod flonum;
 mod integer;
 mod parse;
 mod print;
