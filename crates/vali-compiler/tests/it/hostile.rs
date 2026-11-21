@@ -85,6 +85,16 @@ fn libraries() -> Map {
                 .to_owned(),
         ),
         (
+            "(test label)",
+            "(define-library (test label)
+               (import (scheme base))
+               (export twin)
+               (begin
+                 (define-syntax twin
+                   (syntax-rules () ((_) '(#2=(y) #3=(z) #2# #3#))))))"
+                .to_owned(),
+        ),
+        (
             "(test pub)",
             "(define-library (test pub) (import (scheme base))
                (export shown)
@@ -539,6 +549,109 @@ fn greet_with_nested_pattern(depth: usize) -> Set {
         .unwrap();
     let patched = splice(&syntax, p.at, p.len, &deep_pattern(depth));
     with(&set, GREET, replace_section(bytes, "syntax", patched))
+}
+
+const USES_TWIN: &str = "(import (scheme base) (test label)) (twin)";
+const LABEL: &str = "lib:(test label)";
+
+/// `(test label)`'s artifacts with the `n`th datum label number of its
+/// syntax export (counting the first copy of the template's two
+/// definitions, then its two references) replaced by `new`.
+fn label_patch(n: usize, new: &[u8]) -> Set {
+    let set = written(USES_TWIN);
+    let bytes = find(&set, LABEL);
+    let syntax = section(bytes, "syntax");
+    let fields = walk_syntax(&syntax);
+    let labels: Vec<_> = fields.iter().filter(|f| f.what == "atom.label").collect();
+    // The template is in the export more than once, and the first has
+    // its two definitions, then its two references.
+    assert!(labels.len() >= 4, "{labels:?}");
+    let f = labels[n];
+    let patched = splice(&syntax, f.at, f.len, new);
+    with(&set, LABEL, replace_section(bytes, "syntax", patched))
+}
+
+#[test]
+fn datum_labels_load_from_an_artifact() {
+    let set = written(USES_TWIN);
+    let r = attempt("labels as written", USES_TWIN, &set);
+    assert_eq!(r, "ran: ((y) (z) (y) (z))");
+}
+
+#[test]
+fn a_reference_to_a_datum_label_not_defined_yet_is_refused() {
+    // The first reference names label 2 when two are defined, 0 and 1,
+    // and any number past them.
+    for n in [2u64, 3, 99, u64::from(u32::MAX)] {
+        let r = attempt("a reference too far", USES_TWIN, &label_patch(2, &uint(n)));
+        assert!(r.contains("a reference to datum label"), "{r}");
+        assert!(r.contains("not defined yet"), "{r}");
+    }
+}
+
+#[test]
+fn a_datum_label_defined_twice_is_refused() {
+    // The second definition numbered 0, as the first is.
+    let r = attempt("a label twice", USES_TWIN, &label_patch(1, &uint(0)));
+    assert!(r.contains("datum label 0 is defined twice"), "{r}");
+}
+
+#[test]
+fn a_datum_label_defined_out_of_order_is_refused() {
+    let r = attempt("a label skipped", USES_TWIN, &label_patch(1, &uint(5)));
+    assert!(r.contains("datum label 5 is defined before label 1"), "{r}");
+}
+
+#[test]
+fn more_datum_labels_than_the_limit_are_refused() {
+    // Label 0 holds a list of 2^14 more definitions, which takes the
+    // count past the limit at the last: they are siblings, so that the
+    // nesting limit is not what refuses it.
+    const LIMIT: u64 = 1 << 14;
+    let mut w = Writer::new();
+    w.uint(0);
+    w.byte(9); // a list
+    w.uint(LIMIT);
+    for n in 1..=LIMIT {
+        w.byte(7);
+        w.uint(n);
+        w.byte(1); // inside, a boolean
+        w.byte(0);
+        no_span(&mut w);
+        no_span(&mut w);
+    }
+    let r = attempt("too many labels", USES_TWIN, &label_patch(0, &w.finish()));
+    assert!(r.contains("more than 16384 datum labels"), "{r}");
+}
+
+#[test]
+fn a_datum_label_definition_may_be_cyclic_but_only_to_labels_begun() {
+    // Inside label 0's own datum, a reference to 0 closes a cycle: it
+    // is how `#0=(a . #0#)` is written, so it is valid. A reference to
+    // label 1, which no definition has begun, is not.
+    for (target, ok) in [(0u64, true), (1, false)] {
+        let mut w = Writer::new();
+        w.uint(0);
+        w.byte(9); // a list of one item, the reference, with no tail
+        w.uint(1);
+        w.byte(8);
+        w.uint(target);
+        no_span(&mut w);
+        w.byte(0);
+        no_span(&mut w); // the list's span
+        let r = attempt(
+            "a reference inside",
+            USES_TWIN,
+            &label_patch(0, &w.finish()),
+        );
+        if ok {
+            // The original datum then follows where the stream expects
+            // the label's own span, so it fails after the reference.
+            assert!(!r.contains("not defined yet"), "{r}");
+        } else {
+            assert!(r.contains("not defined yet"), "{r}");
+        }
+    }
 }
 
 #[test]
@@ -1418,6 +1531,45 @@ impl<'a> Walk<'a> {
         Ok(())
     }
 
+    /// A datum inside a label definition: its kind, then its span.
+    fn datum(&mut self) -> W<()> {
+        match self.byte("datum.tag")? {
+            1 => {
+                self.byte("atom.bool")?;
+            }
+            2 => {
+                self.uint("atom.char")?;
+            }
+            6 => self.bytes("atom.bytes")?,
+            7 => {
+                self.uint("atom.label")?;
+                self.datum()?;
+            }
+            8 => {
+                self.uint("atom.label")?;
+            }
+            9 => {
+                let n = self.uint("datum.items")?;
+                for _ in 0..n {
+                    self.datum()?;
+                }
+                if self.byte("datum.tail")? == 1 {
+                    self.datum()?;
+                }
+            }
+            10 => {
+                let n = self.uint("datum.items")?;
+                for _ in 0..n {
+                    self.datum()?;
+                }
+            }
+            _ => {
+                self.str("atom.text")?;
+            }
+        }
+        self.span()
+    }
+
     fn syntax(&mut self) -> W<()> {
         let at = self.r.offset();
         self.enter("syntax");
@@ -1448,6 +1600,13 @@ impl<'a> Walk<'a> {
                     self.uint("atom.char")?;
                 }
                 6 => self.bytes("atom.bytes")?,
+                7 => {
+                    self.uint("atom.label")?;
+                    self.datum()?;
+                }
+                8 => {
+                    self.uint("atom.label")?;
+                }
                 _ => {
                     self.str("atom.text")?;
                 }

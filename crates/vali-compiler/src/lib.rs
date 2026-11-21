@@ -422,7 +422,8 @@ fn build(
                         .unit_of(library.as_str())
                         .expect("every library is a unit");
                     // A library whose artifact cannot be made, as one whose
-                    // syntax export holds a datum label, is left out.
+                    // syntax export holds more datum labels than an
+                    // artifact may, is left out.
                     let bytes = match expander.library_artifact(unit) {
                         Ok(bytes) => bytes,
                         Err(e) => {
