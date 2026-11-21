@@ -113,3 +113,19 @@ macro_rules! arithmetic {
 }
 
 arithmetic!(Add add, Sub sub, Mul mul, Div div, Rem rem);
+
+impl std::ops::Neg for &Integer {
+    type Output = Integer;
+
+    fn neg(self) -> Integer {
+        Integer(-&self.0)
+    }
+}
+
+impl std::ops::Neg for Integer {
+    type Output = Integer;
+
+    fn neg(self) -> Integer {
+        Integer(-self.0)
+    }
+}

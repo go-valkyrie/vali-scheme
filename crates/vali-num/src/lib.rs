@@ -10,6 +10,7 @@
 //! without changing this crate's API.
 
 pub mod arith;
+pub mod bitwise;
 mod complex;
 mod integer;
 mod parse;

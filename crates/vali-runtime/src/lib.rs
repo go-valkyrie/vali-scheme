@@ -10,6 +10,7 @@
 //!   `Sync` and `'static`, and are used through their isolate's context.
 
 mod asan;
+mod bitwise;
 pub mod bridge;
 mod code;
 mod continuations;
