@@ -662,10 +662,16 @@ impl Expander {
         // What it asked about libraries must still have the same answer:
         // its expansion followed it.
         for (name, found) in &depends.libraries {
-            let now = self
-                .available
-                .iter()
-                .any(|(n, available)| *available && n.to_string() == *name);
+            let now = match crate::library::parse_name(name) {
+                Some(parsed) => self.library_answer(&parsed, identity),
+                None => None,
+            };
+            let Some(now) = now else {
+                return Err(fail(format!(
+                    "library {name} was asked about when it was compiled, \
+                     and has no answer yet"
+                )));
+            };
             if now != *found {
                 return Err(fail(format!(
                     "library {name} was {} when it was compiled, and is {} now",

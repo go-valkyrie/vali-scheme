@@ -110,13 +110,27 @@ pub(super) fn error(message: impl Into<String>, span: Option<Span>) -> CompileEr
 }
 
 /// Fetches the import graph of `program` with a synchronous loader.
+#[cfg(test)]
 pub(crate) fn fetch(
     program: &Program,
     identity: &Identity,
     loader: &impl Loader,
     sources: &mut vali_syntax::Sources,
 ) -> Result<Graph> {
-    fetch_beyond(program, identity, loader, sources, &|_| false)
+    fetch_seeded(program, identity, loader, sources, &Available::new())
+}
+
+/// As `fetch`, with the answers `seed` holds for libraries bodies'
+/// `cond-expand`s test, which expansion asked for after an earlier
+/// fetch (`ask`).
+pub(crate) fn fetch_seeded(
+    program: &Program,
+    identity: &Identity,
+    loader: &impl Loader,
+    sources: &mut vali_syntax::Sources,
+    seed: &Available,
+) -> Result<Graph> {
+    fetch_beyond(program, identity, loader, sources, &|_| false, seed)
 }
 
 /// As `fetch`, leaving out the libraries `known` says are compiled
@@ -128,9 +142,10 @@ pub(crate) fn fetch_beyond(
     loader: &impl Loader,
     sources: &mut vali_syntax::Sources,
     known: &impl Fn(&LibraryName) -> bool,
+    seed: &Available,
 ) -> Result<Graph> {
     let loader = Sync_(loader);
-    let future = pin!(walk(program, identity, &loader, sources, known));
+    let future = pin!(walk(program, identity, &loader, sources, known, seed));
     // A synchronous loader's futures are ready at once, so the walk never
     // waits.
     match future.poll(&mut Context::from_waker(Waker::noop())) {
@@ -140,14 +155,72 @@ pub(crate) fn fetch_beyond(
 }
 
 /// Fetches the import graph of `program` with an asynchronous loader.
+#[cfg(test)]
 pub(crate) async fn fetch_async(
     program: &Program,
     identity: &Identity,
     loader: &impl AsyncLoader,
     sources: &mut vali_syntax::Sources,
 ) -> Result<Graph> {
+    fetch_async_seeded(program, identity, loader, sources, &Available::new()).await
+}
+
+/// As `fetch_async`, with the answers `seed` holds (`fetch_seeded`).
+pub(crate) async fn fetch_async_seeded(
+    program: &Program,
+    identity: &Identity,
+    loader: &impl AsyncLoader,
+    sources: &mut vali_syntax::Sources,
+    seed: &Available,
+) -> Result<Graph> {
     let loader = Async(loader);
-    walk(program, identity, &loader, sources, &|_| false).await
+    walk(program, identity, &loader, sources, &|_| false, seed).await
+}
+
+/// Whether the loader has the library `name`, for `importer`, as the
+/// walk before expansion decides for a name written out in the source: it
+/// does if the library is Vali's, the program's own, or one the loader
+/// has. Expansion asks this for a name it made, which that walk could not
+/// see, and the answer is the same as the walk's would have been.
+pub(crate) fn ask(
+    program: &Program,
+    importer: &str,
+    name: &LibraryName,
+    loader: &impl Loader,
+) -> bool {
+    let loader = Sync_(loader);
+    let future = pin!(ask_with(program, importer, name, &loader));
+    match future.poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(found) => found,
+        Poll::Pending => unreachable!("a synchronous loader never waits"),
+    }
+}
+
+/// As `ask`, with an asynchronous loader.
+pub(crate) async fn ask_async(
+    program: &Program,
+    importer: &str,
+    name: &LibraryName,
+    loader: &impl AsyncLoader,
+) -> bool {
+    ask_with(program, importer, name, &Async(loader)).await
+}
+
+async fn ask_with(
+    program: &Program,
+    importer: &str,
+    name: &LibraryName,
+    loader: &impl Fetch,
+) -> bool {
+    is_standard(name)
+        || program
+            .libraries
+            .iter()
+            .any(|d| library::form_name(d).is_ok_and(|n| n == *name))
+        || matches!(
+            loader.fetch(name, Some(&Identity::new(importer))).await,
+            Ok(Some(_))
+        )
 }
 
 pub(super) fn list(items: Vec<Datum>, span: Span) -> Datum {
@@ -527,6 +600,7 @@ pub(super) async fn walk(
     loader: &impl Fetch,
     sources: &mut vali_syntax::Sources,
     known: &impl Fn(&LibraryName) -> bool,
+    seed: &Available,
 ) -> Result<Graph> {
     // Libraries the program defines itself need no loader, beyond what
     // they include.
@@ -551,7 +625,7 @@ pub(super) async fn walk(
     }
     let local: HashMap<&LibraryName, &LibraryForm> = forms.iter().map(|l| (&l.name, l)).collect();
     let mut includes = Includes::new();
-    let mut available = Available::new();
+    let mut available = seed.clone();
     fetch_includes(
         &program.body,
         identity,

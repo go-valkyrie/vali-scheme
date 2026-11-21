@@ -509,6 +509,74 @@ fn cond_expand_in_a_body_asks_the_loader() {
     assert_eq!(result.unwrap(), "(present absent)");
 }
 
+/// A `cond-expand` whose `(library ...)` name a macro's argument supplies
+/// is not in the source for the walk before expansion to see, so the
+/// expander asks the loader then, and gets the answer the walk would have.
+const IF_LIB: &str = "(define-syntax if-lib
+       (syntax-rules ()
+         ((_ lib yes no) (cond-expand ((library lib) yes) (else no)))))";
+
+#[test]
+fn cond_expand_in_a_macro_asks_the_loader_for_a_name_it_was_given() {
+    let feature = "(define-library (opt feature)
+                     (import (scheme base)) (export) (begin))";
+    let program = format!(
+        "(import {BASE}) {IF_LIB}
+         (list (if-lib (opt feature) 'yes 'no) (if-lib (opt other) 'yes 'no))"
+    );
+    let present = Map(vec![("(opt feature)", feature)]);
+    assert_eq!(run_with(&program, &present).unwrap(), "(yes no)");
+    assert_eq!(run_with(&program, &Map(vec![])).unwrap(), "(no no)");
+    // The same name, written out elsewhere, gives the same answer.
+    let walked = format!(
+        "(import {BASE}) {IF_LIB}
+         (list (if-lib (opt feature) 'yes 'no)
+               (cond-expand ((library (opt feature)) 'yes) (else 'no)))"
+    );
+    assert_eq!(run_with(&walked, &present).unwrap(), "(yes yes)");
+    assert_eq!(run_with(&walked, &Map(vec![])).unwrap(), "(no no)");
+}
+
+/// A library defined in the program is found as well, and a library's own
+/// body can use the macro.
+#[test]
+fn cond_expand_in_a_library_body_asks_for_a_name_a_macro_made() {
+    let shim = "(define-library (shim)
+                  (import (scheme base))
+                  (export if-lib)
+                  (begin
+                    (define-syntax if-lib
+                      (syntax-rules ()
+                        ((_ lib yes no) (cond-expand ((library lib) yes) (else no)))))))";
+    let user = "(define-library (user)
+                  (import (scheme base) (shim))
+                  (export answers)
+                  (begin
+                    (define answers
+                      (list (if-lib (opt feature) 'yes 'no)
+                            (if-lib (shim) 'yes 'no)
+                            (if-lib (scheme base) 'yes 'no)
+                            (if-lib (opt missing) 'yes 'no)))))";
+    let feature = "(define-library (opt feature)
+                     (import (scheme base)) (export) (begin))";
+    let program = format!("(import {BASE} (user)) answers");
+    let with = Map(vec![
+        ("(shim)", shim),
+        ("(user)", user),
+        ("(opt feature)", feature),
+    ]);
+    assert_eq!(run_with(&program, &with).unwrap(), "(yes yes yes no)");
+    let without = Map(vec![("(shim)", shim), ("(user)", user)]);
+    assert_eq!(run_with(&program, &without).unwrap(), "(no yes yes no)");
+    // A library the program defines itself.
+    let local = format!(
+        "(define-library (mine) (import {BASE}) (export) (begin))
+         (import {BASE}) {IF_LIB}
+         (if-lib (mine) 'yes 'no)"
+    );
+    assert_eq!(run_with(&local, &Map(vec![])).unwrap(), "yes");
+}
+
 /// Each library expands in a context of its own, and an importer remaps
 /// the macros it imports into its own (ADR 0015 #5). The same macro
 /// reached through two imports is still one binding, so a literal such as
