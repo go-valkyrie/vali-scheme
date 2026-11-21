@@ -15,8 +15,9 @@ set, as `CHANGE,PATCHSET` (`1261146,1`, say), optionally followed by the
 patch set's commit hash, `REV` below. `CHANGE` is a number, never a commit:
 don't pass it to git.
 
-Start with `.claude/skills/gerrit-review/scripts/review.sh init CHANGE
-PATCHSET`, adding the hash if you were given one. It fetches the patch set
+Start with `.claude/skills/gerrit-review/scripts/review.sh init $ARGUMENTS`:
+the change and patch set exactly as you were given them, and the hash if
+there is one. It fetches the patch set
 if it isn't here, leaving no ref behind, checks it against the hash, and
 says which commit it is: that commit is `REV` from then on.
 
@@ -26,7 +27,7 @@ Before reading the diff, gather what the change is part of, in this order,
 running the scripts from the repository root
 (`.claude/skills/gerrit-review/scripts/`, each described below):
 
-1. `review.sh init CHANGE PATCHSET [REV]`: starts your answer, fetching the
+1. `review.sh init CHANGE,PATCHSET [REV]`: starts your answer, fetching the
    patch set if it isn't here, and numbers the earlier threads
    (**Your answer**).
 2. `review.sh threads`: the earlier threads, numbered, each with its place,
@@ -317,7 +318,7 @@ nothing in it needs escaping:
 
 ```sh
 r=.claude/skills/gerrit-review/scripts/review.sh
-$r init CHANGE PATCHSET [REV]        # first, once (**Start here**)
+$r init CHANGE,PATCHSET [REV]        # first, once (**Start here**)
 $r threads                           # the earlier threads, numbered
 $r reply 3 --resolved <<'MSG'
 Patch set 5 settles this: `src/x.rs:40` now checks the bound.

@@ -7,7 +7,7 @@
 # posts: {review, codeReview, comments}, in .review/answer.json at the
 # repository's root (REVIEW_DIR moves it).
 #
-#   review.sh init [--force] CHANGE PATCHSET [REV]
+#   review.sh init [--force] CHANGE PATCHSET [REV]   (or CHANGE,PATCHSET)
 #                                          start an answer; fetches REV if needed
 #   review.sh threads                      the earlier threads, numbered
 #   review.sh reply N [--resolved | --unresolved]   message on stdin
@@ -64,8 +64,12 @@ case "$cmd" in
   init)
     force=false
     if [ "${1:-}" = --force ]; then force=true; shift; fi
+    # CHANGE,PATCHSET, as the skill is given it, or CHANGE PATCHSET.
+    case "${1:-}" in
+      *,*) set -- "${1%%,*}" "${1#*,}" "${@:2}" ;;
+    esac
     change_arg "${1:-}" "PATCHSET [REV]"
-    case "${2:-}" in "" | *[!0-9]*) die "usage: review.sh init CHANGE PATCHSET [REV]" ;; esac
+    case "${2:-}" in "" | *[!0-9]*) die "usage: review.sh init CHANGE,PATCHSET [REV], or CHANGE PATCHSET [REV]" ;; esac
     rev=${3:-}
     if [ -z "$rev" ] || ! git cat-file -e "$rev^{commit}" 2> /dev/null; then
       fetched=$("$here/fetch.sh" "$1" "$2")
