@@ -696,24 +696,8 @@ fn syntax_below_a_library_with_only_syntax_rules_is_still_imported() {
     ]);
 }
 
-/// Whether artifacts are round-tripped (`VALI_ROUND_TRIP`), under which a
-/// library that makes syntax with `#'` is refused when it loads from its
-/// artifact: it links `%syntax-build`, which only Vali's own libraries may.
-/// That is a separate bug, present on main too, which the two tests below
-/// skip under it rather than hide.
-fn skip_round_trip(test: &str) -> bool {
-    let on = std::env::var_os("VALI_ROUND_TRIP").is_some();
-    if on {
-        eprintln!("skipping {test}: a user library using #' cannot load from its artifact");
-    }
-    on
-}
-
 #[test]
 fn run_time_syntax_is_reached_through_libraries_with_no_syntax_of_their_own() {
-    if skip_round_trip("run_time_syntax_is_reached_through_libraries") {
-        return;
-    }
     // `(w h)` makes a syntax object when called; `(w j)` and `(w k)` only
     // re-export it, and the program imports the last.
     let loader = Map(vec![
@@ -739,10 +723,24 @@ fn run_time_syntax_is_reached_through_libraries_with_no_syntax_of_their_own() {
 }
 
 #[test]
+fn a_library_that_makes_syntax_in_a_procedure_loads_from_its_artifact() {
+    // Issue 63: `#'` in a plain procedure compiles to `%syntax-build`,
+    // which the load check refused for a user's library under
+    // `VALI_ROUND_TRIP`. The program is the issue's.
+    let loader = Map(vec![(
+        "(w h)",
+        "(define-library (w h) (import (scheme base)) (export h-stx)
+           (begin (define (h-stx) #'(foo bar))))",
+    )]);
+    let result = run_with(
+        "(import (scheme base) (scheme write) (w h)) (syntax->datum (h-stx))",
+        &loader,
+    );
+    assert_eq!(result.as_deref(), Ok("(foo bar)"));
+}
+
+#[test]
 fn a_transformer_reaches_helpers_behind_a_facade_of_syntax_rules() {
-    if skip_round_trip("a_transformer_reaches_helpers_behind_a_facade") {
-        return;
-    }
     // The macro in `(x h)` calls `make-stx` of `(x h2)` while expanding;
     // `(x m)` between them holds only a syntax-rules macro.
     let loader = Map(vec![

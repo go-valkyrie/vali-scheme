@@ -76,6 +76,14 @@ pub(crate) const QUOTE_SYNTAX: &str = "%quote-syntax";
 pub(crate) const SYNTAX_MATCH: &str = "%syntax-match";
 pub(crate) const SYNTAX_BUILD: &str = "%syntax-build";
 
+/// Every internal primitive that compiled syntax lowers to: the core forms
+/// `quote-syntax`, `syntax-case` and `syntax` (`#'`) emit them, and the
+/// derived forms are macros over those. They appear in procedures as in
+/// transformers. Each looks its tables up in the unit it names, among
+/// every loaded library's, so the load check lets a library call them
+/// only for its own unit.
+pub(crate) const SYNTAX_PRIMITIVES: [&str; 3] = [QUOTE_SYNTAX, SYNTAX_MATCH, SYNTAX_BUILD];
+
 /// A new phase-1 isolate, with the standard procedures and the syntax
 /// procedures.
 /// An isolate for expansion-time code. It counts references, deferred, so

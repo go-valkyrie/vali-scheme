@@ -675,7 +675,12 @@ impl Expander {
             }
         }
         let ir = vali_dist::decode(section("invoke")?).map_err(|e| fail(e.to_string()))?;
-        if !own && let Some(name) = links_internal(&ir, MACRO_PRIMITIVES) {
+        // Compiled syntax's primitives are allowed in a procedure as in a
+        // transformer, but only called for the library's own unit, which
+        // is checked once its key is known.
+        let mut linkable = MACRO_PRIMITIVES.to_vec();
+        linkable.extend(SYNTAX_PRIMITIVES);
+        if !own && let Some(name) = links_internal(&ir, &linkable) {
             return Err(fail(format!(
                 "it links {name}, which only Vali's own libraries may"
             )));
@@ -705,7 +710,7 @@ impl Expander {
             repl: false,
             syntax: None,
             key: identity.to_owned(),
-            ir: Some(ir),
+            ir: Some(ir.clone()),
             export_hash: None,
             artifact_hash: None,
             source: None,
@@ -721,9 +726,28 @@ impl Expander {
             if record.identity != identity {
                 return Err(fail(format!("the artifact is {}'s", record.identity)));
             }
+            // A library's key names its compiled syntax among every
+            // loaded unit's, and is its identity: only a program's or a
+            // REPL's input, which no artifact holds, has a hashed one. An
+            // artifact that chose another could take over the tables of
+            // the library whose key it chose. Nothing loaded may share it.
+            if record.key != identity {
+                return Err(fail(format!("its key is {}, not its identity", record.key)));
+            }
+            if self.units[..index].iter().any(|u| u.key == record.key) {
+                return Err(fail("its key is another unit's".to_owned()));
+            }
             let syntax = artifact::decode(section("syntax")?, &resolve, &mut self.sources)?;
             self.check_export(index, own, &record, &syntax)
                 .map_err(fail)?;
+            // The primitives that build and match syntax read the tables
+            // of the unit they name, and those hold every loaded library's,
+            // so code may call them only for its own unit.
+            if !own && let Some(name) = misuses_syntax_primitive(&ir, &record.key) {
+                return Err(fail(format!(
+                    "it uses {name} other than to call it for its own syntax"
+                )));
+            }
             let unit = &mut self.units[index];
             // The records of what it imports must agree.
             if record.imports != imported {
@@ -816,12 +840,19 @@ impl Expander {
                         m.name
                     ));
                 }
+                if !own && let Some(name) = misuses_syntax_primitive(&p.ir, &record.key) {
+                    return Err(format!(
+                        "the transformer {} uses {name} other than to call it for its own \
+                         syntax",
+                        m.name
+                    ));
+                }
                 self.check_links(&p.ir)
                     .map_err(|e| format!("the transformer {} {e}", m.name))?;
             }
         }
         if !own {
-            let mut allowed = vec![QUOTE_SYNTAX, SYNTAX_MATCH, SYNTAX_BUILD];
+            let mut allowed = SYNTAX_PRIMITIVES.to_vec();
             allowed.extend(MACRO_PRIMITIVES);
             for m in syntax.macros.values() {
                 if let Transformer::Procedure(p) = &m.transformer
@@ -1329,6 +1360,138 @@ fn links_internal(ir: &vali_dist::Module, allowed: &[&str]) -> Option<String> {
                 || matches!(g.link, vali_dist::GlobalLink::Native(_))
         })
         .map(|g| g.name.to_string())
+}
+
+/// Checks that `ir` uses the syntax primitives only as the expander emits
+/// them: each read of one is the callee of calls whose unit argument (the
+/// first, or for `%syntax-match` the second) is the string constant `key`,
+/// the unit whose tables back the library, and
+/// is used for nothing else. The primitives look up the unit they are
+/// given in tables that hold every loaded library's, so a call naming
+/// another unit, a computed name, or the primitive passed on as a value
+/// would reach what is not the library's own. Returns the primitive that
+/// is not.
+fn misuses_syntax_primitive(ir: &vali_dist::Module, key: &str) -> Option<String> {
+    use vali_dist::{Operand, Term, Value};
+    let is_key = |op: &Operand, consts: &HashMap<u32, u32>| {
+        let id = match op {
+            Operand::Const(c) => Some(c.0),
+            Operand::Var(v) => consts.get(&v.0).copied(),
+        };
+        id.and_then(|id| ir.constants.get(id as usize))
+            .is_some_and(|c| matches!(c, vali_dist::Constant::String(s) if &**s == key))
+    };
+    for function in &ir.functions {
+        // What each variable is bound to, where it is a primitive or a
+        // constant, and how many times each is bound at all.
+        let mut bound: HashMap<u32, u32> = HashMap::new();
+        let mut prims: HashMap<u32, &str> = HashMap::new();
+        let mut consts: HashMap<u32, u32> = HashMap::new();
+        for v in function.params.iter().chain(&function.free) {
+            *bound.entry(v.0).or_default() += 1;
+        }
+        for term in &function.terms {
+            match term {
+                Term::Let { var, value, .. } => {
+                    *bound.entry(var.0).or_default() += 1;
+                    match value {
+                        Value::Global(g) => {
+                            if let Some(g) = ir.globals.get(g.0 as usize)
+                                && matches!(g.link, vali_dist::GlobalLink::Primitive)
+                                && SYNTAX_PRIMITIVES.contains(&&*g.name)
+                            {
+                                prims.insert(var.0, &g.name);
+                            }
+                        }
+                        Value::Operand(Operand::Const(c)) => {
+                            consts.insert(var.0, c.0);
+                        }
+                        _ => {}
+                    }
+                }
+                Term::Join { params, .. } => {
+                    for v in params {
+                        *bound.entry(v.0).or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if prims.is_empty() {
+            continue;
+        }
+        // Every use of a variable, and those that are calls with the key.
+        let mut uses: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut note = |op: &Operand, good: bool| {
+            if let Operand::Var(v) = op {
+                let u = uses.entry(v.0).or_default();
+                u.0 += 1;
+                u.1 += u32::from(good);
+            }
+        };
+        let mut call = |callee: &Operand, args: &[Operand]| {
+            // `%syntax-match` takes the syntax it matches before the unit.
+            let good = match callee {
+                Operand::Var(v) => prims.get(&v.0).is_some_and(|name| {
+                    let at = usize::from(*name == SYNTAX_MATCH);
+                    args.get(at).is_some_and(|a| is_key(a, &consts))
+                }),
+                Operand::Const(_) => false,
+            };
+            note(callee, good);
+            for a in args {
+                note(a, false);
+            }
+        };
+        for term in &function.terms {
+            match term {
+                Term::Let { value, .. } => match value {
+                    Value::Operand(a) | Value::Box(a) | Value::Unbox(a) => {
+                        call(a, &[]);
+                    }
+                    Value::Primitive { args, .. } | Value::CallDirect { args, .. } => {
+                        for a in args {
+                            call(a, &[]);
+                        }
+                    }
+                    Value::Call { callee, args } => call(callee, args),
+                    Value::Closure { free, .. } => {
+                        for a in free {
+                            call(a, &[]);
+                        }
+                    }
+                    Value::Global(_) => {}
+                    Value::SetGlobal(_, a) => call(a, &[]),
+                    Value::SetBox(a, b) => {
+                        call(a, &[]);
+                        call(b, &[]);
+                    }
+                    Value::SetFree { closure, value, .. } => {
+                        call(closure, &[]);
+                        call(value, &[]);
+                    }
+                },
+                Term::Join { .. } => {}
+                Term::Jump { args, .. } | Term::TailCallDirect { args, .. } => {
+                    for a in args {
+                        call(a, &[]);
+                    }
+                }
+                Term::If { test, .. } => call(test, &[]),
+                Term::Return(a) => call(a, &[]),
+                Term::TailCall { callee, args, .. } => call(callee, args),
+            }
+        }
+        for (var, name) in prims {
+            let (total, good) = uses.get(&var).copied().unwrap_or_default();
+            // A variable bound twice might be a primitive at one binding
+            // and anything at the other.
+            if bound[&var] != 1 || total != good {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// The first of `ir`'s globals that is an isolate global, a REPL's variable:
