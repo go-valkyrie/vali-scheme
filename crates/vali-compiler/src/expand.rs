@@ -51,7 +51,9 @@ use crate::CompileError;
 use crate::ast::{Expr, Lambda, LambdaId, VarId, VarInfo};
 use crate::library::{ExportSpec, ImportSet, LibraryForm, LibraryName};
 use crate::pattern::{self, Builder, Match, Pattern, Spelling, Template, Vars};
-use crate::phase::{self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, Shared};
+use crate::phase::{
+    self, Compiled, QUOTE_SYNTAX, SYNTAX_BUILD, SYNTAX_MATCH, SYNTAX_PRIMITIVES, Shared,
+};
 
 /// How many macro steps may produce one form, counting both uses nested
 /// in expressions and a body's forms that expand into further uses, so a
