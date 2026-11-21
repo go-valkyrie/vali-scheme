@@ -39,5 +39,6 @@ Each record states one decision about Vali's design: the context that forced it,
 | [0021](0021-portable-artifacts-and-platform-features.md) | Portable artifacts and platform features | Accepted, not built |
 | [0022](0022-lint-framework.md) | Lint framework | Accepted, not built |
 | [0023](0023-resource-limits.md) | Resource limits | Accepted |
+| [0026](0026-async-integration.md) | Async integration | Accepted, not built |
 
 0003 stays a proposal: all five strategy variants stay built and tested until the optimising compiler's ownership inference can be measured too.
