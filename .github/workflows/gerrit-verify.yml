@@ -306,8 +306,10 @@ jobs:
           cp .github/review/watch-session.sh .github/review/session-log.jq "$viewer/"
           stop=$(cat /proc/sys/kernel/random/uuid)
           echo "::stop-commands::$stop"
-          # (Its stderr would only say it was stopped.)
-          "$viewer/watch-session.sh" "$session" 2> /dev/null &
+          # (Its stderr would only say it was stopped.) It runs in a process
+          # group of its own, which it leads, so stopping the group stops
+          # every log it follows, a workflow's subagents' among them.
+          setsid "$viewer/watch-session.sh" "$session" 2> /dev/null &
           watcher=$!
           # The token goes in on stdin, so it is in no environment or
           # command line; it is good for this patch set and a short while.
@@ -329,8 +331,7 @@ jobs:
               > "$RUNNER_TEMP/muse-review/review.json" || status=$?
           # Let the viewer print the last of the log, then stop it.
           sleep 2
-          pkill -P "$watcher" 2> /dev/null || true
-          kill "$watcher" 2> /dev/null || true
+          kill -- -"$watcher" 2> /dev/null || true
           echo "::$stop::"
           exit "$status"
 
