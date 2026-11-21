@@ -1,0 +1,106 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "459610bc_4487d542",
+        "filename": "docs/adr/0004-frames-and-continuations.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 59,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-21T07:23:39Z",
+      "side": 1,
+      "message": "Nit: \"The isolate then runs another of its ready tasks, or, if none is ready, its future returns `Pending`\" describes step two\u0027s scheduler (ADR 0026 #33). In step one each host call is its own future, and a pause just makes that call\u0027s poll return `Pending`; there is no isolate future and no ready queue.",
+      "revId": "dc833695aa17e375a7f704d4fe98925e5cd07ab2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "8777870a_a71e54a8",
+        "filename": "docs/adr/0016-rust-bridges-and-objects.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 60,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-21T07:23:39Z",
+      "side": 1,
+      "message": "Not blocking: this reverses behaviour that is built, and the text doesn\u0027t say so.\n\nToday a bridge\u0027s panic becomes a catchable Scheme error (`bridge.rs:910`, \"A panic becomes an error naming the function\"), and only a primitive\u0027s panic poisons. That one returns `Error::Poisoned` rather than re-raising (`vm.rs:1837`). The comment there gives the reason: a bridge\u0027s panic \"cannot touch the heap\". The new rule poisons for both and re-raises, but this item reads as built, with no \"Not built yet\".\n\nOn the merits: an async bridge\u0027s future holds no Scheme value and runs outside the lock, so its panic can\u0027t corrupt anything. On a `SharedIsolate` serving many requests, one bridge\u0027s `unwrap` on bad input now poisons every call in flight. \"For one rule\" may be worth that, but the record should say why it outweighs the property the code relies on today.",
+      "revId": "dc833695aa17e375a7f704d4fe98925e5cd07ab2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "7c1333a7_d0126ec7",
+        "filename": "docs/adr/0026-async-integration.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 30,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-21T07:23:39Z",
+      "side": 1,
+      "message": "A `std::sync::Mutex` taken inside `poll` blocks the executor thread of every call that waits for it.\n\n\"A wait for it lasts one poll\", but one poll is the other call\u0027s whole synchronous stretch: `poll_budget` defaults to `None` (item 9), so a poll runs until its call finishes or reaches an async bridge. Meanwhile each other call\u0027s poll sits in `lock()` on its own worker thread. With N concurrent requests on one `SharedIsolate`, up to N−1 Tokio workers are blocked at once, which is the \"Scheme holding a worker thread\" the Context sets out to prevent. Even with the recommended 4,096 budget, each waiting thread blocks for 50 to 200 µs per poll, again and again.\n\nFix: hand the isolate over without blocking, using only `std`. A poll does `try_lock`; on contention it registers its waker in the shared state\u0027s waiter queue and returns `Pending`, and the poll that unlocks wakes the next waiter. The synchronous `with`, `call` and `Call::run()` can keep blocking, since a synchronous caller chose to wait.",
+      "revId": "dc833695aa17e375a7f704d4fe98925e5cd07ab2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "e97ec6df_d9a3d675",
+        "filename": "docs/adr/0026-async-integration.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 37,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-21T07:23:39Z",
+      "side": 1,
+      "message": "Fuel doesn\u0027t bound work done in Rust, so neither a fuel limit nor the poll budget bounds time.\n\n\"A call into Rust spends none\" also covers Vali\u0027s own primitives, and many of them do work that grows with their input. In a debug build:\n\n```\n(vector-fill! v 1)                  ; 20M elements: 0.99 s, about one unit\n(expt 3 2000000)                    ; 0.58 s, about one unit\n(let loop ((i 0)) ... (vector-set! v i 2) ...)  ; 20M iterations: 7.7 s, 20M units\n```\n\nThe same work costs about one unit in a primitive and 20M units in Scheme. A metered call limited to N units can do about N × (the largest input the memory limit allows) work by calling `vector-fill!` or `expt` in a loop. A `poll_budget` of 4,096 likewise allows 4,096 such calls per poll, so item 12\u0027s \"about 50 to 200 microseconds\" holds only for code that doesn\u0027t call them. The Consequences line \"code that must be bounded runs on a metered isolate or with a `poll_budget`\" therefore doesn\u0027t hold for a sandbox.\n\nFix: make fuel a measure of work, not of Scheme steps. A primitive whose cost grows with its input charges for it, for example one unit per k elements, bytes or bignum limbs, and checks the deadline before a long one. Bridges get a way to charge too, as Wasmtime lets host functions consume fuel. Or, at the least, the record should say that fuel bounds Scheme steps only, and what bounds a single primitive.",
+      "revId": "dc833695aa17e375a7f704d4fe98925e5cd07ab2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "84f7fe7f_b47b52da",
+        "filename": "docs/adr/0026-async-integration.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 39,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-21T07:23:39Z",
+      "side": 1,
+      "message": "A `SchemeFn` callback lets a fuel-limited call escape its limit.\n\nThis item makes a `SchemeFn` callback \"a new `Call` with its own\" budget, and a new `Call`\u0027s default `fuel` is `None`, unlimited. So a call bound with `fuel: Some(n)` can pass `(lambda () (let loop () (loop)))` to any async bridge that takes a `SchemeFn`, such as a row-callback or event-handler bridge. The bridge\u0027s future then runs it with no limit, and only the optional isolate-wide cap (item 11) stops it. That is the same escape this item closes for `(vali async)` futures.\n\nFix: a `SchemeFn` converted during a call takes that call\u0027s `CallOptions` and charges its fuel to that call while the call lives, or to the isolate cap afterwards. Alternatively, this item and the Consequences should say that per-call limits do not cover callbacks, and that a sandboxing host must set the cap.",
+      "revId": "dc833695aa17e375a7f704d4fe98925e5cd07ab2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "f91f5b02_5fd767fa",
+        "filename": "docs/adr/0026-async-integration.md",
+        "patchSetId": 3
+      },
+      "lineNbr": 84,
+      "author": {
+        "id": 1040172
+      },
+      "writtenOn": "2026-11-21T07:23:39Z",
+      "side": 1,
+      "message": "Dropping a `Call` needs the isolate, and the record doesn\u0027t say how a drop reaches it.\n\n- **Owned isolate:** a `Call` is driven with `run_on(\u0026mut isolate)` and holds no reference to it. When a host drops a `Call` that came back in `OutOfFuel`, its parked task is in `Cx`\u0027s table (item 21), and `Drop` can\u0027t reach it to do this item\u0027s teardown (`release_frames`, releasing the `%catch` handlers, cutting the stack).\n- **Shared isolate:** `Drop` can reach the isolate through the `Arc`, but taking the lock blocks the dropping thread while another call polls. A Tokio timeout firing (item 7) is that case. Worse, a drop under the lock deadlocks: for example in a bridge\u0027s synchronous part that drops a `SchemeFn`\u0027s `Call` it held, or uses `?` on a `Stopped`. Item 4\u0027s thread-local flag can\u0027t turn a `Drop` into a condition.\n\nFix: do what a dropped `Handle` already does (`handle.rs:559`). `Drop` marks the task discarded and pushes it on a lock-free list, and the isolate tears it down at its next entry or poll. The memory and stack limits keep counting it until then. The same question decides where a parked task\u0027s bridge future lives. Item 19 puts it in `Task::awaiting`, inside `Cx` behind the lock, while item 20 polls it outside the lock. It belongs with the `Call`.",
+      "revId": "dc833695aa17e375a7f704d4fe98925e5cd07ab2",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
